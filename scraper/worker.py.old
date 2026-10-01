@@ -1,0 +1,463 @@
+import asyncio
+import random
+import time
+
+import aiohttp
+
+from .config import ConfigStore, CookieFileWatcher
+from .constants import BASE_DIR, DEFAULT_CONNECT_TIMEOUT_SECONDS, PROXY_HOST, STORE_ENDPOINT_OVERRIDE, log
+from .health import ExecutorHandle, ExecutorHealth
+from .http_client import CurlSessionHandle, fetch_comments
+from .pipeline import build_payload, send_batch_to_store
+from .state import BackoffState, GroupState, SeenCache, TokenBucket
+
+# Дефолтные базовые интервалы опроса по тиру, если не заданы в config.yaml
+# (tier_base_interval_seconds). Это ТОЛЬКО стартовая точка — дальше
+# GroupState.record_yield() сам подстраивает interval по факту выхода.
+_DEFAULT_TIER_INTERVALS = {"hot": 3, "medium": 15, "cold": 60}
+
+
+async def account_worker(
+    account: dict,
+    config: ConfigStore,
+    bucket: TokenBucket,
+    seen: SeenCache,
+    phase_offset: float,
+    store_session: aiohttp.ClientSession,
+    http_executor: ExecutorHandle,
+    groups: list[dict],
+    executor_health: ExecutorHealth | None = None,
+):
+    """Один аккаунт теперь опрашивает НЕСКОЛЬКО групп сабреддитов (см.
+    scraper/grouping.py), а не один статичный список. У каждой группы —
+    своё расписание (GroupState.next_poll_at), которое адаптируется по
+    фактическому выходу этой группы. Цикл воркера каждую итерацию берёт
+    группу с самым близким next_poll_at (с учётом account_not_before, см.
+    ниже), ждёт до этого момента (если нужно) и опрашивает именно её.
+
+    Реалистичные интервалы опроса разных сабов не совпадают друг с
+    другом с самого начала (см. staggering ниже) и продолжают
+    расходиться по мере того, как каждая группа подстраивает свой
+    interval — это ещё один уровень анти-паттерна поверх джиттера,
+    описанного в ARCHITECTURE.md.
+
+    Cookies аккаунта тоже больше не статичны на весь срок жизни воркера:
+    `cookie_file` может обновляться ВНЕШНИМ процессом
+    (scripts/refresh_cookies.py, Playwright-джоб по расписанию, см.
+    README) поверх уже запущенного контейнера. `CookieFileWatcher`
+    (scraper/config.py) дёшево проверяет mtime файла на каждой итерации
+    основного цикла (не чаще `cookie_reload_check_interval_seconds`) и,
+    если файл реально поменялся, перечитывает его и обновляет
+    `session.cookie_jar` — следующий же HTTP-запрос curl_cffi (который
+    берёт cookies прямо из этого jar'а перед отправкой, см.
+    http_client.py) уйдёт уже с новыми cookies, без рестарта воркера.
+    Если джоб не запущен/не настроен — файл просто никогда не меняется,
+    watcher молча ничего не делает, поведение как раньше.
+
+    `http_executor` — ExecutorHandle (scraper/health.py), а не голый
+    ThreadPoolExecutor: пул под блокирующие вызовы curl_cffi может быть
+    пересоздан "на лету" из health_report_loop в main.py, если старый
+    деградировал (зависшие потоки на мёртвых прокси/DNS, которые Python
+    не может прервать снаружи). Здесь этот параметр только прокидывается
+    дальше в fetch_comments() как есть — резолвится он уже внутри
+    http_client.py, на каждый отдельный HTTP-запрос, а не один раз тут,
+    при старте воркера, — благодаря этому даже долгоживущий воркер,
+    который не падал и не перезапускался месяцами, подхватывает новый
+    пул сразу на следующем цикле опроса.
+
+    `curl_session` — CurlSessionHandle (scraper/http_client.py), создаётся
+    один раз здесь, при старте воркера, и передаётся в fetch_comments()
+    как есть на каждый цикл: impersonate и proxy_url фиксированы на
+    аккаунт и заданы один раз при создании самого Session внутри
+    CurlSessionHandle._build(), а не передаются отдельными аргументами на
+    каждый отдельный HTTP-запрос (см. docstring CurlSessionHandle и
+    _fetch_comments_page в http_client.py). Если из-за таймаута
+    http_client.py вызовет curl_session.swap() — следующий же запрос
+    этого же воркера (любая его группа) на следующем цикле уйдёт уже в
+    новый, чистый Session, без рестарта самого account_worker."""
+    name = account["name"]
+    cookie_file = BASE_DIR / account["cookie_file"]
+    proxy_port = account["proxy_port"]
+    proxy_url = f"http://{PROXY_HOST}:{proxy_port}"
+
+    if not cookie_file.exists():
+        log.error("[%s] Файл с cookies не найден: %s — воркер не запущен", name, cookie_file)
+        return
+
+    if not groups:
+        log.warning("[%s] нет назначенных сабреддитов (groups пуст) — воркер не запущен", name)
+        return
+
+    # См. CookieFileWatcher в scraper/config.py и docstring выше — тот
+    # же принцип, что у ConfigStore для config.yaml, но на уровне одного
+    # файла cookies/account_N.json и без отдельной фоновой задачи
+    # (проверяется прямо в цикле ниже, вместе с остальным hot-reload
+    # конфига).
+    cookie_watcher = CookieFileWatcher(
+        cookie_file,
+        min_check_interval=config.get("cookie_reload_check_interval_seconds", 30),
+    )
+    cookies = cookie_watcher.load_if_changed(force=True)
+    if cookies is None:
+        log.error("[%s] Не удалось прочитать cookies из %s — воркер не запущен", name, cookie_file)
+        return
+
+    user_agent = account.get("user_agent") or config.get("user_agent", "Mozilla/5.0")
+    impersonate = account.get("impersonate") or config.get("impersonate", "chrome")
+    headers = {
+        "User-Agent": user_agent,
+        "Accept": "application/json, text/plain, */*",
+        "Accept-Language": "en-US,en;q=0.9",
+    }
+
+    # Переиспользуемая curl_cffi.Session на аккаунт (keep-alive TCP/TLS к
+    # Reddit через прокси, см. CurlSessionHandle в http_client.py).
+    # impersonate и proxies фиксированы здесь, один раз на весь срок
+    # жизни воркера — fetch_comments() дальше принимает именно этот
+    # handle, а не голые proxy_url/impersonate на каждый вызов.
+    curl_session = CurlSessionHandle(
+        impersonate=impersonate,
+        proxies={"http": proxy_url, "https": proxy_url},
+    )
+
+    backoff = BackoffState(
+        base_seconds=config.get("base_backoff_seconds", 5),
+        max_seconds=config.get("max_backoff_seconds", 300),
+        max_auth_errors=config.get("max_consecutive_auth_errors", 5),
+    )
+
+    tier_intervals = {**_DEFAULT_TIER_INTERVALS, **config.get("tier_base_interval_seconds", {})}
+    # Группа может нести собственный base_interval_seconds (см.
+    # config.yaml:dedicated_groups и main.py:_build_groups) — например,
+    # r/all, который должен опрашиваться со своим интервалом независимо
+    # от tier_base_interval_seconds её тира. Если группа его не несёт
+    # (обычная группа из CSV-раскладки) — берём интервал по тиру, как
+    # раньше.
+    group_states = [
+        GroupState(
+            g["subs"], g["tier"],
+            g.get("base_interval_seconds", tier_intervals.get(g["tier"], 10)),
+        )
+        for g in groups
+    ]
+
+    # Стартовое расписание: не сразу все группы разом (это было бы видно
+    # как залп N запросов в первую же секунду), а размазано в пределах
+    # собственного интервала каждой группы + сдвиг фазы аккаунта.
+    start_at = time.monotonic() + phase_offset
+    for gs in group_states:
+        gs.next_poll_at = start_at + random.uniform(0, gs.interval)
+
+    # Общий "пол" на весь аккаунт: раньше этого момента НИ ОДНА группа
+    # этого аккаунта не должна опрашиваться. X-Ratelimit-* отражает лимит
+    # на cookies/IP аккаунта целиком, а не на конкретную группу/саб —
+    # поэтому это состояние на уровне аккаунта, а не GroupState.
+    # Растёт монотонно (см. блок X-Ratelimit ниже): более поздний ответ с
+    # меньшим rl_interval не откатывает его назад. Сам rl_interval при
+    # этом всегда обрезается сверху (ratelimit_max_interval_seconds,
+    # см. ниже) — без этого один аномальный/повреждённый заголовок
+    # X-Ratelimit-Reset (баг Reddit/CDN, кривой прокси) мог бы застопорить
+    # весь аккаунт на часы или дни: parse_ratelimit_headers() уже
+    # отбраковывает совсем безумные значения на входе, но верхний потолок
+    # здесь — это второй, независимый рубеж защиты именно от залипания
+    # account_not_before.
+    account_not_before = 0.0
+
+    log.info(
+        "[%s] Старт (прокси %s, фаза +%.1fs, impersonate=%s, %d групп: %s)",
+        name, proxy_url, phase_offset, impersonate, len(group_states),
+        ", ".join(f"{g.tier}x{len(g.subs)}" for g in group_states),
+    )
+
+    async with aiohttp.ClientSession(cookies=cookies, headers=headers) as session:
+        while True:
+            now = time.monotonic()
+            gs = min(group_states, key=lambda g: max(g.next_poll_at, account_not_before))
+            wait = max(gs.next_poll_at, account_not_before) - now
+            if wait > 0:
+                await asyncio.sleep(wait)
+
+            cycle_start = time.monotonic()
+
+            fetch_limit = config.get("fetch_limit", 50)
+            max_age = config.get("max_age_seconds", 15)
+            pagination_max_pages = config.get("pagination_max_pages", 3)
+            pagination_delay_min = config.get("pagination_delay_min_seconds", 0.4)
+            pagination_delay_max = config.get("pagination_delay_max_seconds", 1.5)
+            jitter_ratio = config.get("poll_jitter_ratio", 0.25)
+            respect_ratelimit_headers = config.get("respect_ratelimit_headers", True)
+            ratelimit_safety_margin = config.get("ratelimit_safety_margin", 0.85)
+            ratelimit_jitter_ratio = config.get("ratelimit_jitter_ratio", 0.15)
+            # Верхний потолок на rl_interval / account_not_before — см.
+            # комментарий у объявления account_not_before выше. Дефолт
+            # 900s (15 мин) — заведомо больше любого честного окна
+            # X-Ratelimit-Reset у Reddit (обычно минуты), но всё ещё
+            # намного меньше "застрял на часы/дни".
+            ratelimit_max_interval = config.get("ratelimit_max_interval_seconds", 900)
+            timeout = config.get("request_timeout_seconds", 10)
+            connect_timeout = config.get("connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS)
+            token_wait_timeout = config.get("token_wait_timeout_seconds", 0.5)
+            store_endpoint = STORE_ENDPOINT_OVERRIDE or config.get("store_endpoint")
+            batch_max_items = config.get("batch_max_items", 500)
+            base_url = config.get("reddit_base_url", "https://www.reddit.com")
+            adaptive_cfg = config.get("adaptive_scheduling", {})
+
+            # ---- hot-reload cookies (см. CookieFileWatcher выше и
+            #      scripts/refresh_cookies.py) — дёшево (os.stat, не
+            #      чаще min_check_interval), реально читает файл только
+            #      если он поменялся с прошлого раза. Если джоб не
+            #      запущен/не настроен — файл не меняется, тут просто
+            #      ничего не происходит. ----
+            cookie_watcher.min_check_interval = config.get("cookie_reload_check_interval_seconds", 30)
+            new_cookies = cookie_watcher.load_if_changed()
+            if new_cookies is not None:
+                session.cookie_jar.clear()
+                session.cookie_jar.update_cookies(new_cookies)
+                log.info(
+                    "[%s] cookies обновлены из %s (%d шт.) — подхвачены без рестарта воркера",
+                    name, cookie_file, len(new_cookies),
+                )
+
+            bucket.update_rate(config.get("target_rate_per_second", 25))
+
+            # ---- запрос: порядок сабов и fetch_limit пересобираются
+            #      каждый раз, чтобы URL/тело запроса не было буквально
+            #      одним и тем же строковым значением из цикла в цикл ----
+            subs_shuffled = gs.subs[:]
+            random.shuffle(subs_shuffled)
+            subs_joined = "+".join(subs_shuffled)
+            fetch_limit_jittered = max(10, int(fetch_limit * random.uniform(0.85, 1.0)))
+
+            # Для медленно опрашиваемых (холодных) групп используем
+            # эффективный max_age не ниже собственного интервала опроса
+            # группы (с запасом x1.2) — иначе комментарий, появившийся
+            # сразу после предыдущего опроса, успеет "протухнуть" по
+            # статичному max_age из config.yaml раньше, чем группа будет
+            # опрошена снова, и будет молча потерян. Конфиговый max_age
+            # остаётся нижней границей — для горячих групп ничего не
+            # меняется, если их текущий interval меньше max_age.
+            effective_max_age = max(max_age, gs.interval * 1.2)
+
+            if not subs_joined:
+                log.warning("[%s] у группы (%s) пустой список сабов", name, gs.tier)
+                gs.next_poll_at = cycle_start + gs.interval
+                continue
+
+            result = await fetch_comments(
+                session, base_url, subs_joined, fetch_limit_jittered, curl_session, timeout, name,
+                http_executor, effective_max_age, pagination_max_pages, connect_timeout,
+                pagination_delay_min, pagination_delay_max, executor_health,
+            )
+
+            # ---- обработка ошибок / backoff (общий на аккаунт, не на
+            #      группу — 429/бан не привязаны к конкретному сабу) ----
+            if result.error_kind == "rate_or_server":
+                delay = backoff.register_rate_or_server_error()
+                if result.retry_after:
+                    delay = max(delay, result.retry_after)
+                log.warning(
+                    "[%s] группа(%s) %s — backoff %.1fs (подряд ошибок: %d)",
+                    name, gs.tier, result.status, delay, backoff.consecutive_errors,
+                )
+                gs.next_poll_at = time.monotonic() + gs.interval
+                await asyncio.sleep(delay)
+                continue
+
+            if result.error_kind == "auth":
+                delay, should_stop = backoff.register_auth_error()
+                if should_stop:
+                    log.error(
+                        "[%s] %s подряд %d раз — похоже, cookies протухли или аккаунт забанен. "
+                        "Воркер остановлен, обнови cookies и перезапусти.",
+                        name, result.status, backoff.consecutive_auth_errors,
+                    )
+                    return
+                log.warning(
+                    "[%s] %s — backoff %.1fs (подряд auth-ошибок: %d/%d)",
+                    name, result.status, delay, backoff.consecutive_auth_errors, backoff.max_auth_errors,
+                )
+                gs.next_poll_at = time.monotonic() + gs.interval
+                await asyncio.sleep(delay)
+                continue
+
+            if result.error_kind == "network":
+                delay = backoff.register_rate_or_server_error()
+                gs.next_poll_at = time.monotonic() + gs.interval
+                await asyncio.sleep(min(delay, gs.interval * 3))
+                continue
+
+            # ---- успешный ответ ----
+            backoff.register_success()
+            comments = result.comments
+
+            payloads = []
+            for c in comments:
+                p = build_payload(c)
+                if p is None:
+                    continue
+                if p["_age_seconds"] > effective_max_age:
+                    continue
+                payloads.append(p)
+
+            payloads.sort(key=lambda p: p["_age_seconds"])
+
+            to_send: list[dict] = []
+            dropped_dup = dropped_rate = 0
+            for p in payloads:
+                if not await seen.try_claim(p["external_id"]):
+                    dropped_dup += 1
+                    continue
+
+                got_token = await _acquire_with_retry(bucket, token_wait_timeout)
+                if not got_token:
+                    await seen.release(p["external_id"])
+                    dropped_rate += 1
+                    continue
+
+                to_send.append(p)
+
+            sent = 0
+            if to_send:
+                released_ids: set[str] = set()
+                try:
+                    ok_flags = await send_batch_to_store(
+                        store_session, store_endpoint, to_send, name, batch_max_items
+                    )
+                    for p, ok in zip(to_send, ok_flags):
+                        if ok:
+                            await seen.confirm(p["external_id"])
+                            released_ids.add(p["external_id"])
+                            sent += 1
+                            log.info(
+                                "[%s] OK  %-12s age=%.1fs  %s",
+                                name, p["external_id"], p["_age_seconds"],
+                                p["content"][:60].replace("\n", " "),
+                            )
+                        else:
+                            await seen.release(p["external_id"])
+                            released_ids.add(p["external_id"])
+                finally:
+                    for p in to_send:
+                        if p["external_id"] not in released_ids:
+                            await seen.release(p["external_id"])
+
+            if sent or dropped_rate or to_send:
+                not_confirmed = len(to_send) - sent
+                log.info(
+                    "[%s] группа(%s, %d сабов) цикл: получено=%d свежих=%d к_отправке=%d "
+                    "отправлено=%d не_подтверждено=%d дублей=%d срезано_лимитом=%d интервал=%.1fs",
+                    name, gs.tier, len(gs.subs), len(comments), len(payloads), len(to_send), sent,
+                    not_confirmed, dropped_dup, dropped_rate, gs.interval,
+                )
+
+            # ---- адаптация интервала ЭТОЙ группы по фактическому
+            #      выходу (число свежих айтемов за цикл) ----
+            if adaptive_cfg.get("enabled", True):
+                gs.record_yield(len(payloads) - dropped_dup, adaptive_cfg)
+
+            elapsed = time.monotonic() - cycle_start
+            pages_count = getattr(result, "pages_fetched", 1)
+            adjusted_interval = gs.interval * max(1, pages_count)
+
+            # ---- адаптация по X-Ratelimit-* — общая для АККАУНТА, не
+            #      только для текущей группы: заголовки отражают лимит
+            #      целиком на cookies/IP этого аккаунта, а не на
+            #      конкретный саб. Поэтому при близком исчерпании лимита
+            #      двигаем общий account_not_before, который учитывается
+            #      при выборе ЛЮБОЙ группы этого аккаунта (см. min(...)
+            #      в начале цикла) — иначе следующая по расписанию группа
+            #      (с более коротким собственным интервалом) сразу же
+            #      уйдёт в те же 429, даже если для другой группы этого
+            #      же аккаунта интервал был честно посчитан и залогирован.
+            #      rl_interval в любом случае обрезается сверху
+            #      ratelimit_max_interval_seconds — см. комментарий у
+            #      account_not_before выше: это защита от того, что один
+            #      аномальный ответ (пусть даже прошедший санити-чек в
+            #      parse_ratelimit_headers) застопорит аккаунт на
+            #      неопределённо долгий срок, т.к. account_not_before
+            #      растёт только монотонно вверх и сам по себе ничем не
+            #      ограничен. ----
+            ratelimit = getattr(result, "ratelimit", None)
+            if respect_ratelimit_headers and ratelimit:
+                remaining = ratelimit["remaining"]
+                reset = ratelimit["reset"]
+                if remaining <= 1:
+                    rl_interval = reset + 1.0
+                elif reset > 0:
+                    rl_interval = reset / (remaining * ratelimit_safety_margin)
+                else:
+                    rl_interval = 0.0
+
+                if rl_interval > 0 and ratelimit_jitter_ratio > 0:
+                    rl_interval *= random.uniform(
+                        1 - ratelimit_jitter_ratio, 1 + ratelimit_jitter_ratio
+                    )
+
+                if rl_interval > ratelimit_max_interval:
+                    log.warning(
+                        "[%s] X-Ratelimit дал аномально большой интервал %.1fs "
+                        "(remaining=%.0f reset=%.1fs) — обрезаю до "
+                        "ratelimit_max_interval_seconds=%.0fs",
+                        name, rl_interval, remaining, reset, ratelimit_max_interval,
+                    )
+                    rl_interval = ratelimit_max_interval
+
+                if rl_interval > 0:
+                    candidate_not_before = time.monotonic() + rl_interval
+                    # Монотонный рост: более ранний (уже действующий) пол
+                    # не откатывается назад более коротким rl_interval,
+                    # который мог прийти со следующим ответом.
+                    if candidate_not_before > account_not_before:
+                        account_not_before = candidate_not_before
+                        log.info(
+                            "[%s] X-Ratelimit: remaining=%.0f reset=%.1fs -> аккаунт "
+                            "не опрашивается ближайшие %.1fs (ни одной из его групп)",
+                            name, remaining, reset, rl_interval,
+                        )
+
+            base_sleep = max(1.0, adjusted_interval - elapsed)
+            jittered_sleep = base_sleep * random.uniform(1 - jitter_ratio, 1 + jitter_ratio)
+            candidate_next = cycle_start + jittered_sleep
+            # Не откатываем назад то, что уже могло быть выставлено выше
+            # (например, если group_states делят один и тот же gs с уже
+            # более поздним next_poll_at из другого источника).
+            gs.next_poll_at = max(gs.next_poll_at, candidate_next)
+
+
+async def _acquire_with_retry(bucket: TokenBucket, deadline: float) -> bool:
+    start = time.monotonic()
+    while True:
+        if await bucket.try_acquire():
+            return True
+        if time.monotonic() - start >= deadline:
+            return False
+        await asyncio.sleep(0.02)
+
+
+async def supervised(
+    coro_fn,
+    *args,
+    name: str = "worker",
+    base_backoff: float = 2.0,
+    max_backoff: float = 60.0,
+    **kwargs,
+):
+    """Перезапускает coro_fn(*args, **kwargs), если она упала с
+    необработанным исключением, вместо того чтобы уронить весь
+    asyncio.gather(). Нормальный return (воркер сам решил завершиться)
+    не перезапускается — перезапуск только при Exception."""
+    attempt = 0
+    while True:
+        try:
+            await coro_fn(*args, **kwargs)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            attempt += 1
+            delay = min(max_backoff, base_backoff * (2 ** (attempt - 1)))
+            log.exception(
+                "[%s] воркер упал (попытка %d), рестарт через %.1fs",
+                name, attempt, delay,
+            )
+            await asyncio.sleep(delay)
