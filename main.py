@@ -10,8 +10,12 @@ Reddit fresh-comments scraper -> POST /store_items (batch)
 Пагинация идёт до пересечения с уже виденными комментариями (догоняет
 пропуски).
 
-Остальное — общий TokenBucket/SeenCache, health-мониторинг executor'а,
-graceful shutdown — как раньше, см. ARCHITECTURE.md.
+Скорость отправки в пайплайн (потолок TokenBucket) ведёт QueueGovernor
+(scraper/governor.py) по состоянию очереди коллектора (queue_control в
+config.yaml): цель — чтобы bpipe_queue не опускалась ниже target_min.
+
+Остальное — общий SeenCache, health-мониторинг executor'а, graceful
+shutdown — как раньше, см. ARCHITECTURE.md.
 """
 
 import asyncio
@@ -31,6 +35,7 @@ from scraper.constants import (
     PROXY_HOST,
     log,
 )
+from scraper.governor import QueueGovernor
 from scraper.health import ExecutorHandle, ExecutorHealth, health_report_loop
 from scraper.scheduler import PollScheduler
 from scraper.state import SeenCache, TokenBucket
@@ -59,16 +64,22 @@ async def main():
         log.error("Нет ни одного enabled:true аккаунта в accounts.yaml — нечего запускать")
         return
 
+    qc = config.get("queue_control", {}) or {}
+    qc_enabled = bool(qc.get("enabled", False)) and bool(qc.get("url"))
+    start_rate = float(qc.get("initial_rate", 80)) if qc_enabled else float(config.get("target_rate_per_second", 80))
+
     log.info(
-        "Запуск: %d аккаунт(ов), поток=r/%s, target_rate=%s/сек, max_age=%ss, "
+        "Запуск: %d аккаунт(ов), поток=r/%s, скорость=%s, max_age=%ss, "
         "batch_max_items=%s, старт_интервал_слота=%ss, proxy_host=%s",
         len(accounts), "+".join(config.get("stream_subs", ["all"])),
-        config.get("target_rate_per_second"), config.get("max_age_seconds"),
+        f"авто по очереди ({qc.get('url')}, target_min={qc.get('target_min', 200)})"
+        if qc_enabled else f"статичная {start_rate}/сек",
+        config.get("max_age_seconds"),
         config.get("batch_max_items", 500), config.get("stream_start_interval_seconds", 1.5),
         PROXY_HOST,
     )
 
-    bucket = TokenBucket(config.get("target_rate_per_second", 150))
+    bucket = TokenBucket(start_rate)
     seen = SeenCache(config.get("seen_cache_size", 40000))
     scheduler = PollScheduler(config.get)
 
@@ -89,8 +100,10 @@ async def main():
     try:
         store_connector = aiohttp.TCPConnector(ttl_dns_cache=300, keepalive_timeout=60)
         async with aiohttp.ClientSession(connector=store_connector) as store_session:
+            governor = QueueGovernor(config, bucket, store_session, log)
             tasks = [
                 asyncio.create_task(config.reload_loop(), name="config_reload_loop"),
+                asyncio.create_task(governor.run(), name="queue_governor"),
                 asyncio.create_task(
                     health_report_loop(
                         executor_health,

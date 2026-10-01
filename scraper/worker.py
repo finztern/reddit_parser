@@ -107,7 +107,8 @@ async def account_worker(
                         session.cookie_jar.update_cookies(new_cookies)
                         log.info("[%s] cookies обновлены из %s (%d шт.)", name, cookie_file, len(new_cookies))
 
-                    bucket.update_rate(config.get("target_rate_per_second", 150))
+                    # Потолок отправки (bucket.rate) теперь ведёт QueueGovernor
+                    # (scraper/governor.py) — воркер его больше не трогает.
 
                     # Остановка пагинации: как только на странице встретился
                     # уже виденный комментарий — догнали, дальше листать не надо.

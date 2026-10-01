@@ -15,6 +15,9 @@ class TokenBucket:
         self.tokens = self.capacity
         self.last_refill = time.monotonic()
         self.lock = asyncio.Lock()
+        # Сколько токенов выдано за всё время — QueueGovernor по разнице
+        # считает реальную скорость отправки (токенов/сек).
+        self.granted = 0
 
     def update_rate(self, rate_per_second: float):
         if rate_per_second != self.rate:
@@ -29,6 +32,7 @@ class TokenBucket:
             self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
             if self.tokens >= 1.0:
                 self.tokens -= 1.0
+                self.granted += 1
                 return True
             return False
 
