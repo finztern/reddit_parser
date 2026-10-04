@@ -4,7 +4,8 @@ scripts/refresh_cookies.py
 
 Независимый (от event loop/процессов scraper) Playwright-джоб. Раз в
 запуск (расписание — снаружи, см. README.md: systemd timer/cron), для
-каждого ЛОГИН-аккаунта:
+каждого ЛОГИН-аккаунта (account_1..10, список — login_accounts в
+refresh_cookies.yaml):
 
   - если в refresh_cookies.yaml задан список login_accounts — ровно для
     аккаунтов из этого списка (поле enabled в accounts.yaml при этом
@@ -15,56 +16,42 @@ scripts/refresh_cookies.py
 Для каждого аккаунта:
 
   1. открывает браузерный контекст через ТОТ ЖЕ proxy_port, что и сам
-     скрапер для этого аккаунта (mihomo, тот же выходной IP — логин и
-     последующие запросы с разных IP резко повышают риск на аккаунт);
-  2. переиспользует сохранённую с прошлого раза Playwright-сессию
+     скрапер для этого аккаунта (mihomo, тот же выходной IP);
+  2. движок браузера выводится из impersonate аккаунта (firefoxNNN ->
+     firefox, chromeNNN -> chromium, safariNNN -> webkit; можно
+     переопределить через account_profiles в refresh_cookies.yaml) —
+     раньше всегда запускался chromium, даже для firefox-аккаунтов;
+  3. переиспользует сохранённую Playwright-сессию
      (storage_state/account_N.json), либо конвертирует на лету текущий
      cookies/account_N.json, если сохранённой сессии ещё нет;
-  3. проверяет, залогинены ли — по ПОЗИТИВНОМУ признаку (ответ
+  4. проверяет залогиненность по ПОЗИТИВНОМУ признаку (ответ
      авторизованного API-эндпоинта Reddit), а не по отсутствию формы
-     логина в DOM (та может ложно отсутствовать на промежуточных
-     состояниях загрузки страницы);
-  4. если НЕ залогинены — cookies/account_N.json НЕ трогает, логирует
-     ERROR и переходит к следующему аккаунту. Логин по паролю этот
-     скрипт сознательно не автоматизирует (высокий риск капчи/детекта
-     на датацентровом IP) — это ручная операция;
-  5. если залогинены — сохраняет storage_state/account_N.json (для
-     переиспользования в следующий раз) и АТОМАРНО (os.replace())
-     перезаписывает cookies/account_N.json в формате, который уже
-     понимает scraper.config.load_cookies() (Cookie Editor export);
-  6. сверяет фактический navigator.userAgent браузера с
-     accounts.yaml:user_agent этого аккаунта — при расхождении WARNING
-     в лог (accounts.yaml НЕ трогается автоматически).
+     логина в DOM;
+  5. если НЕ залогинены — cookies/account_N.json НЕ трогает, логирует
+     ERROR. Логин по паролю этот скрипт не автоматизирует — для первого
+     логина используй scripts/manual_login.py;
+  6. если залогинены — сохраняет storage_state/account_N.json и АТОМАРНО
+     (os.replace()) перезаписывает cookies/account_N.json (только
+     cookies домена reddit.com) в формате, который понимает
+     scraper.config.load_cookies();
+  7. сверяет фактический navigator.userAgent с accounts.yaml:user_agent —
+     при расхождении WARNING (accounts.yaml не трогается).
 
-Полностью независим от scraper/ (main.py, account_worker) — читает те
-же accounts.yaml/cookies/*.json, что и они, но не импортирует и не
-трогает их event loop. Компоненты делят только сам файл
-cookies/account_N.json: запись сюда атомарна (os.replace()), поэтому
-account_worker, параллельно читающий тот же файл через свой hot-reload
-(scraper/config.py:CookieFileWatcher), никогда не увидит частично
-записанный/битый JSON.
+Установка (отдельный venv, не requirements.txt основного скрапера):
 
-Установка (отдельно от requirements.txt основного скрапера — падение/
-зависание этого джоба не должно требовать пересборки образа scraper'а):
-
-    python3 -m venv .venv-refresh
-    .venv-refresh/bin/pip install -r scripts/requirements-refresh.txt
-    .venv-refresh/bin/playwright install chromium
+    python3 -m venv venv
+    venv/bin/pip install -r requirements-refresh.txt
+    venv/bin/playwright install --with-deps chromium firefox webkit
 
 Запуск:
 
-    python3 scripts/refresh_cookies.py                    # все login_accounts
-    python3 scripts/refresh_cookies.py --account account_1
-    python3 scripts/refresh_cookies.py --no-headless       # окно браузера, для дебага
-    python3 scripts/refresh_cookies.py --dry-run           # без реальной записи файлов
+    venv/bin/python3 scripts/refresh_cookies.py                    # все login_accounts
+    venv/bin/python3 scripts/refresh_cookies.py --account account_1
+    venv/bin/python3 scripts/refresh_cookies.py --no-headless
+    venv/bin/python3 scripts/refresh_cookies.py --dry-run
 
 Возвращает ненулевой exit code, если хотя бы один аккаунт требует
-ручного вмешательства (разлогинен/ошибка) — удобно вешать на
-cron/systemd-мониторинг (см. scripts/systemd/).
-
-Расписание НЕ встроено в сам скрипт: один запуск = один полный прогон
-по всем аккаунтам, планировщик (systemd timer/cron) — снаружи,
-см. README.md.
+ручного вмешательства.
 """
 
 import argparse
@@ -85,22 +72,19 @@ except ImportError:
     print(
         "Playwright не установлен. Установи зависимости джоба отдельно от основного "
         "requirements.txt:\n"
-        "  python3 -m venv .venv-refresh\n"
-        "  .venv-refresh/bin/pip install -r scripts/requirements-refresh.txt\n"
-        "  .venv-refresh/bin/playwright install chromium",
+        "  python3 -m venv venv\n"
+        "  venv/bin/pip install -r requirements-refresh.txt\n"
+        "  venv/bin/playwright install --with-deps chromium firefox webkit",
         file=sys.stderr,
     )
     raise
 
 try:
-    from playwright_stealth import stealth_sync
+    from playwright_stealth import StealthConfig, stealth_sync
 except ImportError:
     stealth_sync = None
+    StealthConfig = None
 
-# Скрипт лежит в scripts/, а не в корне — добавляем корень репозитория в
-# sys.path, чтобы переиспользовать scraper.config/scraper.constants
-# (тот же формат accounts.yaml, тот же логгер/PROXY_HOST/BASE_DIR — не
-# заводим второй несовместимый набор этих вещей в проекте).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scraper.config import load_accounts  # noqa: E402
@@ -125,6 +109,7 @@ DEFAULT_CONFIG = {
         "timezone_id": "America/New_York",
         "viewport": {"width": 1920, "height": 1080},
     },
+    # гео = геолокация VLESS-ноды аккаунта (см. vless_accounts.env)
     "account_geo": {
         "account_1": {"locale": "sr-RS", "timezone_id": "Europe/Belgrade"},
         "account_2": {"locale": "bg-BG", "timezone_id": "Europe/Sofia"},
@@ -134,9 +119,11 @@ DEFAULT_CONFIG = {
         "account_6": {"locale": "hu-HU", "timezone_id": "Europe/Budapest"},
         "account_7": {"locale": "nl-BE", "timezone_id": "Europe/Brussels"},
         "account_8": {"locale": "sq-AL", "timezone_id": "Europe/Tirane"},
-        "account_9": {"locale": "uk-UA", "timezone_id": "Europe/Kyiv"},
+        "account_9": {"locale": "uk-UA", "timezone_id": "Europe/Kiev"},
         "account_10": {"locale": "de-DE", "timezone_id": "Europe/Berlin"},
     },
+    # name -> {engine, channel, device}; перекрывает вывод из impersonate
+    "account_profiles": {},
 }
 
 
@@ -155,8 +142,7 @@ def load_refresh_config(path: Path) -> dict:
         return cfg
     with open(path, "r", encoding="utf-8") as f:
         user_cfg = yaml.safe_load(f) or {}
-    # Поддержка альтернативного варианта из спеки: секция `refresh_cookies:`
-    # внутри общего config.yaml вместо отдельного файла.
+    # Альтернатива: секция `refresh_cookies:` внутри общего config.yaml.
     top_level_keys = set(DEFAULT_CONFIG) - {"refresh_cookies"}
     if "refresh_cookies" in user_cfg and not (top_level_keys & user_cfg.keys()):
         user_cfg = user_cfg["refresh_cookies"]
@@ -165,14 +151,30 @@ def load_refresh_config(path: Path) -> dict:
 
 
 # ---------------------------------------------------------------- #
+#  Профиль браузера из impersonate
+# ---------------------------------------------------------------- #
+
+def infer_profile(impersonate: str | None) -> dict:
+    """impersonate (curl_cffi) -> engine/channel/device Playwright."""
+    imp = (impersonate or "").lower()
+    if imp.startswith("firefox"):
+        return {"engine": "firefox", "channel": None, "device": None}
+    if imp.startswith("safari"):
+        return {"engine": "webkit", "channel": None, "device": "iPhone 14" if "ios" in imp else None}
+    if imp.startswith("edge"):
+        return {"engine": "chromium", "channel": "msedge", "device": None}
+    if "android" in imp:
+        return {"engine": "chromium", "channel": None, "device": "Pixel 7"}
+    return {"engine": "chromium", "channel": None, "device": None}
+
+
+# ---------------------------------------------------------------- #
 #  Конвертация форматов cookies: Cookie Editor <-> Playwright
 # ---------------------------------------------------------------- #
 
 def cookie_editor_to_playwright(raw_cookies: list[dict], default_domain: str = ".reddit.com") -> list[dict]:
-    """Cookie Editor export (name/value [+ прочие поля, необязательные])
-    -> формат, который принимает Playwright storage_state (domain и path
-    обязательны — используем default_domain как fallback, если в экспорте
-    их не было)."""
+    """Cookie Editor export (name/value [+ прочие поля]) -> формат
+    Playwright storage_state (domain и path обязательны)."""
     out = []
     for c in raw_cookies:
         name = c.get("name")
@@ -203,10 +205,8 @@ def cookie_editor_to_playwright(raw_cookies: list[dict], default_domain: str = "
 
 
 def playwright_to_cookie_editor(pw_cookies: list[dict]) -> list[dict]:
-    """Обратная конвертация — формат, который понимает
-    scraper.config.load_cookies() (нужны только name/value, остальные
-    поля он игнорирует, но сохраняем их для наглядности при ручном
-    дебаге файла)."""
+    """Обратная конвертация — формат для scraper.config.load_cookies()
+    (нужны только name/value, остальное — для наглядности)."""
     out = []
     for c in pw_cookies:
         out.append(
@@ -224,10 +224,15 @@ def playwright_to_cookie_editor(pw_cookies: list[dict]) -> list[dict]:
     return out
 
 
+def only_reddit_cookies(pw_cookies: list[dict]) -> list[dict]:
+    """Скрапер собирает cookies в dict по имени — cookie чужих доменов
+    (google и т.п.) могут затереть одноимённые reddit-овские."""
+    return [c for c in pw_cookies if "reddit.com" in (c.get("domain") or "")]
+
+
 # ---------------------------------------------------------------- #
-#  Атомарная запись (см. README/спеку — account_worker читает тот же
-#  cookies/account_N.json параллельно через свой hot-reload и не должен
-#  увидеть частично записанный файл)
+#  Атомарная запись (account_worker читает cookies/account_N.json
+#  параллельно через hot-reload и не должен увидеть частичный файл)
 # ---------------------------------------------------------------- #
 
 def atomic_write_json(path: Path, data) -> None:
@@ -241,37 +246,42 @@ def atomic_write_json(path: Path, data) -> None:
 
 
 # ---------------------------------------------------------------- #
-#  Stealth
+#  Stealth — только для chromium.
+#
+#  Раньше патчи применялись ко всем движкам: window.chrome и поддельные
+#  navigator.plugins в firefox/webkit — это не маскировка, а явный
+#  признак подделки. Поддельные navigator.languages = ['en-US', 'en']
+#  противоречили locale из account_geo (Accept-Language другой).
 # ---------------------------------------------------------------- #
 
 _MANUAL_STEALTH_INIT_SCRIPT = """
 Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
-Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
-Object.defineProperty(navigator, 'languages', {get: () => ['en-US', 'en']});
-window.chrome = window.chrome || { runtime: {} };
-const originalQuery = window.navigator.permissions.query;
-window.navigator.permissions.query = (parameters) => (
-    parameters.name === 'notifications'
-        ? Promise.resolve({ state: Notification.permission })
-        : originalQuery(parameters)
-);
 """
 
 
-def _apply_stealth(page) -> None:
+def _apply_stealth(page, engine: str = "chromium") -> None:
+    if engine != "chromium":
+        return
     if stealth_sync is not None:
         try:
-            stealth_sync(page)
+            if StealthConfig is not None:
+                config = StealthConfig()
+                # не перетираем languages/platform/webgl фиксированными
+                # значениями — они не совпали бы с UA/locale аккаунта
+                for attr in ("navigator_languages", "navigator_platform", "webgl_vendor"):
+                    if hasattr(config, attr):
+                        setattr(config, attr, False)
+                stealth_sync(page, config)
+            else:
+                stealth_sync(page)
             return
         except Exception as e:
-            log.warning("playwright-stealth упал (%s) — продолжаю с ручными патчами", e)
+            log.warning("playwright-stealth упал (%s) — продолжаю с ручным патчем", e)
     page.add_init_script(_MANUAL_STEALTH_INIT_SCRIPT)
 
 
 # ---------------------------------------------------------------- #
-#  Проверка залогиненности — позитивный признак, не отсутствие формы
-#  логина. Вынесена в константу пути, чтобы легко поправить при
-#  редизайне Reddit.
+#  Проверка залогиненности
 # ---------------------------------------------------------------- #
 
 def _is_logged_in(page, base_url: str, login_check_path: str, timeout_ms: int) -> tuple[bool, str]:
@@ -314,18 +324,21 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
         return AccountResult(name, False, "нет proxy_port в accounts.yaml")
     proxy_url = f"http://{PROXY_HOST}:{proxy_port}"
 
+    profile = {**infer_profile(account.get("impersonate")), **(cfg.get("account_profiles", {}).get(name) or {})}
+    engine = profile.get("engine") or "chromium"
+    channel = profile.get("channel")
+    device_name = profile.get("device")
+
+    launcher = getattr(pw, engine, None)
+    if launcher is None:
+        return AccountResult(name, False, f"неизвестный engine={engine!r}")
+
     storage_state_dir = BASE_DIR / cfg["storage_state_dir"]
     storage_state_dir.mkdir(parents=True, exist_ok=True)
     storage_state_path = storage_state_dir / f"{name}.json"
 
     geo = {**cfg["geo_defaults"], **cfg.get("account_geo", {}).get(name, {})}
-    viewport = geo.get("viewport") or cfg["geo_defaults"]["viewport"]
 
-    # storage_state: сохранённый с прошлого прогона (предпочтительно —
-    # содержит полный контекст сессии, не только cookies), либо
-    # сконвертированный на лету текущий cookies/account_N.json (первый
-    # запуск джоба для этого аккаунта), либо пустая сессия, если нет ни
-    # того, ни другого.
     if storage_state_path.exists():
         storage_state = str(storage_state_path)
         log.info("[%s] использую сохранённый storage_state: %s", name, storage_state_path)
@@ -339,25 +352,48 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
         log.info("[%s] storage_state ещё нет — инициализирую из %s", name, cookie_file)
     else:
         log.warning(
-            "[%s] нет ни %s, ни сохранённого storage_state — стартую с пустой сессией "
-            "(скорее всего, потребуется ручной логин)",
-            name, cookie_file,
+            "[%s] нет ни %s, ни сохранённого storage_state — пустая сессия "
+            "(нужен ручной логин: scripts/manual_login.py %s)", name, cookie_file, name,
         )
         storage_state = {"cookies": [], "origins": []}
 
-    browser = pw.chromium.launch(headless=cfg["headless"])
+    context_kwargs: dict = {}
+    if device_name:
+        try:
+            context_kwargs = dict(pw.devices[device_name])
+        except KeyError:
+            return AccountResult(name, False, f"нет device-пресета {device_name!r} в этой версии Playwright")
+        context_kwargs.pop("default_browser_type", None)
+    else:
+        context_kwargs["viewport"] = geo.get("viewport") or cfg["geo_defaults"]["viewport"]
+    if configured_ua:
+        context_kwargs["user_agent"] = configured_ua
+
+    launch_kwargs: dict = {"headless": cfg["headless"]}
+    if channel:
+        launch_kwargs["channel"] = channel
+    if engine == "chromium":
+        launch_kwargs["args"] = ["--disable-blink-features=AutomationControlled"]
+
+    try:
+        browser = launcher.launch(**launch_kwargs)
+    except Exception as e:
+        return AccountResult(
+            name, False,
+            f"не смог запустить {engine}(channel={channel!r}): {e} (playwright install {channel or engine})",
+        )
+
     try:
         context = browser.new_context(
             storage_state=storage_state,
             proxy={"server": proxy_url},
-            user_agent=configured_ua or None,
             locale=geo.get("locale"),
             timezone_id=geo.get("timezone_id"),
-            viewport=viewport,
+            **context_kwargs,
         )
         try:
             page = context.new_page()
-            _apply_stealth(page)
+            _apply_stealth(page, engine)
 
             base_url = cfg["reddit_base_url"]
             login_check_path = cfg["login_check_path"]
@@ -366,21 +402,21 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
             try:
                 page.goto(base_url, timeout=timeout_ms, wait_until="domcontentloaded")
             except PlaywrightTimeoutError as e:
-                log.error("[%s] не удалось открыть %s через прокси %s за %sмс: %s", name, base_url, proxy_url, timeout_ms, e)
+                log.error("[%s] не удалось открыть %s через %s за %sмс: %s", name, base_url, proxy_url, timeout_ms, e)
                 return AccountResult(name, False, f"навигация не уложилась в таймаут: {e}")
             except Exception as e:
-                log.error("[%s] ошибка навигации/сети через прокси %s (проверь mihomo/порт %s): %s", name, proxy_url, proxy_port, e)
+                log.error("[%s] ошибка навигации/сети через %s (проверь mihomo/порт %s): %s", name, proxy_url, proxy_port, e)
                 return AccountResult(name, False, f"сеть/навигация: {e}")
 
             logged_in, detail = _is_logged_in(page, base_url, login_check_path, timeout_ms)
             if not logged_in:
                 log.error(
-                    "[%s] сессия разлогинена (%s) — cookies/%s.json НЕ трогаю, нужен ручной логин",
-                    name, detail, name,
+                    "[%s] сессия разлогинена (%s) — cookies/%s.json НЕ трогаю, нужен ручной логин "
+                    "(scripts/manual_login.py %s)", name, detail, name, name,
                 )
                 return AccountResult(name, False, detail)
 
-            log.info("[%s] сессия активна (%s)", name, detail)
+            log.info("[%s] сессия активна (%s) [engine=%s]", name, detail, engine)
 
             try:
                 actual_ua = page.evaluate("navigator.userAgent")
@@ -388,24 +424,23 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
                 actual_ua = None
             if configured_ua and actual_ua and actual_ua != configured_ua:
                 log.warning(
-                    "[%s] User-Agent браузера разошёлся с accounts.yaml — accounts.yaml НЕ трогаю "
-                    "автоматически (impersonate/user_agent правятся руками). "
-                    "accounts.yaml=%r, фактический=%r",
-                    name, configured_ua, actual_ua,
+                    "[%s] User-Agent браузера разошёлся с accounts.yaml (accounts.yaml не трогаю): "
+                    "accounts.yaml=%r, фактический=%r", name, configured_ua, actual_ua,
                 )
 
             new_storage_state = context.storage_state()
-            new_cookies = new_storage_state.get("cookies", [])
+            new_cookies = only_reddit_cookies(new_storage_state.get("cookies", []))
+
+            if not new_cookies:
+                return AccountResult(name, False, "после проверки нет ни одной cookie reddit.com — файл не трогаю")
 
             if dry_run:
-                log.info("[%s] dry-run: cookies/storage_state НЕ записаны (нашёл %d cookies)", name, len(new_cookies))
+                log.info("[%s] dry-run: cookies/storage_state НЕ записаны (%d cookies reddit.com)", name, len(new_cookies))
             else:
                 atomic_write_json(storage_state_path, new_storage_state)
                 atomic_write_json(cookie_file, playwright_to_cookie_editor(new_cookies))
-                log.info(
-                    "[%s] cookies обновлены: %s (%d шт.), storage_state: %s",
-                    name, cookie_file, len(new_cookies), storage_state_path,
-                )
+                log.info("[%s] cookies обновлены: %s (%d шт.), storage_state: %s",
+                         name, cookie_file, len(new_cookies), storage_state_path)
 
             return AccountResult(name, True, detail)
         finally:
@@ -419,10 +454,6 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
 # ---------------------------------------------------------------- #
 
 def select_accounts(cfg: dict, only: list[str] | None) -> list[dict]:
-    """Выбирает аккаунты для прогона.
-
-    login_accounts задан -> ровно они (enabled игнорируется).
-    Пуст -> все enabled: true из accounts.yaml (старое поведение)."""
     all_accounts = load_accounts()
     login_accounts = cfg.get("login_accounts") or []
 
@@ -436,6 +467,7 @@ def select_accounts(cfg: dict, only: list[str] | None) -> list[dict]:
     else:
         accounts = [a for a in all_accounts if a.get("enabled")]
         source = "enabled: true в accounts.yaml"
+        log.warning("login_accounts пуст — беру ВСЕ enabled аккаунты (в т.ч. возможные гостевые слоты!)")
 
     if only:
         wanted = set(only)
@@ -449,29 +481,28 @@ def select_accounts(cfg: dict, only: list[str] | None) -> list[dict]:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument(
-        "--account", action="append",
-        help="Обработать только указанный(е) аккаунт(ы) (можно повторять флаг). "
-             "По умолчанию — все login_accounts (либо все enabled: true, если список пуст).",
-    )
+    parser.add_argument("--account", action="append", help="Только этот(и) аккаунт(ы) (флаг можно повторять).")
     parser.add_argument("--headless", dest="headless", action="store_true", default=None)
     parser.add_argument("--no-headless", dest="headless", action="store_false")
-    parser.add_argument("--dry-run", action="store_true", help="Ничего не записывать в cookies/storage_state (для дебага).")
+    parser.add_argument("--dry-run", action="store_true", help="Ничего не записывать в cookies/storage_state.")
     parser.add_argument(
         "--config", default=None,
-        help="Путь к refresh_cookies.yaml (по умолчанию: BASE_DIR/refresh_cookies.yaml, либо env REFRESH_COOKIES_CONFIG)",
+        help="Путь к refresh_cookies.yaml (по умолчанию: scripts/refresh_cookies.yaml, "
+             "либо env REFRESH_COOKIES_CONFIG)",
     )
     args = parser.parse_args()
 
+    # Дефолт раньше указывал в корень проекта (BASE_DIR/refresh_cookies.yaml),
+    # хотя файл лежит в scripts/ — и без --config джоб молча работал на дефолтах.
+    default_cfg = Path(__file__).resolve().parent / "refresh_cookies.yaml"
     config_path = Path(args.config) if args.config else Path(
-        os.environ.get("REFRESH_COOKIES_CONFIG", BASE_DIR / "refresh_cookies.yaml")
+        os.environ.get("REFRESH_COOKIES_CONFIG", default_cfg)
     )
     cfg = load_refresh_config(config_path)
     if args.headless is not None:
         cfg["headless"] = args.headless
 
     accounts = select_accounts(cfg, args.account)
-
     if not accounts:
         log.error("Нет ни одного аккаунта для обработки — проверь login_accounts / accounts.yaml / --account")
         return 1

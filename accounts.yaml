@@ -1,16 +1,35 @@
 accounts:
-  # --- Логин-аккаунты (account_1..10) ---
-  # cookies/account_1..10.json обслуживает scripts/refresh_cookies.py
-  # (список в scripts/refresh_cookies.yaml:login_accounts). Первый логин
-  # делается руками: залогиниться в браузере через ту же страну/IP,
-  # экспортировать cookies (Cookie Editor -> JSON) в cookies/account_N.json,
-  # затем: refresh_cookies.py --account account_N (создаст storage_state).
-  # НЕ гоняй refresh_guest_cookies.py на эти имена — он перезапишет
-  # логин-cookies анонимными.
+  # ============================================================
+  #  account_1..10  — ЛОГИН-аккаунты
+  #  account_11..25 — ГОСТЕВЫЕ слоты (без логина)
   #
-  # ⚠ refresh_cookies.py всегда запускает bundled chromium. Для аккаунтов
-  # с firefox-impersonate (1, 2, 5, 10) браузер при обновлении будет
-  # chromium-TLS с firefox-UA — при желании переведи их на chromeNNN.
+  #  Логин-аккаунты: cookies/account_N.json обслуживает
+  #  scripts/refresh_cookies.py (список — scripts/refresh_cookies.yaml:
+  #  login_accounts). Первый логин делается руками:
+  #      venv/bin/python3 scripts/manual_login.py account_N
+  #  Дальше refresh_cookies.py поддерживает сессию сам.
+  #
+  #  Гостевые слоты: cookies/account_N.json обслуживает
+  #  scripts/refresh_guest_cookies.py (секция guest_accounts в
+  #  scripts/refresh_guest_cookies.yaml). НЕ гоняй refresh_cookies.py на
+  #  эти имена и refresh_guest_cookies.py — на логин-аккаунты: оба джоба
+  #  пишут в один и тот же cookies/account_N.json.
+  #
+  #  ИСТОЧНИК ПРАВДЫ для impersonate/user_agent — ЭТОТ файл:
+  #  refresh_guest_cookies.py и refresh_cookies.py берут их отсюда
+  #  (запускай scripts/rotate_fingerprints.py, чтобы менять их синхронно).
+  #
+  #  enabled: гостевой слот можно включать, когда (1) для него есть строка
+  #  account_N = vless://... в vless_accounts.env (и перегенерирован
+  #  mihomo_config.yaml) и (2) refresh_guest_cookies.py хотя бы раз
+  #  отработал для него. Если cookies-файла ещё нет, воркер просто ждёт
+  #  его появления (раз в минуту), а не падает.
+  # ============================================================
+
+  # --- Логин-аккаунты (1..10) ---
+  # Движок браузера для refresh_cookies.py выводится из impersonate:
+  # firefoxNNN -> firefox, chromeNNN -> chromium, safariNNN -> webkit
+  # (нужны `playwright install chromium firefox webkit`).
 
   - name: account_1
     enabled: true
@@ -69,7 +88,7 @@ accounts:
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 
   - name: account_9
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_9.json
     proxy_port: 7899
     impersonate: chrome119
@@ -82,20 +101,9 @@ accounts:
     impersonate: firefox133
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
 
-  # --- Гостевые слоты (без логина, account_11..25) ---
-  # cookies/account_11..25.json обслуживает scripts/refresh_guest_cookies.py
-  # (guest_accounts в scripts/refresh_guest_cookies.yaml). НЕ гоняй
-  # refresh_cookies.py на эти имена — оба джоба пишут в один и тот же
-  # cookies/account_N.json, логин-джоб для гостевого слота либо перезапишет
-  # рабочие cookies результатом "сессия разлогинена", либо просто провалится.
-  #
-  # user_agent/impersonate (и device, где есть) здесь ДОЛЖНЫ совпадать 1:1
-  # с тем, что прописано этому же account_N в
-  # scripts/refresh_guest_cookies.yaml:guest_accounts.
-  # Каждый слот — свой уникальный профиль (impersonate + UA).
-  # Нода каждого слота — в vless_accounts.env, гео браузера — в
-  # refresh_guest_cookies.yaml:account_geo. Пока cookies-файла нет,
-  # воркер слота при старте пропускается.
+  # --- Гостевые слоты (11..25) ---
+  # Каждый слот — свой уникальный профиль (impersonate + UA). Нода слота —
+  # в vless_accounts.env, гео браузера — refresh_guest_cookies.yaml:account_geo.
 
   - name: account_11
     enabled: false
@@ -165,7 +173,8 @@ accounts:
     cookie_file: cookies/account_20.json
     proxy_port: 7910
     impersonate: safari2601
-    user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/260.1 Safari/605.1.15"
+    # было "Version/260.1" (баг парсинга safari2601 в rotate_fingerprints.py)
+    user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0.1 Safari/605.1.15"
 
   - name: account_21
     enabled: false
@@ -196,7 +205,7 @@ accounts:
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
   - name: account_25
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_25.json
     proxy_port: 7915
     impersonate: chrome145

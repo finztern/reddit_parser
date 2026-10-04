@@ -1,12 +1,12 @@
 # ============================================================
 #  Конфиг scripts/refresh_guest_cookies.py — независимого Playwright-
 #  джоба, который харвестит АНОНИМНЫЕ (без логина) cookies для
-#  гостевых слотов и обновляет cookies/account_N.json (см. README.md,
-#  раздел "Компонент Б — гостевые cookies без логина").
+#  ГОСТЕВЫХ слотов account_11..25 и обновляет cookies/account_N.json.
 #
-#  ВАЖНО: этот файл читается ТОЛЬКО refresh_guest_cookies.py, отдельно
-#  от scraper/config.py:ConfigStore, config.yaml и refresh_cookies.yaml
-#  — компоненты полностью независимы.
+#  Логин-аккаунты account_1..10 обслуживает refresh_cookies.py
+#  (см. refresh_cookies.yaml) — их здесь НЕТ и быть не должно.
+#
+#  ВАЖНО: файл читается ТОЛЬКО refresh_guest_cookies.py.
 # ============================================================
 
 headless: true
@@ -14,27 +14,32 @@ headless: true
 reddit_base_url: "https://www.reddit.com"
 warmup_path: "/"
 
-# Сколько ждать загрузку reddit.com и сколько раз повторить попытку,
-# если через VPN-ноду страница не догрузилась с первого раза.
-warmup_page_load_timeout_seconds: 25
+# Когда считать страницу загруженной. "networkidle" на reddit.com почти
+# никогда не наступает (бесконечный трекинг/XHR) и давал таймауты —
+# поэтому "domcontentloaded" + пауза post_load_settle_seconds ниже.
+warmup_wait_until: "domcontentloaded"
+
+# Сколько ждать загрузку reddit.com и сколько раз повторить попытку.
+warmup_page_load_timeout_seconds: 30
 warmup_retries: 2
 
 # Пауза ПОСЛЕ загрузки страницы перед снятием cookies — антибот может
 # доставлять часть cookies через JS уже после первой отрисовки.
-post_load_settle_seconds: 4
+post_load_settle_seconds: 6
 
-# Верификация харвеста: реальный запрос .../r/{verify_subreddit}/comments.json
-# с полученными cookies + тем же impersonate/прокси, что у слота. Файл
+# Верификация: реальный запрос .../r/{verify_subreddit}/comments.json с
+# полученными cookies + тем же impersonate/прокси, что у слота. Файл
 # cookies/account_N.json перезаписывается ТОЛЬКО если ответ 200.
 verify_subreddit: "AskReddit"
 verify_timeout_seconds: 20
 
-# Пауза между слотами (аналогично stagger_seconds в refresh_cookies.yaml).
-# Слоты и так обрабатываются строго по одному браузеру за раз — это
-# дополнительная пауза МЕЖДУ ними, а не про параллелизм.
+# Сколько раз в конце прогона повторить слоты, не прошедшие верификацию
+# (гостевая cookie живёт ~2ч, а следующий плановый прогон — через час).
+retry_failed_passes: 1
+
+# Пауза между слотами. Слоты и так идут строго по одному браузеру.
 stagger_seconds: 12
 
-# Гео по умолчанию, если для слота нет записи в account_geo ниже.
 geo_defaults:
   locale: "en-US"
   timezone_id: "America/New_York"
@@ -42,116 +47,119 @@ geo_defaults:
     width: 1920
     height: 1080
 
-# Гео per-слот — ПОДСТАВЬ под реальную геолокацию VLESS-ноды, которую
-# впишешь в vless_accounts.env для этого account_N (у account_7/8/9
-# пока нет привязанных нод — см. vless_accounts.env, поправь locale/
-# timezone_id здесь, когда узнаешь гео реальной ноды).
+# Гео per-слот — под реальную геолокацию VLESS-ноды слота (в комментарии —
+# планируемая нода). Поправь, когда впишешь реальные ноды в
+# vless_accounts.env. При ротации ноды rotation.py кладёт geo прямо в
+# запись слота ниже (ключ geo) — оно приоритетнее account_geo.
 account_geo:
   account_11: {locale: "de-CH", timezone_id: "Europe/Zurich"}       # ch2
   account_12: {locale: "cs-CZ", timezone_id: "Europe/Prague"}       # cz1
   account_13: {locale: "da-DK", timezone_id: "Europe/Copenhagen"}   # dk1
   account_14: {locale: "lv-LV", timezone_id: "Europe/Riga"}         # lv2
   account_15: {locale: "en-CA", timezone_id: "America/Toronto"}     # ca11
-  account_16: {locale: "en-IN", timezone_id: "Asia/Kolkata"}         # in1
-  account_17: {locale: "en-US", timezone_id: "America/Chicago"}      # us14
-  account_18: {locale: "en-GB", timezone_id: "Europe/London"}        # uk7
-  account_19: {locale: "fr-FR", timezone_id: "Europe/Paris"}         # fr11
-  account_20: {locale: "tr-TR", timezone_id: "Europe/Istanbul"}      # tr1
-  account_21: {locale: "da-DK", timezone_id: "Europe/Copenhagen"}    # dk2
-  account_22: {locale: "nl-NL", timezone_id: "Europe/Amsterdam"}     # nl4
-  account_23: {locale: "fi-FI", timezone_id: "Europe/Helsinki"}      # fi2
-  account_24: {locale: "en-CA", timezone_id: "America/Toronto"}      # ca15
-  account_25: {locale: "sk-SK", timezone_id: "Europe/Bratislava"}    # sk1-7
+  account_16: {locale: "en-IN", timezone_id: "Asia/Kolkata"}        # in1
+  account_17: {locale: "en-US", timezone_id: "America/Chicago"}     # us14
+  account_18: {locale: "en-GB", timezone_id: "Europe/London"}       # uk7
+  account_19: {locale: "fr-FR", timezone_id: "Europe/Paris"}        # fr11
+  account_20: {locale: "tr-TR", timezone_id: "Europe/Istanbul"}     # tr1
+  account_21: {locale: "da-DK", timezone_id: "Europe/Copenhagen"}   # dk2
+  account_22: {locale: "nl-NL", timezone_id: "Europe/Amsterdam"}    # nl4
+  account_23: {locale: "fi-FI", timezone_id: "Europe/Helsinki"}     # fi2
+  account_24: {locale: "en-CA", timezone_id: "America/Toronto"}     # ca15
+  account_25: {locale: "sk-SK", timezone_id: "Europe/Bratislava"}   # sk1
 
 # ------------------------------------------------------------
-#  Гостевые слоты: account_N -> (Playwright engine/channel, UA,
-#  curl_cffi impersonate). ФИКСИРОВАНО на слот — не выбирается на
-#  лету. user_agent/impersonate ДОЛЖНЫ совпадать 1:1 с тем, что
-#  прописано этому же account_N в accounts.yaml (иначе TLS-отпечаток
-#  curl_cffi на реальных comments.json-запросах разойдётся с тем
-#  "браузером", который якобы получил эти cookies).
+#  Гостевые слоты: account_N -> (engine/channel/device, UA, impersonate).
 #
-#  channel: null -> обычный bundled-движок Playwright (engine: firefox
-#  всегда без channel). channel: chrome/msedge -> настоящий канал,
-#  установленный отдельно (см. README.md/scripts/requirements-refresh.txt:
-#  `playwright install chrome msedge`, либо apt install
-#  google-chrome-stable / microsoft-edge-stable).
+#  Раньше этот файл расходился с accounts.yaml почти во всех слотах
+#  (например account_11: тут safari180/webkit, а скрапер ходил как
+#  chrome133a) — cookies получал один "браузер", запросы шли с другим
+#  TLS-отпечатком. Теперь все значения СИНХРОННЫ с accounts.yaml, а сам
+#  refresh_guest_cookies.py дополнительно берёт impersonate/user_agent
+#  из accounts.yaml и ругается при расхождении.
+#  Менять отпечатки — через scripts/rotate_fingerprints.py (правит оба).
+#
+#  channel: null -> bundled-движок Playwright. channel: chrome/msedge —
+#  системный канал (playwright install chrome msedge).
+#  Нужные движки: playwright install chromium firefox webkit
 # ------------------------------------------------------------
 guest_accounts:
   account_11:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36
+    impersonate: chrome133a
+  account_12:
     engine: webkit
     channel: null
-    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15
-    impersonate: safari180
-  account_12:
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15
+    impersonate: safari260
+  account_13:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
+    impersonate: chrome131
+  account_14:
+    engine: webkit
+    channel: null
+    device: iPhone 14
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1
+    impersonate: safari180_ios
+  account_15:
+    engine: webkit
+    channel: null
+    device: iPhone 15
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1
+    impersonate: safari260_ios
+  account_16:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36
+    impersonate: chrome136
+  account_17:
     engine: webkit
     channel: null
     user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15
     impersonate: safari170
-  account_13:
-    engine: chromium
-    channel: null
-    device: Galaxy S9+
-    user_agent: Mozilla/5.0 (Linux; Android 12; SM-G965F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36
-    impersonate: chrome131_android
-  account_14:
-    engine: firefox
-    channel: null
-    user_agent: Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0
-    impersonate: firefox135
-  account_15:
-    engine: chromium
-    channel: null
-    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36
-    impersonate: chrome146
-  account_16:
-    engine: chromium
-    channel: null
-    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36
-    impersonate: chrome119
-  account_17:
-    engine: chromium
-    channel: null
-    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36
-    impersonate: chrome124
   account_18:
-    engine: chromium
+    engine: webkit
     channel: null
-    user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
-    impersonate: chrome131
+    device: iPhone 15 Pro
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1
+    impersonate: safari184_ios
   account_19:
     engine: chromium
     channel: null
-    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36
-    impersonate: chrome136
+    device: Pixel 7
+    user_agent: Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36
+    impersonate: chrome131_android
   account_20:
     engine: webkit
     channel: null
-    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/260.1 Safari/605.1.15
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0.1 Safari/605.1.15
     impersonate: safari2601
   account_21:
     engine: webkit
     channel: null
-    device: iPhone 15 Pro
-    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 17_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Mobile/15E148 Safari/604.1
-    impersonate: safari172_ios
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15
+    impersonate: safari180
   account_22:
-    engine: firefox
+    engine: chromium
     channel: null
-    user_agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
-    impersonate: firefox144
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36
+    impersonate: chrome124
   account_23:
-    engine: webkit
-    channel: null
-    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15
-    impersonate: safari184
-  account_24:
     engine: firefox
     channel: null
-    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:147.0) Gecko/20100101 Firefox/147.0
-    impersonate: firefox147
+    user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0
+    impersonate: firefox144
+  account_24:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36
+    impersonate: chrome123
   account_25:
     engine: chromium
     channel: null
-    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36
-    impersonate: chrome142
+    user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36
+    impersonate: chrome145
