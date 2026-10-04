@@ -1,46 +1,44 @@
 accounts:
+  # --- Логин-аккаунты (account_1..10) ---
+  # cookies/account_1..10.json обслуживает scripts/refresh_cookies.py
+  # (список в scripts/refresh_cookies.yaml:login_accounts). Первый логин
+  # делается руками: залогиниться в браузере через ту же страну/IP,
+  # экспортировать cookies (Cookie Editor -> JSON) в cookies/account_N.json,
+  # затем: refresh_cookies.py --account account_N (создаст storage_state).
+  # НЕ гоняй refresh_guest_cookies.py на эти имена — он перезапишет
+  # логин-cookies анонимными.
+  #
+  # ⚠ refresh_cookies.py всегда запускает bundled chromium. Для аккаунтов
+  # с firefox-impersonate (1, 2, 5, 10) браузер при обновлении будет
+  # chromium-TLS с firefox-UA — при желании переведи их на chromeNNN.
+
   - name: account_1
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_1.json
     proxy_port: 7892
-    impersonate: firefox147       # Самый свежий Firefox из вашего списка
+    impersonate: firefox147
     user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0"
 
   - name: account_2
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_2.json
     proxy_port: 7891
-    impersonate: firefox135       # ⚠ было firefox144 — совпадало 1-в-1 с гостевым account_9
+    impersonate: firefox135
     user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"
 
   - name: account_3
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_3.json
     proxy_port: 7893
-    impersonate: chrome150        # Самый свежий десктопный Chrome из списка
+    impersonate: chrome150
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
   - name: account_4
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_4.json
     proxy_port: 7894
-    impersonate: chrome145        # ⚠ было chrome150 — идентично account_3 (тот же impersonate И тот же UA).
+    impersonate: chrome145
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
-
-  # --- Гостевые слоты (без логина, account_5..15) ---
-  # cookies/account_5..15.json обслуживает scripts/refresh_guest_cookies.py
-  # (не refresh_cookies.py и не ручной логин). НЕ гоняй refresh_cookies.py
-  # (компонент А) на эти имена, даже вручную через --account — оба джоба
-  # пишут в один и тот же cookies/account_N.json, и логин-джоб для
-  # гостевого слота либо перезапишет рабочие cookies результатом
-  # "session разлогинена", либо просто провалится (нет storage_state
-  # реального логина). Если refresh-cookies.timer/.service у тебя
-  # параметризован конкретными --account, а не просто "все enabled: true"
-  # — исключи из него account_5..15.
-  #
-  # user_agent/impersonate (и device, где есть) здесь ДОЛЖНЫ совпадать
-  # 1:1 с тем, что прописано этому же account_N в
-  # scripts/refresh_guest_cookies.yaml:guest_accounts.
 
   - name: account_5
     enabled: true
@@ -50,21 +48,21 @@ accounts:
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
 
   - name: account_6
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_6.json
     proxy_port: 7896
     impersonate: chrome150
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
   - name: account_7
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_7.json
     proxy_port: 7897
     impersonate: chrome120
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
   - name: account_8
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_8.json
     proxy_port: 7898
     impersonate: chrome142
@@ -77,20 +75,27 @@ accounts:
     impersonate: chrome119
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
 
-  # --- account_10..15: новые гостевые слоты (порты 7900-7905) ---
-  # Каждый слот — свой уникальный профиль (impersonate + UA), чтобы 15
-  # аккаунтов не выглядели как один и тот же клиент. Нода каждого слота —
-  # в vless_accounts.env, гео браузера — в scripts/refresh_guest_cookies.yaml.
-  # cookies/account_10..15.json создаёт scripts/refresh_guest_cookies.py
-  # (см. README) — пока файла нет, main.py пропускает слот при старте и
-  # раскладывает его сабы между остальными.
-
   - name: account_10
     enabled: true
     cookie_file: cookies/account_10.json
     proxy_port: 7900
     impersonate: firefox133
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
+
+  # --- Гостевые слоты (без логина, account_11..25) ---
+  # cookies/account_11..25.json обслуживает scripts/refresh_guest_cookies.py
+  # (guest_accounts в scripts/refresh_guest_cookies.yaml). НЕ гоняй
+  # refresh_cookies.py на эти имена — оба джоба пишут в один и тот же
+  # cookies/account_N.json, логин-джоб для гостевого слота либо перезапишет
+  # рабочие cookies результатом "сессия разлогинена", либо просто провалится.
+  #
+  # user_agent/impersonate (и device, где есть) здесь ДОЛЖНЫ совпадать 1:1
+  # с тем, что прописано этому же account_N в
+  # scripts/refresh_guest_cookies.yaml:guest_accounts.
+  # Каждый слот — свой уникальный профиль (impersonate + UA).
+  # Нода каждого слота — в vless_accounts.env, гео браузера — в
+  # refresh_guest_cookies.yaml:account_geo. Пока cookies-файла нет,
+  # воркер слота при старте пропускается.
 
   - name: account_11
     enabled: false
@@ -100,7 +105,7 @@ accounts:
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
   - name: account_12
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_12.json
     proxy_port: 7902
     impersonate: safari260
@@ -114,7 +119,7 @@ accounts:
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
   - name: account_14
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_14.json
     proxy_port: 7904
     impersonate: safari180_ios
@@ -127,29 +132,22 @@ accounts:
     impersonate: safari260_ios
     user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
 
-  # --- account_16..25: ещё 10 гостевых слотов (порты 7906-7915), тоже
-  # получат dedicated-группу r/all в config.yaml. Каждый — свой уникальный
-  # impersonate/UA (не переиспользует ни один профиль из account_1..15,
-  # чтобы TLS/JA3-отпечатки не совпадали ни у кого из 25 аккаунтов).
-  # cookies/account_16..25.json обслуживает scripts/refresh_guest_cookies.py
-  # (guest_accounts в scripts/refresh_guest_cookies.yaml).
-
   - name: account_16
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_16.json
     proxy_port: 7906
     impersonate: chrome136
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 
   - name: account_17
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_17.json
     proxy_port: 7907
     impersonate: safari170
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
   - name: account_18
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_18.json
     proxy_port: 7908
     impersonate: safari184_ios
@@ -163,14 +161,14 @@ accounts:
     user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
   - name: account_20
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_20.json
     proxy_port: 7910
     impersonate: safari2601
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/260.1 Safari/605.1.15"
 
   - name: account_21
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_21.json
     proxy_port: 7911
     impersonate: safari180
@@ -184,7 +182,7 @@ accounts:
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
   - name: account_23
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_23.json
     proxy_port: 7913
     impersonate: firefox144

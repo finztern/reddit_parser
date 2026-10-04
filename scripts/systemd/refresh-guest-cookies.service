@@ -19,8 +19,8 @@ Wants=network-online.target
 Type=oneshot
 User=sashko
 Group=sashko
-WorkingDirectory=/home/sashko/reddit_scraper
-ExecStart=/home/sashko/reddit_scraper/venv/bin/python3 scripts/refresh_guest_cookies.py
+WorkingDirectory=/home/sashko/reddit_parser
+ExecStart=/home/sashko/reddit_parser/venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless
 # Ненулевой exit code (хотя бы один гостевой слот не прошёл верификацию)
 # переводит юнит в failed — видно в
 # `systemctl status refresh-guest-cookies.service` /

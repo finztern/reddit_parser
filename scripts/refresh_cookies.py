@@ -4,7 +4,15 @@ scripts/refresh_cookies.py
 
 Независимый (от event loop/процессов scraper) Playwright-джоб. Раз в
 запуск (расписание — снаружи, см. README.md: systemd timer/cron), для
-каждого enabled: true аккаунта из accounts.yaml:
+каждого ЛОГИН-аккаунта:
+
+  - если в refresh_cookies.yaml задан список login_accounts — ровно для
+    аккаунтов из этого списка (поле enabled в accounts.yaml при этом
+    игнорируется — можно освежать сессию ещё выключенного аккаунта);
+  - если список пуст — для всех enabled: true аккаунтов из accounts.yaml
+    (старое поведение; опасно, если среди них есть гостевые слоты).
+
+Для каждого аккаунта:
 
   1. открывает браузерный контекст через ТОТ ЖЕ proxy_port, что и сам
      скрапер для этого аккаунта (mihomo, тот же выходной IP — логин и
@@ -45,7 +53,7 @@ account_worker, параллельно читающий тот же файл ч�
 
 Запуск:
 
-    python3 scripts/refresh_cookies.py                    # все enabled-аккаунты
+    python3 scripts/refresh_cookies.py                    # все login_accounts
     python3 scripts/refresh_cookies.py --account account_1
     python3 scripts/refresh_cookies.py --no-headless       # окно браузера, для дебага
     python3 scripts/refresh_cookies.py --dry-run           # без реальной записи файлов
@@ -55,7 +63,7 @@ account_worker, параллельно читающий тот же файл ч�
 cron/systemd-мониторинг (см. scripts/systemd/).
 
 Расписание НЕ встроено в сам скрипт: один запуск = один полный прогон
-по всем enabled-аккаунтам, планировщик (systemd timer/cron) — снаружи,
+по всем аккаунтам, планировщик (systemd timer/cron) — снаружи,
 см. README.md.
 """
 
@@ -104,6 +112,8 @@ from scraper.constants import BASE_DIR, PROXY_HOST, log  # noqa: E402
 # ---------------------------------------------------------------- #
 
 DEFAULT_CONFIG = {
+    # Явный список логин-аккаунтов. Пусто -> все enabled: true из accounts.yaml.
+    "login_accounts": [],
     "headless": True,
     "login_check_timeout_seconds": 20,
     "stagger_seconds": 45,
@@ -116,12 +126,16 @@ DEFAULT_CONFIG = {
         "viewport": {"width": 1920, "height": 1080},
     },
     "account_geo": {
-        "account_1": {"locale": "en-CA", "timezone_id": "America/Toronto"},
-        "account_2": {"locale": "ru-RU", "timezone_id": "Europe/Moscow"},
-        "account_3": {"locale": "en-US", "timezone_id": "America/New_York"},
-        "account_4": {"locale": "en-GB", "timezone_id": "Europe/London"},
-        "account_5": {"locale": "de-DE", "timezone_id": "Europe/Berlin"},
-        "account_6": {"locale": "nl-NL", "timezone_id": "Europe/Amsterdam"},
+        "account_1": {"locale": "sr-RS", "timezone_id": "Europe/Belgrade"},
+        "account_2": {"locale": "bg-BG", "timezone_id": "Europe/Sofia"},
+        "account_3": {"locale": "cs-CZ", "timezone_id": "Europe/Prague"},
+        "account_4": {"locale": "ja-JP", "timezone_id": "Asia/Tokyo"},
+        "account_5": {"locale": "en-SG", "timezone_id": "Asia/Singapore"},
+        "account_6": {"locale": "hu-HU", "timezone_id": "Europe/Budapest"},
+        "account_7": {"locale": "nl-BE", "timezone_id": "Europe/Brussels"},
+        "account_8": {"locale": "sq-AL", "timezone_id": "Europe/Tirane"},
+        "account_9": {"locale": "uk-UA", "timezone_id": "Europe/Kyiv"},
+        "account_10": {"locale": "de-DE", "timezone_id": "Europe/Berlin"},
     },
 }
 
@@ -404,11 +418,41 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
 #  main
 # ---------------------------------------------------------------- #
 
+def select_accounts(cfg: dict, only: list[str] | None) -> list[dict]:
+    """Выбирает аккаунты для прогона.
+
+    login_accounts задан -> ровно они (enabled игнорируется).
+    Пуст -> все enabled: true из accounts.yaml (старое поведение)."""
+    all_accounts = load_accounts()
+    login_accounts = cfg.get("login_accounts") or []
+
+    if login_accounts:
+        by_name = {a["name"]: a for a in all_accounts}
+        unknown = [n for n in login_accounts if n not in by_name]
+        if unknown:
+            log.warning("login_accounts: нет в accounts.yaml: %s", ", ".join(unknown))
+        accounts = [by_name[n] for n in login_accounts if n in by_name]
+        source = "login_accounts"
+    else:
+        accounts = [a for a in all_accounts if a.get("enabled")]
+        source = "enabled: true в accounts.yaml"
+
+    if only:
+        wanted = set(only)
+        accounts = [a for a in accounts if a["name"] in wanted]
+        missing = wanted - {a["name"] for a in accounts}
+        if missing:
+            log.warning("Аккаунты не найдены среди %s: %s", source, ", ".join(sorted(missing)))
+
+    return accounts
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument(
         "--account", action="append",
-        help="Обработать только указанный(е) аккаунт(ы) (можно повторять флаг). По умолчанию — все enabled: true.",
+        help="Обработать только указанный(е) аккаунт(ы) (можно повторять флаг). "
+             "По умолчанию — все login_accounts (либо все enabled: true, если список пуст).",
     )
     parser.add_argument("--headless", dest="headless", action="store_true", default=None)
     parser.add_argument("--no-headless", dest="headless", action="store_false")
@@ -426,16 +470,10 @@ def main() -> int:
     if args.headless is not None:
         cfg["headless"] = args.headless
 
-    accounts = [a for a in load_accounts() if a.get("enabled")]
-    if args.account:
-        wanted = set(args.account)
-        accounts = [a for a in accounts if a["name"] in wanted]
-        missing = wanted - {a["name"] for a in accounts}
-        if missing:
-            log.warning("Аккаунты не найдены среди enabled: true в accounts.yaml: %s", ", ".join(sorted(missing)))
+    accounts = select_accounts(cfg, args.account)
 
     if not accounts:
-        log.error("Нет ни одного аккаунта для обработки — проверь accounts.yaml / --account")
+        log.error("Нет ни одного аккаунта для обработки — проверь login_accounts / accounts.yaml / --account")
         return 1
 
     log.info(

@@ -152,8 +152,19 @@ async def _fetch_comments_page(
         )
         return FetchResult(error_kind="network")
 
-    listing_data = data.get("data", {})
+    listing_data = data.get("data", {}) if isinstance(data, dict) else {}
     children = listing_data.get("children", [])
+
+    if not children:
+        log.warning(
+            "[%s] пустой листинг: status=%s top_keys=%s data_keys=%s dist=%s body[:200]=%r",
+            account_name,
+            resp.status_code,
+            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+            list(listing_data.keys()),
+            listing_data.get("dist"),
+            resp.text[:200],
+        )
     comments = [c.get("data", {}) for c in children if c.get("kind") == "t1"]
 
     listing_after = listing_data.get("after")

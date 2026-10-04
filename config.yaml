@@ -37,12 +37,12 @@ full_page_threshold: 90
 
 # ---- Догоняющая пагинация ----
 # Листаем дальше, пока на странице не встретится уже виденный комментарий.
-pagination_max_pages: 5
+pagination_max_pages: 0
 pagination_delay_min_seconds: 0.1
 pagination_delay_max_seconds: 0.4
 
 # ---- Свежесть / отправка ----
-max_age_seconds: 120
+max_age_seconds: 15
 
 # СТАТИЧЕСКИЙ лимит отправки в store_items (элементов/сек, на все аккаунты).
 # Используется только как безопасный fallback: когда queue_control.enabled
@@ -61,14 +61,14 @@ target_rate_per_second: 80
 queue_control:
   enabled: true
   url: "http://127.0.0.1:9000/queue"
-  poll_interval_seconds: 1
+  poll_interval_seconds: 0.5
   request_timeout_seconds: 2
 
   # Минимум, ниже которого bpipe_queue опускаться не должна.
-  target_min: 198
+  target_min: 200
   # Ускоряемся, пока bpipe_queue < target_min * headroom_ratio
   # (запас, чтобы очередь держалась ВЫШЕ target_min, а не качалась вокруг него).
-  headroom_ratio: 1.10
+  headroom_ratio: 1.25
   # Выше этого — тормозим. Если не задан: bpipe_max * high_fraction.
   # target_high: 1000
   high_fraction: 0.5
