@@ -88,7 +88,7 @@ accounts:
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 
   - name: account_9
-    enabled: true
+    enabled: false
     cookie_file: cookies/account_9.json
     proxy_port: 7899
     impersonate: chrome119
@@ -204,6 +204,9 @@ accounts:
     impersonate: chrome123
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
+  # Было enabled: true, но в vless_accounts.env для account_25 нет ноды
+  # (нет слушателя на 7915) — воркер только копил сетевые ошибки.
+  # Включай после добавления ноды и первого харвеста cookies.
   - name: account_25
     enabled: false
     cookie_file: cookies/account_25.json

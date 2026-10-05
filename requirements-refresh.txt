@@ -1,22 +1,21 @@
-# Зависимости для scripts/refresh_cookies.py И scripts/refresh_guest_cookies.py
-# — сознательно отдельный файл от requirements.txt основного скрапера
-# (main.py + scraper/): компоненты максимально независимы, падение/
-# зависание этого джоба (или тяжёлые зависимости Playwright) не должны
-# требовать пересборки образа scraper'а.
+# Зависимости для scripts/refresh_cookies.py, scripts/refresh_guest_cookies.py,
+# scripts/manual_login.py, scripts/rotation.py, scripts/rotate_fingerprints.py,
+# scripts/check_nodes.py, scripts/test_curl_guest.py — сознательно отдельный
+# файл от requirements.txt основного скрапера (main.py + scraper/): тяжёлые
+# зависимости Playwright не должны попадать в образ scraper'а.
 #
-# curl_cffi здесь нужен ТОЛЬКО refresh_guest_cookies.py (шаг верификации
-# гостевых cookies тем же impersonate-профилем, что у реального
-# скрапера) — refresh_cookies.py его не использует.
+# Установка (venv в корне проекта — его же используют systemd-юниты):
+#   python3 -m venv venv
+#   venv/bin/pip install -r requirements-refresh.txt
+#   venv/bin/playwright install --with-deps chromium firefox webkit
+#   # webkit НУЖЕН: гостевые слоты 12,14,15,17,18,20,21 — Safari/iOS-профили
+#   # только если есть слоты с channel: chrome / channel: msedge:
+#   venv/bin/playwright install chrome msedge
 #
-# Установка:
-#   python3 -m venv .venv-refresh
-#   .venv-refresh/bin/pip install -r scripts/requirements-refresh.txt
-#   .venv-refresh/bin/playwright install --with-deps chromium firefox
-#   # только если в accounts.yaml/refresh_guest_cookies.yaml есть слоты
-#   # с channel: chrome / channel: msedge:
-#   .venv-refresh/bin/playwright install chrome msedge
+# Для manual_login.py дополнительно (apt): xvfb x11vnc novnc websockify
 
 playwright>=1.40
-playwright-stealth>=1.0.6
+# 1.x: в 2.x убрали stealth_sync, на который рассчитан refresh_cookies.py
+playwright-stealth>=1.0.6,<2
 pyyaml>=6.0
 curl_cffi>=0.7.0

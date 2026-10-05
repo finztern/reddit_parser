@@ -20,7 +20,7 @@ class ConfigStore:
 
     def load_once(self):
         with open(self.path, "r", encoding="utf-8") as f:
-            self._data = yaml.safe_load(f)
+            self._data = yaml.safe_load(f) or {}
 
     async def reload_loop(self):
         while True:
@@ -29,12 +29,15 @@ class ConfigStore:
                 old = self._data
                 self.load_once()
                 if old != self._data:
+                    qc = self.get("queue_control", {}) or {}
                     log.info(
-                        "config.yaml обновлён: target_rate=%s max_age=%ss subs=%d batch_max_items=%s",
-                        self.get("target_rate_per_second"),
+                        "config.yaml обновлён: stream_subs=%s max_age=%ss batch_max_items=%s "
+                        "queue_control=%s fallback_rate=%s",
+                        "+".join(self.get("stream_subs", ["all"])),
                         self.get("max_age_seconds"),
-                        len(self.get("subreddits", [])),
                         self.get("batch_max_items"),
+                        "on" if qc.get("enabled") else "off",
+                        self.get("target_rate_per_second"),
                     )
             except Exception as e:
                 log.warning("Не удалось перечитать config.yaml (оставляю старые значения): %s", e)
@@ -46,7 +49,7 @@ class ConfigStore:
 def load_accounts() -> list[dict]:
     with open(ACCOUNTS_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
-    return data.get("accounts", [])
+    return (data or {}).get("accounts", [])
 
 
 def load_cookies(cookie_file: Path) -> dict:
@@ -56,30 +59,20 @@ def load_cookies(cookie_file: Path) -> dict:
 
 
 # ---------------------------------------------------------------- #
-#  Hot-reload cookies на аккаунт (см. scripts/refresh_cookies.py)
+#  Hot-reload cookies на аккаунт
 #
-#  cookie_file может обновляться ВНЕШНИМ процессом (Playwright-джоб,
-#  scripts/refresh_cookies.py) поверх уже запущенного контейнера —
-#  атомарно, через os.replace() (см. README/ARCHITECTURE). Раньше
-#  account_worker читал cookies ровно один раз при старте. Теперь на
-#  каждой итерации основного цикла дёшево проверяет mtime файла (без
-#  блокирующего чтения самого файла, если mtime не изменился) и
-#  перечитывает содержимое, только если файл реально поменялся с
-#  прошлой успешной загрузки — по аналогии с ConfigStore, но на уровне
-#  одного файла на аккаунт и без отдельной фоновой asyncio-задачи
-#  (проверяется прямо из account_worker).
+#  cookie_file обновляется ВНЕШНИМИ процессами (refresh_cookies.py для
+#  логин-аккаунтов, refresh_guest_cookies.py для гостевых) атомарно, через
+#  os.replace(). account_worker на каждой итерации дёшево проверяет mtime
+#  файла и перечитывает содержимое, только если файл реально поменялся.
 # ---------------------------------------------------------------- #
 
 class CookieFileWatcher:
     """Отслеживает изменения cookie_file по mtime.
 
-    min_check_interval — верхний предел частоты самой проверки
-    (os.stat — дешёвый syscall, но при очень частых циклах у "горячих"
-    групп нет смысла дёргать его чаще, чем реально может обновиться
-    файл: обновляющий его джоб бежит раз в дни, а не в секунды). Это
-    ограничение ТОЛЬКО на частоту проверки, а не на задержку применения
-    уже обнаруженного изменения — как только файл замечен изменившимся,
-    новые cookies возвращаются немедленно."""
+    min_check_interval — верхний предел частоты самой проверки (os.stat).
+    Это ограничение ТОЛЬКО на частоту проверки, а не на задержку
+    применения уже обнаруженного изменения."""
 
     __slots__ = ("path", "min_check_interval", "_mtime", "_last_check")
 
@@ -91,16 +84,10 @@ class CookieFileWatcher:
 
     def load_if_changed(self, force: bool = False) -> dict | None:
         """Возвращает новый dict cookies, если файл изменился (или это
-        самый первый вызов — вызывающий код обязан сделать его с
-        force=True при инициализации воркера) с прошлой успешной
-        загрузки, иначе — None.
+        самый первый вызов с force=True), иначе None.
 
-        Ошибки чтения/парсинга (в т.ч. теоретическая гонка с частично
-        записанным файлом, хотя scripts/refresh_cookies.py и пишет
-        атомарно через os.replace()) не поднимаются наружу: логируются
-        и трактуются как "изменений нет" — старые (последние рабочие)
-        cookies остаются в силе, воркер не падает и не встаёт колом
-        из-за временно битого файла."""
+        Ошибки чтения/парсинга не поднимаются наружу: логируются и
+        трактуются как "изменений нет" — старые cookies остаются в силе."""
         now = time.monotonic()
         if not force and self._mtime is not None and (now - self._last_check) < self.min_check_interval:
             return None

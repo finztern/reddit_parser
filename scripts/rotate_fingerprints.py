@@ -11,20 +11,20 @@ scripts/rotate_fingerprints.py
 Список допустимых impersonate-таргетов берётся из УСТАНОВЛЕННОГО
 curl_cffi (ничего не хардкодится), UA собирается под каждый таргет
 автоматически. Разные аккаунты получают разные таргеты (пока хватает
-уникальных). Устаревшие версии (chrome99 и т.п.) по умолчанию
-отфильтровываются — см. --allow-old.
+уникальных). Устаревшие версии по умолчанию отфильтровываются
+(--allow-old).
 
-Запускать тем же python, где стоит curl_cffi (.venv-refresh/venv):
+Запускать тем же python, где стоит curl_cffi (venv):
 
-    python3 scripts/rotate_fingerprints.py --dry-run          # только показать
-    python3 scripts/rotate_fingerprints.py                    # все гостевые слоты
-    python3 scripts/rotate_fingerprints.py --account account_5 --account account_6
-    python3 scripts/rotate_fingerprints.py --seed 42          # воспроизводимо
-    python3 scripts/rotate_fingerprints.py --refresh          # + сразу перегенерить cookies
+    venv/bin/python3 scripts/rotate_fingerprints.py --dry-run
+    venv/bin/python3 scripts/rotate_fingerprints.py                    # все гостевые слоты
+    venv/bin/python3 scripts/rotate_fingerprints.py --account account_15
+    venv/bin/python3 scripts/rotate_fingerprints.py --seed 42
+    venv/bin/python3 scripts/rotate_fingerprints.py --refresh          # + сразу перегенерить cookies
 
-Логин-аккаунты (те, что НЕ в guest_accounts) по умолчанию не трогаются:
-их сессия привязана к отпечатку. Включить: --include-login (тогда
-после этого им нужен ручной перелогин).
+Логин-аккаунты (account_1..10, НЕ из guest_accounts) по умолчанию не
+трогаются: их сессия привязана к отпечатку. --include-login — менять и их
+(потом нужен ручной перелогин).
 
 Перед записью делается бэкап *.bak-<время>. Комментарии в секции
 guest_accounts при перегенерации теряются (остаются в бэкапе).
@@ -47,11 +47,8 @@ ACCOUNTS_PATH = ROOT / "accounts.yaml"
 GUEST_PATH = ROOT / "scripts" / "refresh_guest_cookies.yaml"
 GUEST_SCRIPT = ROOT / "scripts" / "refresh_guest_cookies.py"
 
-# Минимальные мажорные версии, ниже которых таргет считается "старым и
-# подозрительным" в 2026 (отключается --allow-old).
 MIN_VERSION = {"chrome": 116, "firefox": 115, "edge": 120, "safari": 17}
 
-# (имя пресета Playwright, кусок UA "Linux; Android ...; модель")
 ANDROID_DEVICES = [
     ("Pixel 7", "Android 14; Pixel 7"),
     ("Pixel 5", "Android 13; Pixel 5"),
@@ -66,8 +63,14 @@ class Target:
     family: str  # chrome / edge / firefox / safari
     major: int
     minor: int = 0
+    patch: int | None = None
     ios: bool = False
     android: bool = False
+
+    @property
+    def version(self) -> str:
+        v = f"{self.major}.{self.minor}"
+        return v + (f".{self.patch}" if self.patch is not None else "")
 
 
 @dataclass
@@ -111,14 +114,23 @@ def parse_target(name: str) -> Target | None:
         return Target(name, "firefox", int(m.group(1)))
     m = re.fullmatch(r"safari(\d+)(?:_(\d+))?(_ios)?", name)
     if m:
+        ios = bool(m.group(3))
         if m.group(2) is not None:
-            major, minor = int(m.group(1)), int(m.group(2))
-        else:
-            d = m.group(1)
-            if len(d) < 2:
-                return None
-            major, minor = int(d[:-1]), int(d[-1])
-        return Target(name, "safari", major, minor, ios=bool(m.group(3)))
+            # safari17_2_ios, safari15_3: версия через "_"
+            return Target(name, "safari", int(m.group(1)), int(m.group(2)), None, ios=ios)
+        # Слитная запись: safari153=15.3, safari170=17.0, safari184=18.4,
+        # safari260=26.0, safari2601=26.0.1. Мажор — всегда ДВЕ цифры.
+        # Раньше брали "всё кроме последней цифры": safari2601 -> major=260,
+        # minor=1 -> UA "Version/260.1".
+        d = m.group(1)
+        if len(d) < 2:
+            return None
+        major, rest = int(d[:2]), d[2:]
+        if not rest:
+            return Target(name, "safari", major, 0, None, ios=ios)
+        if len(rest) == 1:
+            return Target(name, "safari", major, int(rest), None, ios=ios)
+        return Target(name, "safari", major, int(rest[0]), int(rest[1:]), ios=ios)
     return None
 
 
@@ -135,7 +147,7 @@ def build_pool(args) -> list[Target]:
             continue
         if args.no_mobile and (t.ios or t.android):
             continue
-        key = (t.family, t.major, t.minor, t.ios, t.android)
+        key = (t.family, t.major, t.minor, t.patch, t.ios, t.android)
         if key in seen:  # safari180 и safari18_0 — один и тот же таргет
             continue
         seen.add(key)
@@ -180,7 +192,7 @@ def build_profile(t: Target, rng: random.Random) -> Profile:
         return Profile(t.name, ua, "firefox", None, None, f"Firefox {t.major}")
 
     # safari
-    ver = f"{t.major}.{t.minor}"
+    ver = t.version
     if t.ios:
         # с iOS 26 в UA замороженно "18_6"
         osv = "18_6" if t.major >= 26 else f"{t.major}_{t.minor}"
@@ -235,6 +247,10 @@ def patch_guest_text(text: str, guest: dict, profiles: dict[str, Profile]) -> st
             entry["device"] = p.device
         entry["user_agent"] = p.user_agent
         entry["impersonate"] = p.impersonate
+        # geo (его пишет rotation.py при смене ноды) не должен теряться
+        old_geo = (guest.get(name) or {}).get("geo")
+        if old_geo:
+            entry["geo"] = old_geo
         new[name] = entry
     ordered = {k: new[k] for k in sorted(new, key=acc_num)}
     tail = yaml.safe_dump({"guest_accounts": ordered}, allow_unicode=True,
@@ -301,7 +317,7 @@ def main() -> int:
     login_touched = [n for n in selected if n not in guest]
     if login_touched:
         print(f"\nВНИМАНИЕ: {', '.join(login_touched)} — логин-аккаунты: в accounts.yaml отпечаток "
-              "сменится, но их cookies/сессию нужно обновить вручную (refresh_cookies.py / перелогин).")
+              "сменится, но их сессию нужно обновить вручную (manual_login.py / перелогин).")
 
     if args.dry_run:
         print("\n[dry-run] ничего не записано")
@@ -310,7 +326,12 @@ def main() -> int:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     backup(ACCOUNTS_PATH, stamp)
     backup(GUEST_PATH, stamp)
-    ACCOUNTS_PATH.write_text(patch_accounts_text(accounts_text, profiles), encoding="utf-8")
+    # accounts.yaml может быть bind-mount'ом одного файла в контейнер —
+    # пишем в тот же inode, а не через замену файла.
+    with open(ACCOUNTS_PATH, "r+", encoding="utf-8") as f:
+        f.seek(0)
+        f.write(patch_accounts_text(accounts_text, profiles))
+        f.truncate()
     GUEST_PATH.write_text(patch_guest_text(guest_text, guest, profiles), encoding="utf-8")
     print(f"\nOK: записано (бэкапы *.bak-{stamp})")
 
@@ -324,8 +345,8 @@ def main() -> int:
         print(f"refresh_guest_cookies.py завершился с кодом {rc}")
     else:
         print("\nДальше:")
-        print("  1) python3 scripts/refresh_guest_cookies.py   # перегенерить cookies под новые отпечатки")
-        print("  2) docker compose restart scraper             # accounts.yaml читается только при старте")
+        print("  1) venv/bin/python3 scripts/refresh_guest_cookies.py   # cookies под новые отпечатки")
+        print("  2) docker compose restart scraper                      # accounts.yaml читается при старте")
     return 0
 
 

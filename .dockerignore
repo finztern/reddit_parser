@@ -3,3 +3,16 @@ __pycache__/
 .git
 .gitignore
 README.md
+ARCHITECTURE.md
+
+# секреты и рабочие данные — в образ не нужны (и не должны попадать в контекст сборки)
+cookies/
+storage_state/
+state/
+vless_accounts.env
+all_nodes.txt
+mihomo_config.yaml
+venv/
+.venv*/
+*.bak-*
+*.unverified.json

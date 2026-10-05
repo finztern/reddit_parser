@@ -1,18 +1,22 @@
 # /etc/systemd/system/refresh-cookies.service
 #
-# ИСПРАВЛЕНО: добавлен User=/Group= — по той же причине, что и у
-# refresh-guest-cookies.service: bundled chromium (без channel) стоит
-# в кеше пользователя sashko, root его не видит.
+# Обновление сессий ЛОГИН-аккаунтов (account_1..10). Гостевые слоты
+# обслуживает refresh-guest-cookies.service.
 #
-# --config указан явно (обходит несостыковку дефолтного пути в самом
-# refresh_cookies.py — по умолчанию он ищет refresh_cookies.yaml в
-# корне проекта, а файл реально лежит в scripts/).
+# ПУТИ: WorkingDirectory/ExecStart ниже — поправь под свою установку.
+# Раньше у двух сервисов были РАЗНЫЕ каталоги (reddit_scraper и
+# reddit_parser) — теперь оба на /home/sashko/reddit_scraper; venv — в
+# корне проекта (`python3 -m venv venv`, см. requirements-refresh.txt).
 #
-# Полностью независим от systemd-юнита/контейнера самого scraper'а —
-# падение этого джоба не влияет на account_worker и наоборот.
+# User/Group: браузеры Playwright стоят в кеше пользователя
+# (~/.cache/ms-playwright), root их не видит.
+#
+# flock: оба джоба (логин и гостевой) поднимают браузер — на слабом хосте
+# одновременный запуск = OOM. Общий lock-файл ставит их в очередь
+# (ожидание блокировки входит в TimeoutStartSec).
 
 [Unit]
-Description=Reddit scraper - обновление cookies (Playwright job)
+Description=Reddit scraper - обновление cookies логин-аккаунтов (Playwright job)
 After=network-online.target
 Wants=network-online.target
 
@@ -21,13 +25,11 @@ Type=oneshot
 User=sashko
 Group=sashko
 WorkingDirectory=/home/sashko/reddit_scraper
-ExecStart=/home/sashko/reddit_scraper/venv/bin/python3 scripts/refresh_cookies.py --config scripts/refresh_cookies.yaml
-# Ненулевой exit code (см. refresh_cookies.py: возвращается 1, если
-# хотя бы один аккаунт требует ручного вмешательства) переводит юнит в
-# failed — это видно в `systemctl status refresh-cookies.service` /
-# `journalctl -u refresh-cookies.service` и может быть повешено на
-# внешний мониторинг (email/telegram-нотификация и т.п.).
-TimeoutStartSec=1800
+ExecStart=/usr/bin/flock /tmp/reddit_scraper_browser.lock /home/sashko/reddit_scraper/venv/bin/python3 scripts/refresh_cookies.py --config scripts/refresh_cookies.yaml
+# Ненулевой exit code (хотя бы один аккаунт разлогинен) переводит юнит в
+# failed — виден в `systemctl status refresh-cookies.service` /
+# `journalctl -u refresh-cookies.service`.
+TimeoutStartSec=3600
 
 [Install]
 WantedBy=multi-user.target

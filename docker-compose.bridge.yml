@@ -3,9 +3,12 @@
 #
 # Запуск:  docker compose -f docker-compose.bridge.yml up -d --build
 #
-# ЛОГИ: см. комментарий в docker-compose.yml — тот же лимит на
-# json-file (10MB x 3 файла на контейнер), чтобы логи не копились
-# бесконечно при restart: unless-stopped.
+# ЛОГИ: см. комментарий в docker-compose.yml — тот же лимит json-file.
+#
+# ОГРАНИЧЕНИЕ: scripts/rotation.py ходит в API mihomo на 127.0.0.1:9090 —
+# в bridge-режиме этот порт внутри контейнера недоступен с хоста
+# (external-controller слушает 127.0.0.1 контейнера), так что смена ноды
+# на лету в этом режиме не работает. Для rotation используй Linux-вариант.
 
 x-logging: &default-logging
   driver: json-file
@@ -42,9 +45,12 @@ services:
       - ACCOUNTS_PATH=/app/accounts.yaml
       # "mihomo" — DNS-имя соседнего контейнера в этой же docker-сети
       - PROXY_HOST=mihomo
-      # пайплайн (store_item) слушает на хосте, а не в докере —
-      # host.docker.internal указывает наружу, на хост-машину
-      - STORE_ENDPOINT=http://host.docker.internal:9000/store_item
+      # пайплайн слушает на хосте, а не в докере — host.docker.internal
+      # указывает наружу, на хост-машину. Эндпоинт БАТЧЕВЫЙ (/store_items).
+      - STORE_ENDPOINT=http://host.docker.internal:9000/store_items
+      # 127.0.0.1 из config.yaml внутри контейнера — это сам контейнер,
+      # поэтому URL очереди (QueueGovernor) тоже нужно переопределить:
+      - QUEUE_CONTROL_URL=http://host.docker.internal:9000/queue
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

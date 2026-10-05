@@ -11,6 +11,11 @@ from .constants import DEFAULT_CONNECT_TIMEOUT_SECONDS, HTTP_EXECUTOR_SLACK_SECO
 from .health import ExecutorHandle, ExecutorHealth
 from .models import FetchResult
 
+# Потолок страниц, когда pagination_max_pages <= 0 ("без лимита"):
+# листинг Reddit всё равно не отдаёт глубже ~1000 элементов (10 x 100),
+# а пагинация и так останавливается по max_age / пересечению с виденными.
+UNLIMITED_PAGES_CAP = 10
+
 
 def parse_retry_after(resp) -> float | None:
     """Reddit может прислать Retry-After в секундах (числом)."""
@@ -56,7 +61,9 @@ def parse_ratelimit_headers(resp) -> dict | None:
 
 class CurlSessionHandle:
     """Session на аккаунт. При таймауте не закрывается (зависший поток
-    может ещё держать её), а заменяется новой через swap()."""
+    может ещё держать её), а заменяется новой через swap(). swap() также
+    вызывается при hot-reload cookies: сессия копит Set-Cookie от Reddit,
+    и устаревшие значения не должны конфликтовать со свежими из файла."""
 
     def __init__(self, impersonate: str, proxies: dict | None):
         self._impersonate = impersonate
@@ -87,7 +94,7 @@ async def _fetch_comments_page(
 ) -> FetchResult:
     """Один HTTP-запрос к .../comments.json (одна страница листинга).
     http_executor.current и curl_session.current резолвятся здесь, на
-    каждый запрос (см. health.py / CurlSessionHandle)."""
+    каждый запрос."""
     url = f"{base_url}/r/{subs_joined}/comments.json"
     params = {"limit": fetch_limit}
     if after:
@@ -112,8 +119,10 @@ async def _fetch_comments_page(
         future = loop.run_in_executor(http_executor.current, call)
 
         if executor_health is not None:
-            executor_health.on_submit()
-            future.add_done_callback(executor_health.on_future_done)
+            generation = executor_health.on_submit()
+            future.add_done_callback(
+                lambda _f, g=generation: executor_health.on_future_done(g)
+            )
 
         resp = await asyncio.wait_for(future, timeout=total_wait)
         ratelimit = parse_ratelimit_headers(resp)
@@ -194,13 +203,17 @@ async def fetch_comments(
     """Тянет одну или несколько страниц .../comments.json подряд.
 
     `stop_when(page_comments) -> bool` (опционально) вызывается после
-    каждой успешной непустой страницы; если вернул True — пагинация
-    останавливается (используется воркером: "дошли до уже виденных
-    комментариев, дальше листать не нужно").
+    каждой успешной непустой страницы; True — пагинация останавливается
+    ("дошли до уже виденных комментариев").
+
+    max_pages <= 0 означает "без лимита" (на деле — не более
+    UNLIMITED_PAGES_CAP; раньше 0 приводил к остановке сразу после
+    первой страницы).
 
     Ошибка на любой странице обрывает пагинацию и возвращается целиком —
     накопленные комментарии отбрасываются (безопасно: они ещё не попали
     в SeenCache и будут подхвачены на следующем опросе)."""
+    page_cap = max_pages if max_pages and max_pages > 0 else UNLIMITED_PAGES_CAP
     all_comments: list[dict] = []
     after: str | None = None
     pages_fetched = 0
@@ -231,11 +244,11 @@ async def fetch_comments(
             break
         if not page.after:
             break
-        if pages_fetched >= max_pages:
+        if pages_fetched >= page_cap:
             log.info(
-                "[%s] достигнут pagination_max_pages=%d, пересечения с виденными так и нет "
+                "[%s] достигнут лимит страниц (%d), пересечения с виденными так и нет "
                 "(age последнего=%.1fs <= max_age=%ss) — вероятно, пропуск комментариев",
-                account_name, max_pages, last_age, max_age,
+                account_name, page_cap, last_age, max_age,
             )
             break
 

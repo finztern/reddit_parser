@@ -7,15 +7,14 @@ Reddit fresh-comments scraper -> POST /store_items (batch)
 (scraper/scheduler.py): слоты выдаются по кругу равномерно, аккаунт со
 своим X-Ratelimit-бюджетом пропускается, пока не "отдохнул". Интервал
 слотов подстраивается по доле дублей на первой странице ответа.
-Пагинация идёт до пересечения с уже виденными комментариями (догоняет
-пропуски).
+Пагинация идёт до пересечения с уже виденными комментариями.
 
 Скорость отправки в пайплайн (потолок TokenBucket) ведёт QueueGovernor
 (scraper/governor.py) по состоянию очереди коллектора (queue_control в
 config.yaml): цель — чтобы bpipe_queue не опускалась ниже target_min.
 
-Остальное — общий SeenCache, health-мониторинг executor'а, graceful
-shutdown — как раньше, см. ARCHITECTURE.md.
+Общий SeenCache, health-мониторинг executor'а, graceful shutdown —
+см. ARCHITECTURE.md.
 """
 
 import asyncio
@@ -33,6 +32,7 @@ from scraper.constants import (
     EXECUTOR_SWAP_COOLDOWN_SECONDS,
     EXECUTOR_SWAP_THRESHOLD,
     PROXY_HOST,
+    QUEUE_CONTROL_URL_OVERRIDE,
     log,
 )
 from scraper.governor import QueueGovernor
@@ -65,14 +65,15 @@ async def main():
         return
 
     qc = config.get("queue_control", {}) or {}
-    qc_enabled = bool(qc.get("enabled", False)) and bool(qc.get("url"))
+    qc_url = QUEUE_CONTROL_URL_OVERRIDE or qc.get("url")
+    qc_enabled = bool(qc.get("enabled", False)) and bool(qc_url)
     start_rate = float(qc.get("initial_rate", 80)) if qc_enabled else float(config.get("target_rate_per_second", 80))
 
     log.info(
         "Запуск: %d аккаунт(ов), поток=r/%s, скорость=%s, max_age=%ss, "
         "batch_max_items=%s, старт_интервал_слота=%ss, proxy_host=%s",
         len(accounts), "+".join(config.get("stream_subs", ["all"])),
-        f"авто по очереди ({qc.get('url')}, target_min={qc.get('target_min', 200)})"
+        f"авто по очереди ({qc_url}, target_min={qc.get('target_min', 200)})"
         if qc_enabled else f"статичная {start_rate}/сек",
         config.get("max_age_seconds"),
         config.get("batch_max_items", 500), config.get("stream_start_interval_seconds", 1.5),
@@ -101,7 +102,10 @@ async def main():
         store_connector = aiohttp.TCPConnector(ttl_dns_cache=300, keepalive_timeout=60)
         async with aiohttp.ClientSession(connector=store_connector) as store_session:
             governor = QueueGovernor(config, bucket, store_session, log)
-            tasks = [
+
+            # "Ядро" — без любой из этих задач процесс бессмыслен: падение
+            # одной из них останавливает процесс (docker перезапустит).
+            core_tasks = [
                 asyncio.create_task(config.reload_loop(), name="config_reload_loop"),
                 asyncio.create_task(governor.run(), name="queue_governor"),
                 asyncio.create_task(
@@ -119,8 +123,10 @@ async def main():
                 asyncio.create_task(scheduler.run(), name="poll_scheduler"),
                 asyncio.create_task(scheduler.stats_loop(log), name="stream_stats"),
             ]
+
+            worker_tasks = []
             for account in accounts:
-                tasks.append(
+                worker_tasks.append(
                     asyncio.create_task(
                         supervised(
                             account_worker,
@@ -133,25 +139,53 @@ async def main():
                     )
                 )
 
+            # ИСПРАВЛЕНО: раньше все задачи (включая воркеры) ждались через
+            # FIRST_COMPLETED — завершение ОДНОГО воркера (return при
+            # отсутствии cookies / исчерпании auth-ошибок) останавливало весь
+            # процесс, а docker (restart: unless-stopped) поднимал его снова
+            # по кругу. Теперь воркеры следят отдельно: процесс останавливается
+            # только по сигналу, при падении ядра или когда завершились ВСЕ воркеры.
+            alive = {"n": len(worker_tasks)}
+            all_workers_done = asyncio.Event()
+
+            def _on_worker_done(t: asyncio.Task):
+                alive["n"] -= 1
+                if not t.cancelled():
+                    exc = t.exception()
+                    if exc is not None:
+                        log.error("Воркер %s завершился с ошибкой: %r", t.get_name(), exc)
+                    else:
+                        log.warning("Воркер %s завершился (остальные продолжают работу, живых: %d)",
+                                    t.get_name(), alive["n"])
+                if alive["n"] <= 0:
+                    all_workers_done.set()
+
+            for t in worker_tasks:
+                t.add_done_callback(_on_worker_done)
+
             stop_waiter = asyncio.create_task(stop_event.wait(), name="stop_signal_waiter")
+            workers_waiter = asyncio.create_task(all_workers_done.wait(), name="all_workers_done_waiter")
             done, _pending = await asyncio.wait(
-                [*tasks, stop_waiter], return_when=asyncio.FIRST_COMPLETED
+                [*core_tasks, stop_waiter, workers_waiter], return_when=asyncio.FIRST_COMPLETED
             )
 
             if stop_waiter in done:
-                log.info("Останавливаю %d фоновых задач...", len(tasks))
+                log.info("Останавливаю %d фоновых задач...", len(core_tasks) + len(worker_tasks))
+            elif workers_waiter in done:
+                log.error("Все воркеры аккаунтов завершились — останавливаю процесс")
             else:
-                stop_waiter.cancel()
                 for t in done:
-                    if t is not stop_waiter:
-                        exc = t.exception()
-                        if exc is not None:
-                            log.error("Задача %s завершилась с ошибкой, останавливаю процесс", t.get_name())
+                    if t.cancelled():
+                        continue
+                    exc = t.exception()
+                    log.error("Ядро: задача %s завершилась%s, останавливаю процесс",
+                              t.get_name(), f" с ошибкой: {exc!r}" if exc else "")
 
-            for t in tasks:
+            everything = [*core_tasks, *worker_tasks, stop_waiter, workers_waiter]
+            for t in everything:
                 if not t.done():
                     t.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+            await asyncio.gather(*everything, return_exceptions=True)
     finally:
         http_executor_handle.shutdown(wait=False, cancel_futures=True)
 

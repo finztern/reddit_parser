@@ -1,23 +1,21 @@
 # scripts/systemd/refresh-guest-cookies.timer
 #
 # Интервал МЕНЬШЕ TTL самой короткоживущей гостевой cookie
-# (session_tracker, ~2 часа) — с запасом, чтобы cookies обновлялись
-# ДО того, как протухнут, а не по факту auth-ошибок в скрапере.
-# 75 минут — компромисс между запасом и лишней нагрузкой/трафиком.
+# (session_tracker, ~2 часа) с запасом. Прогон по 15 слотам идёт ~15-20
+# минут, а провалившийся слот повторится только на следующем запуске —
+# поэтому 60 минут, а не 75: cookie успевает смениться, даже если слот
+# сорвался один раз (возраст ~2ч — на пределе, но ещё живая).
 #
-# RandomizedDelaySec размазывает фактический момент запуска — на
-# случай, если refresh-cookies.timer (реальный логин) тоже когда-то
-# сработает рядом по времени: два одновременных браузерных процесса
-# на слабом хосте — риск OOM (см. docstring refresh_guest_cookies.py).
+# OnUnitActiveSec считается от последнего ЗАПУСКА юнита; два одновременных
+# браузерных джоба разводит flock в .service (см. комментарий там).
 
 [Unit]
 Description=Reddit scraper - периодический рефреш гостевых cookies
 
 [Timer]
 OnBootSec=5min
-OnUnitActiveSec=75min
-RandomizedDelaySec=5min
-Persistent=true
+OnUnitActiveSec=60min
+RandomizedDelaySec=3min
 
 [Install]
 WantedBy=timers.target

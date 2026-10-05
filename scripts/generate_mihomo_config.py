@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """
 Генерирует mihomo_config.yaml из:
-  - vless_accounts.env   — простой файл вида account_1 = vless://...
+  - vless_accounts.env   — файл вида account_1 = vless://...
   - accounts.yaml        — берём оттуда proxy_port для каждого account_N
+  - all_nodes.txt        — (опционально) пул дополнительных нод для
+                           ротации (см. scripts/rotation.py)
 
-Запуск (из корня проекта reddit_scraper/):
+Запуск (из корня проекта):
 
     python3 scripts/generate_mihomo_config.py
 
-После этого просто (пере)запусти контейнер mihomo:
+После этого (пере)запусти mihomo:
 
-    docker compose up -d --build mihomo
     docker compose restart mihomo
 
 Формат vless_accounts.env — по одной ссылке на аккаунт:
@@ -19,9 +20,15 @@
     account_2 = vless://uuid@host:port?...#name
 
 Строки с "#" в начале и пустые строки игнорируются. Аккаунты, для
-которых в vless_accounts.env нет строки (или она закомментирована),
-просто не получат слушателя в mihomo — воркер такого аккаунта не сможет
-подключиться, пока для него не появится ссылка.
+которых в vless_accounts.env нет строки, не получат слушателя в mihomo —
+их воркер не сможет подключиться. Это касается и гостевых слотов
+account_11..25: пока для них нет ссылок, они должны быть enabled: false.
+
+Если рядом лежит all_nodes.txt, его ноды добавляются в proxies и в
+КАЖДУЮ группу pg-account_N (после назначенной ноды) — тогда
+rotation.py сможет переключать ноду через API mihomo без рестарта.
+(Раньше эта функция существовала в rotation.extend_with_pool(), но
+генератор её не вызывал — select в mihomo отвергал ноды пула.)
 """
 
 from __future__ import annotations
@@ -42,7 +49,7 @@ ACCOUNT_LINE_RE = re.compile(r"^\s*(account_\d+)\s*=\s*(\S+)\s*$")
 
 
 def load_account_ports() -> dict[str, int]:
-    """account_1 -> 7891, ... — берём proxy_port из accounts.yaml."""
+    """account_1 -> 7892, ... — proxy_port из accounts.yaml."""
     with open(ACCOUNTS_PATH, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f) or {}
     ports = {}
@@ -99,7 +106,6 @@ def parse_vless(uri: str, fallback_name: str) -> dict:
         return v[0] if v else default
 
     name = urllib.parse.unquote(parsed.fragment) if parsed.fragment else fallback_name
-    # mihomo не любит слишком экзотичные символы в имени прокси
     name = name.strip() or fallback_name
 
     security = qget("security", "none").lower()
@@ -166,7 +172,6 @@ def parse_vless(uri: str, fallback_name: str) -> dict:
     elif net_type in ("tcp", "", "raw", "none"):
         proxy["network"] = "tcp"
     else:
-        # xhttp и прочие редкие варианты — прокидываем как есть на всякий случай
         proxy["network"] = net_type
         xhttp_opts = {"path": path}
         if host_header:
@@ -206,7 +211,7 @@ def build_config(account_ports: dict[str, int], account_links: dict[str, str]) -
     if missing:
         print(
             "ПРЕДУПРЕЖДЕНИЕ: для этих аккаунтов из accounts.yaml нет ссылки в vless_accounts.env "
-            f"(они останутся без прокси): {', '.join(sorted(missing))}",
+            f"(останутся без прокси, держи их enabled: false): {', '.join(sorted(missing, key=lambda a: int(a.split('_')[1])))}",
             file=sys.stderr,
         )
 
@@ -233,12 +238,12 @@ def build_config(account_ports: dict[str, int], account_links: dict[str, str]) -
 HEADER = """\
 # ============================================================
 #  Автоматически сгенерировано скриптом scripts/generate_mihomo_config.py
-#  НЕ РЕДАКТИРУЙ ЭТОТ ФАЙЛ РУКАМИ — правь vless_accounts.env и запускай
-#  скрипт заново, иначе изменения потеряются при следующей генерации.
+#  НЕ РЕДАКТИРУЙ ЭТОТ ФАЙЛ РУКАМИ — правь vless_accounts.env (и
+#  all_nodes.txt) и запускай скрипт заново.
 #
 #  Запускать mihomo: mihomo -f mihomo_config.yaml
 #  (mihomo = Clash.Meta core, https://github.com/MetaCubeX/mihomo)
-#  Требует mihomo с поддержкой "listeners" — актуальные релизы её имеют.
+#  Требует mihomo с поддержкой "listeners".
 # ============================================================
 
 """
@@ -253,10 +258,21 @@ def main() -> None:
         print("ОШИБКА: не удалось собрать ни одного прокси — проверь vless_accounts.env", file=sys.stderr)
         sys.exit(1)
 
+    # Пул нод для ротации (опционально, нужен scripts/rotation.py + all_nodes.txt).
+    # Импорт ленивый: rotation сам импортирует этот модуль.
+    pool_added = 0
+    try:
+        import rotation  # noqa: WPS433
+        pool_added = rotation.extend_with_pool(config)
+    except Exception as e:  # нет fcntl (Windows), нет curl_cffi и т.п. — пул просто не подключаем
+        print(f"ПРЕДУПРЕЖДЕНИЕ: пул нод для ротации не подключён ({e})", file=sys.stderr)
+
     yaml_text = yaml.safe_dump(config, allow_unicode=True, sort_keys=False, width=120)
     OUTPUT_PATH.write_text(HEADER + yaml_text, encoding="utf-8")
 
-    print(f"OK: записал {OUTPUT_PATH} — {len(config['proxies'])} нод/аккаунтов:")
+    n_assigned = len(config["listeners"])
+    print(f"OK: записал {OUTPUT_PATH} — {n_assigned} аккаунт(ов) с нодой"
+          + (f", + {pool_added} нод пула для ротации" if pool_added else "") + ":")
     for pg in config["proxy-groups"]:
         acc = pg["name"].removeprefix("pg-")
         port = next(l["port"] for l in config["listeners"] if l["proxy"] == pg["name"])

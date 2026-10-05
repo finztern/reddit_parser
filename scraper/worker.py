@@ -11,6 +11,10 @@ from .pipeline import build_payload, send_batch_to_store
 from .scheduler import PollOutcome, PollScheduler
 from .state import BackoffState, SeenCache, TokenBucket
 
+# Как часто проверять появление/починку cookies-файла, пока его нет
+# (гостевой слот ещё не харвестился) или он не читается.
+COOKIE_WAIT_SECONDS = 60
+
 
 def _fullname(c: dict) -> str:
     return c.get("name") or f"t1_{c.get('id')}"
@@ -45,20 +49,31 @@ async def account_worker(
     cookie_file = BASE_DIR / account["cookie_file"]
     proxy_url = f"http://{PROXY_HOST}:{account['proxy_port']}"
 
+    # Раньше при отсутствии файла воркер делал return и больше НЕ
+    # запускался (а в main.py завершение любого воркера останавливало весь
+    # процесс). Теперь ждём: гостевой слот можно включить до первого
+    # харвеста cookies — воркер стартует, как только файл появится.
     if not cookie_file.exists():
-        log.error("[%s] Файл с cookies не найден: %s — воркер не запущен", name, cookie_file)
-        return
+        log.warning("[%s] Файл с cookies не найден: %s — жду его появления (проверка раз в %ds)",
+                    name, cookie_file, COOKIE_WAIT_SECONDS)
+        while not cookie_file.exists():
+            await asyncio.sleep(COOKIE_WAIT_SECONDS)
 
     cookie_watcher = CookieFileWatcher(
         cookie_file, min_check_interval=config.get("cookie_reload_check_interval_seconds", 30)
     )
     cookies = cookie_watcher.load_if_changed(force=True)
-    if cookies is None:
-        log.error("[%s] Не удалось прочитать cookies из %s — воркер не запущен", name, cookie_file)
-        return
+    while cookies is None:
+        log.warning("[%s] Не удалось прочитать cookies из %s — повторю через %ds",
+                    name, cookie_file, COOKIE_WAIT_SECONDS)
+        await asyncio.sleep(COOKIE_WAIT_SECONDS)
+        cookies = cookie_watcher.load_if_changed(force=True)
 
     user_agent = account.get("user_agent") or config.get("user_agent", "Mozilla/5.0")
     impersonate = account.get("impersonate") or config.get("impersonate", "chrome")
+    # NB: реальные запросы к Reddit идут через curl_cffi с impersonate (он
+    # сам ставит UA/заголовки, соответствующие TLS-отпечатку). Эти headers
+    # живут только в aiohttp-сессии (хранилище cookie_jar).
     headers = {
         "User-Agent": user_agent,
         "Accept": "application/json, text/plain, */*",
@@ -72,6 +87,7 @@ async def account_worker(
         max_seconds=config.get("max_backoff_seconds", 300),
         max_auth_errors=config.get("max_consecutive_auth_errors", 5),
     )
+    auth_dead = False  # cookies отвергнуты — ждём обновления файла
 
     slot = scheduler.register(name)
     log.info("[%s] Старт (прокси %s, impersonate=%s) — жду слоты планировщика", name, proxy_url, impersonate)
@@ -105,10 +121,16 @@ async def account_worker(
                     if new_cookies is not None:
                         session.cookie_jar.clear()
                         session.cookie_jar.update_cookies(new_cookies)
+                        # curl-сессия копит Set-Cookie от Reddit — сбрасываем,
+                        # чтобы старые значения не конфликтовали со свежими.
+                        curl_session.swap()
                         log.info("[%s] cookies обновлены из %s (%d шт.)", name, cookie_file, len(new_cookies))
+                        if auth_dead or backoff.consecutive_auth_errors:
+                            backoff.consecutive_auth_errors = 0
+                            auth_dead = False
+                            log.info("[%s] новые cookies — сбрасываю счётчик auth-ошибок, возобновляю опрос", name)
 
-                    # Потолок отправки (bucket.rate) теперь ведёт QueueGovernor
-                    # (scraper/governor.py) — воркер его больше не трогает.
+                    # Потолок отправки (bucket.rate) ведёт QueueGovernor.
 
                     # Остановка пагинации: как только на странице встретился
                     # уже виденный комментарий — догнали, дальше листать не надо.
@@ -131,8 +153,8 @@ async def account_worker(
                         pg_min, pg_max, executor_health, stop_when=stop_when,
                     )
 
-                    # ---- ошибки: бэкофф теперь только у этого аккаунта
-                    #      (cooldown), остальные продолжают получать слоты ----
+                    # ---- ошибки: бэкофф только у этого аккаунта (cooldown),
+                    #      остальные продолжают получать слоты ----
                     if result.error_kind == "rate_or_server":
                         cooldown = backoff.register_rate_or_server_error()
                         if result.retry_after:
@@ -144,11 +166,24 @@ async def account_worker(
                     if result.error_kind == "auth":
                         cooldown, should_stop = backoff.register_auth_error()
                         if should_stop:
-                            log.error("[%s] %s подряд %d раз — cookies протухли/бан. Воркер остановлен.",
-                                      name, result.status, backoff.consecutive_auth_errors)
-                            return
-                        log.warning("[%s] %s — отдых %.1fs (auth-ошибок %d/%d)", name, result.status,
-                                    cooldown, backoff.consecutive_auth_errors, backoff.max_auth_errors)
+                            # Раньше здесь был `return`: воркер умирал насовсем
+                            # (supervised() не перезапускает штатный return) и
+                            # до ручного restart не возвращался. Гостевая cookie
+                            # живёт ~2ч, и воркер успевал умереть раньше, чем
+                            # refresh-джоб клал новый файл. Теперь — пауза с
+                            # редкими пробами; новые cookies (hot-reload выше)
+                            # сами возобновляют работу.
+                            cooldown = max(cooldown, float(config.get("auth_dead_cooldown_seconds", 120)))
+                            if not auth_dead:
+                                auth_dead = True
+                                log.error(
+                                    "[%s] %s подряд %d раз — cookies протухли/бан. Воркер на паузе: "
+                                    "жду обновления %s (проба раз в ~%.0fs)",
+                                    name, result.status, backoff.consecutive_auth_errors, cookie_file, cooldown,
+                                )
+                        else:
+                            log.warning("[%s] %s — отдых %.1fs (auth-ошибок %d/%d)", name, result.status,
+                                        cooldown, backoff.consecutive_auth_errors, backoff.max_auth_errors)
                         continue
 
                     if result.error_kind == "network":
@@ -157,6 +192,7 @@ async def account_worker(
 
                     # ---- успех ----
                     backoff.register_success()
+                    auth_dead = False
                     comments = result.comments
 
                     payloads = []

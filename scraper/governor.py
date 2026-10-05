@@ -22,6 +22,7 @@ import time
 
 import aiohttp
 
+from .constants import QUEUE_CONTROL_URL_OVERRIDE
 from .state import TokenBucket
 
 
@@ -54,6 +55,10 @@ class QueueGovernor:
 
     def _cfg(self) -> dict:
         return self.config.get("queue_control", {}) or {}
+
+    def _url(self, c: dict) -> str | None:
+        # env QUEUE_CONTROL_URL приоритетнее config.yaml (bridge-режим Docker)
+        return QUEUE_CONTROL_URL_OVERRIDE or c.get("url")
 
     def _static_rate(self) -> float:
         return float(self.config.get("target_rate_per_second", 80))
@@ -107,8 +112,7 @@ class QueueGovernor:
             w in action for w in ("slow", "pause", "stop")
         )
 
-        # База для торможения — реальная скорость, а не раздутый потолок:
-        # иначе ряд тиков уходил бы на "пустое" снижение.
+        # База для торможения — реальная скорость, а не раздутый потолок.
         base = min(rate, max(observed, min_rate))
 
         if panic:
@@ -146,8 +150,11 @@ class QueueGovernor:
                 self.observed = inst if self.observed is None else 0.5 * inst + 0.5 * self.observed
             self._last_granted, self._last_t = granted, now
 
-            url = c.get("url")
-            if not c.get("enabled", True) or not url:
+            url = self._url(c)
+            # default False — как в main.py (раньше здесь было True, и при
+            # отсутствии ключа enabled main считал governor выключенным,
+            # а он работал).
+            if not c.get("enabled", False) or not url:
                 if self._active:
                     self._active = False
                     self.log.info("[governor] выключен — статичный target_rate_per_second")
