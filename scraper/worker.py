@@ -1,4 +1,5 @@
 import asyncio
+import random
 import time
 
 import aiohttp
@@ -14,6 +15,13 @@ from .state import BackoffState, SeenCache, TokenBucket
 # Как часто проверять появление/починку cookies-файла, пока его нет
 # (гостевой слот ещё не харвестился) или он не читается.
 COOKIE_WAIT_SECONDS = 60
+
+# Кулдаун при пустом листинге (200 + пустой Listing на первой странице):
+# EMPTY_BASE * 2^(streak-1), не больше EMPTY_MAX. После EMPTY_SWAP_AFTER
+# пустых подряд пересоздаём curl-сессию (свежее соединение).
+EMPTY_BASE_COOLDOWN = 3.0
+EMPTY_MAX_COOLDOWN = 60.0
+EMPTY_SWAP_AFTER = 3
 
 
 def _fullname(c: dict) -> str:
@@ -88,6 +96,7 @@ async def account_worker(
         max_auth_errors=config.get("max_consecutive_auth_errors", 5),
     )
     auth_dead = False  # cookies отвергнуты — ждём обновления файла
+    empty_streak = 0   # подряд пустых листингов (200, children=[]) на 1-й странице
 
     slot = scheduler.register(name)
     log.info("[%s] Старт (прокси %s, impersonate=%s) — жду слоты планировщика", name, proxy_url, impersonate)
@@ -186,6 +195,22 @@ async def account_worker(
                                         cooldown, backoff.consecutive_auth_errors, backoff.max_auth_errors)
                         continue
 
+                    if result.error_kind == "empty":
+                        # 200 + пустой Listing на первой странице: мягкий
+                        # троттлинг/пустой ответ edge. Это НЕ успех — аккаунт
+                        # отдыхает с нарастающим кулдауном, чтобы не жечь слоты.
+                        empty_streak += 1
+                        cooldown = min(EMPTY_MAX_COOLDOWN,
+                                       EMPTY_BASE_COOLDOWN * (2 ** (empty_streak - 1)))
+                        cooldown *= random.uniform(0.8, 1.3)
+                        # если Reddit прислал X-Ratelimit-* — уважаем и его
+                        cooldown = max(cooldown, rl_cooldown(result.ratelimit, margin, rl_max))
+                        if empty_streak >= EMPTY_SWAP_AFTER:
+                            curl_session.swap()  # свежее соединение/keep-alive
+                        log.warning("[%s] пустой листинг подряд %d — отдых %.1fs",
+                                    name, empty_streak, cooldown)
+                        continue
+
                     if result.error_kind == "network":
                         cooldown = min(backoff.register_rate_or_server_error(), 30.0)
                         continue
@@ -193,6 +218,7 @@ async def account_worker(
                     # ---- успех ----
                     backoff.register_success()
                     auth_dead = False
+                    empty_streak = 0
                     comments = result.comments
 
                     payloads = []

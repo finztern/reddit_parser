@@ -11,7 +11,9 @@ class FetchResult:
         self.comments = comments or []
         self.status = status
         self.retry_after = retry_after
-        # error_kind: None | "rate_or_server" | "auth" | "network"
+        # error_kind: None | "rate_or_server" | "auth" | "network" | "empty"
+        # "empty" — 200 и валидный Listing, но пустая ПЕРВАЯ страница
+        # (мягкий троттлинг / пустой ответ edge-кэша).
         self.error_kind = error_kind
         # Курсор пагинации Reddit ("after" из ответа листинга, либо
         # fullname последнего элемента как fallback) — None, если больше

@@ -1,6 +1,7 @@
 import asyncio
 import functools
 import json
+import logging
 import random
 import time
 from curl_cffi import requests as cffi_requests
@@ -15,6 +16,13 @@ from .models import FetchResult
 # листинг Reddit всё равно не отдаёт глубже ~1000 элементов (10 x 100),
 # а пагинация и так останавливается по max_age / пересечению с виденными.
 UNLIMITED_PAGES_CAP = 10
+
+# Заголовки, которые логируем при пустом листинге (диагностика: edge-кэш,
+# CDN, троттлинг).
+_DEBUG_HEADERS = (
+    "x-cache", "x-served-by", "age", "cf-ray", "via", "cache-control",
+    "x-ratelimit-remaining", "x-ratelimit-reset", "x-ratelimit-used",
+)
 
 
 def parse_retry_after(resp) -> float | None:
@@ -165,15 +173,23 @@ async def _fetch_comments_page(
     children = listing_data.get("children", [])
 
     if not children:
-        log.warning(
-            "[%s] пустой листинг: status=%s top_keys=%s data_keys=%s dist=%s body[:200]=%r",
-            account_name,
-            resp.status_code,
-            list(data.keys()) if isinstance(data, dict) else type(data).__name__,
-            list(listing_data.keys()),
-            listing_data.get("dist"),
-            resp.text[:200],
+        # Пустая ПЕРВАЯ страница (after не задан) — аномалия: мягкий
+        # троттлинг / пустой ответ edge-кэша. Пустая страница при
+        # пагинации (after задан) — обычный конец листинга.
+        first_page = not after
+        try:
+            hdrs = {k: v for k, v in resp.headers.items() if k.lower() in _DEBUG_HEADERS}
+        except Exception:
+            hdrs = {}
+        log.log(
+            logging.WARNING if first_page else logging.DEBUG,
+            "[%s] пустой листинг (%s): status=%s dist=%s rl=%s hdr=%s",
+            account_name, "стр.1" if first_page else "стр.N",
+            resp.status_code, listing_data.get("dist"), ratelimit, hdrs,
         )
+        if first_page:
+            return FetchResult(status=200, error_kind="empty", ratelimit=ratelimit)
+
     comments = [c.get("data", {}) for c in children if c.get("kind") == "t1"]
 
     listing_after = listing_data.get("after")
@@ -212,7 +228,8 @@ async def fetch_comments(
 
     Ошибка на любой странице обрывает пагинацию и возвращается целиком —
     накопленные комментарии отбрасываются (безопасно: они ещё не попали
-    в SeenCache и будут подхвачены на следующем опросе)."""
+    в SeenCache и будут подхвачены на следующем опросе). Пустая первая
+    страница возвращается как error_kind="empty"."""
     page_cap = max_pages if max_pages and max_pages > 0 else UNLIMITED_PAGES_CAP
     all_comments: list[dict] = []
     after: str | None = None
