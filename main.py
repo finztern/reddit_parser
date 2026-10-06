@@ -9,9 +9,13 @@ Reddit fresh-comments scraper -> POST /store_items (batch)
 слотов подстраивается по доле дублей на первой странице ответа.
 Пагинация идёт до пересечения с уже виденными комментариями.
 
-Скорость отправки в пайплайн (потолок TokenBucket) ведёт QueueGovernor
-(scraper/governor.py) по состоянию очереди коллектора (queue_control в
-config.yaml): цель — чтобы bpipe_queue не опускалась ниже target_min.
+Воркеры НЕ шлют комментарии сами: они кладут их в общий буфер, а единый
+Sender (scraper/sender.py) отдаёт в пайплайн ровными небольшими порциями
+со скоростью, близкой к реальному притоку (без залпов).
+
+Потолок скорости Sender'а ведёт QueueGovernor (scraper/governor.py) по
+состоянию очереди коллектора (queue_control в config.yaml): цель — чтобы
+bpipe_queue не опускалась ниже target_min и не раздувалась до переполнения.
 
 Общий SeenCache, health-мониторинг executor'а, graceful shutdown —
 см. ARCHITECTURE.md.
@@ -38,6 +42,7 @@ from scraper.constants import (
 from scraper.governor import QueueGovernor
 from scraper.health import ExecutorHandle, ExecutorHealth, health_report_loop
 from scraper.scheduler import PollScheduler
+from scraper.sender import Sender
 from scraper.state import SeenCache, TokenBucket
 from scraper.worker import account_worker, supervised
 
@@ -70,11 +75,11 @@ async def main():
     start_rate = float(qc.get("initial_rate", 80)) if qc_enabled else float(config.get("target_rate_per_second", 80))
 
     log.info(
-        "Запуск: %d аккаунт(ов), поток=r/%s, скорость=%s, max_age=%ss, "
+        "Запуск: %d аккаунт(ов), поток=r/%s, потолок скорости=%s, max_age=%ss, "
         "batch_max_items=%s, старт_интервал_слота=%ss, proxy_host=%s",
         len(accounts), "+".join(config.get("stream_subs", ["all"])),
         f"авто по очереди ({qc_url}, target_min={qc.get('target_min', 200)})"
-        if qc_enabled else f"статичная {start_rate}/сек",
+        if qc_enabled else f"статичный {start_rate}/сек",
         config.get("max_age_seconds"),
         config.get("batch_max_items", 500), config.get("stream_start_interval_seconds", 1.5),
         PROXY_HOST,
@@ -101,13 +106,16 @@ async def main():
     try:
         store_connector = aiohttp.TCPConnector(ttl_dns_cache=300, keepalive_timeout=60)
         async with aiohttp.ClientSession(connector=store_connector) as store_session:
-            governor = QueueGovernor(config, bucket, store_session, log)
+            sender = Sender(config, bucket, seen, store_session, log)
+            governor = QueueGovernor(config, bucket, store_session, log,
+                                     is_limited=sender.is_cap_limited)
 
             # "Ядро" — без любой из этих задач процесс бессмыслен: падение
             # одной из них останавливает процесс (docker перезапустит).
             core_tasks = [
                 asyncio.create_task(config.reload_loop(), name="config_reload_loop"),
                 asyncio.create_task(governor.run(), name="queue_governor"),
+                asyncio.create_task(sender.run(), name="send_pacer"),
                 asyncio.create_task(
                     health_report_loop(
                         executor_health,
@@ -130,7 +138,7 @@ async def main():
                     asyncio.create_task(
                         supervised(
                             account_worker,
-                            account, config, bucket, seen, scheduler, store_session,
+                            account, config, seen, scheduler, sender,
                             http_executor_handle,
                             executor_health,
                             name=account["name"],
@@ -139,12 +147,8 @@ async def main():
                     )
                 )
 
-            # ИСПРАВЛЕНО: раньше все задачи (включая воркеры) ждались через
-            # FIRST_COMPLETED — завершение ОДНОГО воркера (return при
-            # отсутствии cookies / исчерпании auth-ошибок) останавливало весь
-            # процесс, а docker (restart: unless-stopped) поднимал его снова
-            # по кругу. Теперь воркеры следят отдельно: процесс останавливается
-            # только по сигналу, при падении ядра или когда завершились ВСЕ воркеры.
+            # Процесс останавливается только по сигналу, при падении ядра или
+            # когда завершились ВСЕ воркеры (завершение одного — не повод).
             alive = {"n": len(worker_tasks)}
             all_workers_done = asyncio.Event()
 

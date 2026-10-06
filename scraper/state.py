@@ -6,15 +6,19 @@ from collections import deque
 
 # ---------------------------------------------------------------- #
 #  Общий rate limiter (token bucket) на отправку в store_items
+#
+#  Теперь им пользуется только Sender (scraper/sender.py): он вызывает
+#  take() каждый тик с ТЕКУЩЕЙ эффективной скоростью и маленьким burst
+#  (≈ один тик), поэтому пачек не получается. self.rate — это ПОТОЛОК,
+#  который двигает QueueGovernor.
 # ---------------------------------------------------------------- #
 
 class TokenBucket:
     def __init__(self, rate_per_second: float):
         self.rate = rate_per_second
         self.capacity = max(rate_per_second, 1.0)
-        self.tokens = self.capacity
+        self.tokens = 0.0
         self.last_refill = time.monotonic()
-        self.lock = asyncio.Lock()
         # Сколько токенов выдано за всё время — QueueGovernor по разнице
         # считает реальную скорость отправки (токенов/сек).
         self.granted = 0
@@ -24,17 +28,32 @@ class TokenBucket:
             self.rate = rate_per_second
             self.capacity = max(rate_per_second, 1.0)
 
-    async def try_acquire(self) -> bool:
-        async with self.lock:
-            now = time.monotonic()
-            elapsed = now - self.last_refill
-            self.last_refill = now
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            if self.tokens >= 1.0:
-                self.tokens -= 1.0
-                self.granted += 1
-                return True
-            return False
+    def take(self, n: int, rate: float, burst_seconds: float) -> int:
+        """Выдаёт до n токенов (целых). Пополнение идёт со скоростью `rate`,
+        ёмкость — rate * burst_seconds (минимум 1). Синхронный: вызывается
+        только из потока event loop."""
+        now = time.monotonic()
+        elapsed = max(0.0, now - self.last_refill)
+        self.last_refill = now
+        cap = max(1.0, rate * max(burst_seconds, 0.0))
+        self.tokens = min(cap, self.tokens + elapsed * rate)
+        k = min(int(n), int(self.tokens))
+        if k <= 0:
+            return 0
+        self.tokens -= k
+        self.granted += k
+        return k
+
+    def refund(self, k: int):
+        """Вернуть невостребованные токены (напр. элементы протухли)."""
+        if k > 0:
+            self.tokens += k
+            self.granted -= k
+
+    def idle(self):
+        """Буфер пуст — не копим токены, чтобы после простоя не было залпа."""
+        self.tokens = 0.0
+        self.last_refill = time.monotonic()
 
 
 # ---------------------------------------------------------------- #
@@ -54,7 +73,7 @@ class SeenCache:
 
     def contains(self, item_id: str) -> bool:
         """Синхронная проверка (event loop однопоточный, лок не нужен):
-        id подтверждён или прямо сейчас отправляется."""
+        id подтверждён или прямо сейчас отправляется / лежит в буфере."""
         return item_id in self._set or item_id in self._pending
 
     async def try_claim(self, item_id: str) -> bool:
