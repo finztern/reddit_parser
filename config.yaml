@@ -2,10 +2,9 @@
 #  Общий конфиг скрапера. Перечитывается на лету каждые ~5 сек.
 #
 #  Схема: все аккаунты опрашивают один поток (stream_subs, по умолчанию
-#  r/all) по слотам от единого планировщика. Полученные комментарии
-#  кладутся в общий буфер, а Sender (секция send_* ниже) отдаёт их в
-#  пайплайн ровными порциями. Потолок скорости Sender'а ведёт
-#  QueueGovernor по состоянию очереди коллектора (секция queue_control).
+#  r/all) по слотам от единого планировщика. Скорость отправки в пайплайн
+#  регулирует QueueGovernor по состоянию очереди коллектора
+#  (см. секцию queue_control ниже).
 # ============================================================
 
 # ---- Что опрашиваем ----
@@ -38,58 +37,27 @@ full_page_threshold: 90
 # Листаем дальше, пока на странице не встретится уже виденный комментарий.
 # 0 = без лимита (на деле не более 10 страниц — глубже листинг Reddit не
 # отдаёт; пагинация и так останавливается по max_age / пересечению).
+# Раньше 0 останавливал листание сразу после первой страницы.
 pagination_max_pages: 0
 pagination_delay_min_seconds: 0.1
 pagination_delay_max_seconds: 0.4
 
 # ---- Свежесть / отправка ----
-# Комментарии старше (с учётом времени ожидания в буфере Sender'а)
-# отбрасываются.
-max_age_seconds: 30
+max_age_seconds: 15
 
-# СТАТИЧЕСКИЙ потолок отправки в store_items (элементов/сек, на все аккаунты).
+# СТАТИЧЕСКИЙ лимит отправки в store_items (элементов/сек, на все аккаунты).
 # Используется как fallback: когда queue_control.enabled = false, либо
 # когда эндпоинт очереди недоступен дольше stale_seconds.
 target_rate_per_second: 80
 
-# ---- Сглаживание отправки (scraper/sender.py) ----
-# Sender раз в send_tick_seconds берёт из буфера порцию и шлёт её со скоростью
-#   rate = min(потолок_governor, max(send_min_rate,
-#              max(приток_ewma * send_supply_headroom,
-#                  бэклог / send_drain_horizon_seconds)))
-# т.е. примерно с той скоростью, с какой комментарии реально приходят: пачки
-# от опросов растягиваются во времени, а не уходят в пайплайн залпом.
-send_tick_seconds: 0.25
-# Запас токенов (в секундах скорости). ~ один тик => без залпов после паузы.
-send_burst_seconds: 0.3
-# Постоянная времени сглаживания притока (сек). Больше -> ровнее, но
-# медленнее реагирует на изменение притока.
-send_supply_tau_seconds: 5
-# Запас над средним притоком: чтобы буфер не копился.
-send_supply_headroom: 1.15
-# За сколько секунд сливать накопившийся бэклог. Это же ~макс. добавочная
-# задержка комментария (должна быть << max_age_seconds).
-send_drain_horizon_seconds: 1.5
-# Нижняя граница темпа (шт/с), чтобы одиночные комментарии не залеживались.
-send_min_rate: 2
-# Предел буфера; при переполнении выбрасываются самые старые.
-send_buffer_max_items: 5000
-send_log_every_seconds: 10
-
-# ---- Авто-подстройка ПОТОЛКА скорости по очереди пайплайна ----
+# ---- Авто-подстройка скорости по очереди пайплайна ----
 # QueueGovernor раз в poll_interval_seconds читает GET {url} (JSON с
 # bpipe_queue / bpipe_max / upipe_queue / upipe_limit / degraded / action)
-# и двигает потолок в диапазоне [min_rate, max_rate]:
-#   bpipe_queue < target_min * headroom_ratio И Sender упёрся в потолок
-#                                              -> поднимаем (x up_factor)
-#   bpipe_queue > target_high                  -> тормозим (x down_factor)
-#   между ними                                 -> держим как есть
+# и двигает потолок отправки (TokenBucket) в диапазоне [min_rate, max_rate]:
+#   bpipe_queue < target_min * headroom_ratio -> ускоряемся (x up_factor)
+#   bpipe_queue > target_high                 -> тормозим (x down_factor)
+#   между ними                                -> держим как есть
 #   degraded / очереди почти полные / action=slow* -> резко тормозим
-#
-# ВАЖНО: коллектор обновляет очередь раз в ~2 с, поэтому любые изменения
-# делаются не чаще adjust_interval_seconds (панику — panic_interval_seconds):
-# иначе по одному и тому же устаревшему значению потолок множился на каждом
-# тике (обвал 80 -> 9, потом разгон 9 -> 88 за 5 секунд = залпы).
 #
 # url можно переопределить переменной окружения QUEUE_CONTROL_URL
 # (нужно в bridge-режиме Docker, где 127.0.0.1 — это сам контейнер).
@@ -99,10 +67,7 @@ queue_control:
   poll_interval_seconds: 0.5
   request_timeout_seconds: 2
 
-  # Подбирай относительно bpipe_max коллектора (у тебя 392): up_thr =
-  # target_min*headroom (=188), high = max(bpipe_max*high_fraction,
-  # up_thr*1.5) (=282) — оба должны быть заметно ниже panic (=0.9*bpipe_max).
-  target_min: 175
+  target_min: 200
   headroom_ratio: 1.25
   # target_high: 1000
   high_fraction: 0.5
@@ -111,16 +76,11 @@ queue_control:
   max_rate: 400
   initial_rate: 80
 
-  up_factor: 1.5
+  up_factor: 1.25
   down_factor: 0.8
   panic_factor: 0.5
   panic_fraction: 0.9
   rate_ceiling_over_observed: 2.0
-
-  # Не чаще одного изменения потолка за это время (дать эффекту дойти до
-  # очереди коллектора и обновить её значение).
-  adjust_interval_seconds: 2.0
-  panic_interval_seconds: 3.0
 
   respect_server_action: true
   stale_seconds: 30
@@ -136,6 +96,7 @@ user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML
 
 request_timeout_seconds: 10
 connect_timeout_seconds: 5
+token_wait_timeout_seconds: 0.5
 
 cookie_reload_check_interval_seconds: 30
 
@@ -154,3 +115,59 @@ max_backoff_seconds: 300
 max_consecutive_auth_errors: 5
 # Как часто пробовать запрос в этой паузе (сек).
 auth_dead_cooldown_seconds: 120
+
+# ============================================================
+#  Ротация идентичностей гостевых слотов (нода + отпечаток + cookies).
+#  Воркер (контейнер) при долгом пустом листинге кладёт заявку в state/,
+#  выполняет её демон на хосте: scripts/rotation_daemon.py.
+#  Читается и воркером, и демоном (демон — из этого же файла на хосте).
+# ============================================================
+rotation:
+  enabled: true
+  # слоты, которым разрешена ротация (только ГОСТЕВЫЕ). Для первого
+  # теста оставь один, например [account_14].
+  slots:
+    - account_11
+    - account_12
+    - account_13
+    - account_14
+    - account_15
+    - account_16
+    - account_17
+    - account_18
+    - account_19
+    - account_20
+    - account_21
+    - account_22
+    - account_23
+    - account_24
+    - account_25
+
+  # --- воркер ---
+  # Сколько пустых листингов подряд до заявки (кулдауны 3,6,12,24,48,60с —
+  # при 6 это примерно 1.5-2 минуты пустоты).
+  empty_streak_trigger: 6
+  # Не подавать новую заявку чаще (демон может увеличить через retry_after).
+  request_cooldown_seconds: 600
+  # Заявка pending/working старше этого — воркер считает её зависшей и
+  # продолжает работать (демон мёртв).
+  request_timeout_seconds: 1800
+
+  # --- демон (хост) ---
+  nodes_file: "all_nodes.txt"
+  mihomo_api: "http://127.0.0.1:9090"
+  mihomo_secret: ""
+  # Через сколько часов забаненную идентичность можно вернуть в работу.
+  # Реальную живучесть бана смотри: rotation_daemon.py --status
+  ban_cooldown_hours: 6
+  max_rotations_per_day: 6
+  max_candidates_per_request: 4
+  bad_node_ttl_hours: 24
+  # Заявки у >= этой доли включённых слотов сразу — сбой Reddit/сети, а не
+  # бан: не ротируем, чтобы не сжечь ноды.
+  global_outage_fraction: 0.5
+  global_outage_pause_seconds: 900
+  failed_all_pause_seconds: 900
+  poll_seconds: 5
+  reconcile_seconds: 30
+  lock_timeout_seconds: 1500

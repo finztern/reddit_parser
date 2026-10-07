@@ -16,6 +16,11 @@
 #  через os.replace() контейнер видит. (accounts.yaml/config.yaml —
 #  одиночные файлы: их правь НА МЕСТЕ, не заменой файла, иначе контейнер
 #  продолжит видеть старый inode.)
+#
+#  state/ монтируется НА ЗАПИСЬ: через него воркер и демон ротации
+#  (scripts/rotation_daemon.py) обмениваются заявками и активными
+#  профилями слотов. Он же хранит состояние между рестартами контейнера.
+#  На хосте: mkdir -p state && chmod 777 state
 # ============================================================
 
 x-logging: &default-logging
@@ -48,6 +53,7 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./accounts.yaml:/app/accounts.yaml:ro
       - ./cookies:/app/cookies:ro
+      - ./state:/app/state
     environment:
       - CONFIG_PATH=/app/config.yaml
       - ACCOUNTS_PATH=/app/accounts.yaml
