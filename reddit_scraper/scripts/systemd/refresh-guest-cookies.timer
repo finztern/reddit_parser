@@ -1,0 +1,21 @@
+# scripts/systemd/refresh-guest-cookies.timer
+#
+# Интервал МЕНЬШЕ TTL самой короткоживущей гостевой cookie
+# (session_tracker, ~2 часа) с запасом. Прогон по 15 слотам идёт ~15-20
+# минут, а провалившийся слот повторится только на следующем запуске —
+# поэтому 60 минут, а не 75: cookie успевает смениться, даже если слот
+# сорвался один раз (возраст ~2ч — на пределе, но ещё живая).
+#
+# OnCalendar/OnUnitActiveSec считается от последнего ЗАПУСКА юнита; два
+# одновременных браузерных джоба разводит flock в .service.
+
+[Unit]
+Description=Reddit scraper - периодический рефреш гостевых cookies
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=60min
+RandomizedDelaySec=3min
+
+[Install]
+WantedBy=timers.target

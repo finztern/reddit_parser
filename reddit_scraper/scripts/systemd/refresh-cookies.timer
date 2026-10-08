@@ -1,0 +1,18 @@
+# scripts/systemd/refresh-cookies.timer
+#
+# Логин-cookies живут заметно дольше гостевых (дни/недели), раз в неделю
+# достаточно. Поправь OnCalendar= под то, как часто у тебя реально
+# протухают cookies.
+#
+# Одновременный запуск с гостевым джобом исключён flock'ом в .service.
+
+[Unit]
+Description=Reddit scraper - периодический рефреш логин-cookies
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=30min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

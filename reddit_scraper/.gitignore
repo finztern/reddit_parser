@@ -1,0 +1,15 @@
+cookies/*.json
+cookies/.*.tmp
+storage_state/*.json
+storage_state/.*.tmp
+state/*
+!state/.gitkeep
+__pycache__/
+*.pyc
+mihomo_config.yaml
+vless_accounts.env
+all_nodes.txt
+venv/
+.venv*/
+*.bak-*
+*.bak

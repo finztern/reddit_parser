@@ -1,0 +1,23 @@
+# /etc/systemd/system/rotation-daemon.service
+#
+# Демон ротации идентичностей гостевых слотов (нода + отпечаток + cookies).
+# Пути/User поправь под свою установку (как в refresh-*.service).
+# xvfb-run — окно браузера без реального DISPLAY; для headless убери
+# xvfb-run и --no-headless.
+
+[Unit]
+Description=Reddit scraper - демон ротации идентичностей гостевых слотов
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=sashko
+Group=sashko
+WorkingDirectory=/home/sashko/reddit_scraper
+ExecStart=/usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24" /home/sashko/reddit_scraper/venv/bin/python3 scripts/rotation_daemon.py --no-headless
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

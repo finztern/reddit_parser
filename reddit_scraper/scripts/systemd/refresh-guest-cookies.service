@@ -1,0 +1,31 @@
+# /etc/systemd/system/refresh-guest-cookies.service
+#
+# Харвест гостевых cookies для слотов account_11..25.
+#
+# ПУТИ: см. комментарий в refresh-cookies.service (оба сервиса на одном
+# каталоге и одном venv).
+#
+# --no-headless под systemd без DISPLAY падал бы ("Missing X server").
+# Если нужен именно ОКОННЫЙ режим браузера — xvfb-run даёт виртуальный
+# дисплей (apt install xvfb). Для headless-режима убери xvfb-run и
+# --no-headless (headless: true в refresh_guest_cookies.yaml).
+#
+# flock — общий lock с refresh-cookies.service и rotation-daemon (один
+# браузер за раз). Слоты, которые сейчас в ротации, джоб пропускает сам.
+
+[Unit]
+Description=Reddit scraper - обновление гостевых (анонимных) cookies (Playwright job)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sashko
+Group=sashko
+WorkingDirectory=/home/sashko/reddit_scraper
+ExecStart=/usr/bin/flock /tmp/reddit_scraper_browser.lock /usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24" /home/sashko/reddit_scraper/venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless
+# 15 слотов x (загрузка + пауза + stagger) + повторный проход + ожидание lock.
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target

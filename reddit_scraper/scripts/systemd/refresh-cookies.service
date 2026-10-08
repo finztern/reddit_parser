@@ -1,0 +1,33 @@
+# /etc/systemd/system/refresh-cookies.service
+#
+# Обновление сессий ЛОГИН-аккаунтов (account_1..10). Гостевые слоты
+# обслуживает refresh-guest-cookies.service.
+#
+# ПУТИ: WorkingDirectory/ExecStart ниже — поправь под свою установку
+# (оба сервиса и rotation-daemon.service — на один и тот же каталог и venv).
+#
+# User/Group: браузеры Playwright стоят в кеше пользователя
+# (~/.cache/ms-playwright), root их не видит.
+#
+# flock: все браузерные джобы (логин, гостевой, демон ротации) берут один
+# lock-файл — на слабом хосте одновременный запуск = OOM. Ожидание
+# блокировки входит в TimeoutStartSec.
+
+[Unit]
+Description=Reddit scraper - обновление cookies логин-аккаунтов (Playwright job)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=sashko
+Group=sashko
+WorkingDirectory=/home/sashko/reddit_scraper
+ExecStart=/usr/bin/flock /tmp/reddit_scraper_browser.lock /home/sashko/reddit_scraper/venv/bin/python3 scripts/refresh_cookies.py --config scripts/refresh_cookies.yaml
+# Ненулевой exit code (хотя бы один аккаунт разлогинен) переводит юнит в
+# failed — виден в `systemctl status refresh-cookies.service` /
+# `journalctl -u refresh-cookies.service`.
+TimeoutStartSec=3600
+
+[Install]
+WantedBy=multi-user.target
