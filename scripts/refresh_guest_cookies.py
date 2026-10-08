@@ -15,6 +15,10 @@ session_tracker (~2 часа), поэтому джоб рассчитан на �
 
 Для каждого слота:
 
+  0. если слот сейчас в ротации (заявка pending/working в state/requests)
+     — пропускается; если после ротации у слота есть активный профиль
+     (state/slots/account_N.json) — он ПЕРЕКРЫВАЕТ accounts.yaml и
+     guest_accounts (иначе cookies харвестились бы со старым отпечатком);
   1. Playwright-контекст: engine/channel/device — из guest_accounts;
      impersonate и user_agent — ИЗ accounts.yaml (источник правды: именно
      с ними скрапер ходит за comments.json). Расхождение с
@@ -90,6 +94,7 @@ from refresh_cookies import (  # noqa: E402
     only_reddit_cookies,
     playwright_to_cookie_editor,
 )
+from scraper import identity as slot_state  # noqa: E402
 from scraper.config import load_accounts  # noqa: E402
 from scraper.constants import BASE_DIR, PROXY_HOST, log  # noqa: E402
 
@@ -307,6 +312,38 @@ def process_guest_account(pw, account: dict, cfg: dict, dry_run: bool) -> Accoun
 
 
 # ---------------------------------------------------------------- #
+#  Ротация идентичностей: учёт активных профилей слотов
+# ---------------------------------------------------------------- #
+
+def apply_rotation_overrides(accounts: list[dict], cfg: dict) -> list[dict]:
+    """Слот в ротации (заявка pending/working) пропускаем. Если у слота
+    есть активный профиль после ротации (state/slots/account_N.json) —
+    он перекрывает accounts.yaml и guest_accounts: харвестим cookies с тем
+    же отпечатком и гео, с которыми слот реально работает. Прокси-порт тот
+    же — демон ротации уже переключил в нём ноду."""
+    kept = []
+    for a in accounts:
+        name = a["name"]
+        req = slot_state.read_request(name)
+        if req and req.get("status") in ("pending", "working"):
+            log.info("[%s] идёт ротация идентичности — пропускаю в этом проходе", name)
+            continue
+        prof = slot_state.read_slot_profile(name)
+        if prof:
+            a = {**a, "impersonate": prof["impersonate"],
+                 "user_agent": prof.get("user_agent") or a.get("user_agent")}
+            cfg["guest_accounts"][name] = {
+                k: prof[k] for k in ("engine", "channel", "device", "user_agent", "impersonate")
+                if k in prof
+            }
+            if prof.get("geo"):
+                cfg.setdefault("account_geo", {})[name] = prof["geo"]
+            log.info("[%s] профиль после ротации: %s, нода %s", name, prof["impersonate"], prof.get("node"))
+        kept.append(a)
+    return kept
+
+
+# ---------------------------------------------------------------- #
 #  main
 # ---------------------------------------------------------------- #
 
@@ -361,8 +398,10 @@ def main() -> int:
         return int(n.rsplit("_", 1)[-1]) if n.rsplit("_", 1)[-1].isdigit() else 0
 
     accounts = [all_accounts[n] for n in sorted(wanted & set(all_accounts) & guest_slot_names, key=_num)]
+    accounts = apply_rotation_overrides(accounts, cfg)
     if not accounts:
-        log.error("Нет ни одного гостевого слота для обработки — проверь accounts.yaml / %s / --account", config_path)
+        log.error("Нет ни одного гостевого слота для обработки — проверь accounts.yaml / %s / --account "
+                  "(или все слоты сейчас в ротации)", config_path)
         return 1
 
     log.info("refresh_guest_cookies: старт, %d слот(ов), headless=%s, stagger=%.0fs%s",

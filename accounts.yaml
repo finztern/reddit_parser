@@ -18,6 +18,8 @@ accounts:
   #  ИСТОЧНИК ПРАВДЫ для impersonate/user_agent — ЭТОТ файл:
   #  refresh_guest_cookies.py и refresh_cookies.py берут их отсюда
   #  (запускай scripts/rotate_fingerprints.py, чтобы менять их синхронно).
+  #  Исключение — гостевые слоты ПОСЛЕ ротации идентичности: их активный
+  #  профиль лежит в state/slots/account_N.json и перекрывает этот файл.
   #
   #  enabled: гостевой слот можно включать, когда (1) для него есть строка
   #  account_N = vless://... в vless_accounts.env (и перегенерирован

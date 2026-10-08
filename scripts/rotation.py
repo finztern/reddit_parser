@@ -4,21 +4,25 @@ scripts/rotation.py — автоматическая смена ноды (IP) и
 (impersonate + UA + engine + гео) для гостевых слотов.
 
 Сам по себе не запускается как джоб — его используют:
-  - scripts/refresh_guest_cookies_auto.py  (класс Rotator),
+  - scripts/rotation_daemon.py             (Mihomo, precheck, load_pool, geo_for...),
   - scripts/generate_mihomo_config.py      (функция extend_with_pool),
 а из консоли — только для просмотра состояния:
 
     python3 scripts/rotation.py            # пул, плохие ноды, история
 
 Как устроена смена ноды: в mihomo_config.yaml каждая группа pg-account_N
-(type: select) содержит назначенную ноду ПЕРВОЙ и дальше весь пул из
-all_nodes.txt. Переключение — PUT /proxies/pg-account_N у external-
-controller mihomo, без рестарта. Порт аккаунта (proxy_port) не меняется.
+(type: select) содержит назначенную ноду ПЕРВОЙ и дальше ВСЕ остальные
+ноды (пул из all_nodes.txt и ноды других аккаунтов). Переключение —
+PUT /proxies/pg-account_N у external-controller mihomo, без рестарта.
+Порт аккаунта (proxy_port) не меняется.
 
-Сохранение (accounts.yaml / refresh_guest_cookies.yaml / vless_accounts.env)
-происходит ТОЛЬКО после успешной верификации новых cookies. Если все
-попытки провалились — выбор в mihomo возвращается на прежнюю ноду, файлы
-не трогаются.
+Какие ноды слот имеет право брать, решает не этот файл, а
+rotation_daemon.py (реестр идентичностей: эксклюзивная аренда, ноды
+логин-аккаунтов не отдаются).
+
+Класс Rotator ниже — прежний механизм ротации (сохранение в
+accounts.yaml/vless_accounts.env), оставлен для обратной совместимости.
+Для гостевых слотов используй rotation_daemon.py.
 """
 
 from __future__ import annotations
@@ -173,28 +177,30 @@ def pool_names(pool: list[Node], reserved: set[str], assigned_keys: set[str]) ->
 
 def extend_with_pool(config: dict, nodes_file: Path | None = None) -> int:
     """Вызывается из generate_mihomo_config.main(): добавляет пул нод в
-    proxies и в КАЖДУЮ группу pg-account_N (после назначенной ноды)."""
+    proxies и затем ВСЕ ноды (пул + ноды других аккаунтов) — в КАЖДУЮ
+    группу pg-account_N после назначенной ноды. Так слот может переключиться
+    на любую ноду; кому какая нода разрешена, решает rotation_daemon.py."""
     pool = load_pool(nodes_file or (ROOT / DEFAULT_OPTS["nodes_file"]))
-    if not pool:
-        return 0
-    links = gmc.load_vless_links()
-    assigned_keys = {node_key(l) for l in links.values()}
-    names = pool_names(pool, {p["name"] for p in config["proxies"]}, assigned_keys)
     added = []
-    for n in pool:
-        name = names.get(n.key)
-        if not name:
-            continue
-        try:
-            proxy = gmc.parse_vless(n.uri, fallback_name=name)
-        except ValueError as e:
-            print(f"ПРЕДУПРЕЖДЕНИЕ: нода пула пропущена ({e})", file=sys.stderr)
-            continue
-        proxy["name"] = name
-        config["proxies"].append(proxy)
-        added.append(name)
+    if pool:
+        links = gmc.load_vless_links()
+        assigned_keys = {node_key(l) for l in links.values()}
+        names = pool_names(pool, {p["name"] for p in config["proxies"]}, assigned_keys)
+        for n in pool:
+            name = names.get(n.key)
+            if not name:
+                continue
+            try:
+                proxy = gmc.parse_vless(n.uri, fallback_name=name)
+            except ValueError as e:
+                print(f"ПРЕДУПРЕЖДЕНИЕ: нода пула пропущена ({e})", file=sys.stderr)
+                continue
+            proxy["name"] = name
+            config["proxies"].append(proxy)
+            added.append(name)
+    all_names = [p["name"] for p in config["proxies"]]
     for g in config["proxy-groups"]:
-        g["proxies"] = g["proxies"] + added
+        g["proxies"] = g["proxies"] + [n for n in all_names if n not in g["proxies"]]
     return len(added)
 
 

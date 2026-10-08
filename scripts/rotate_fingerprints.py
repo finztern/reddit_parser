@@ -28,6 +28,8 @@ curl_cffi (ничего не хардкодится), UA собирается п
 
 Перед записью делается бэкап *.bak-<время>. Комментарии в секции
 guest_accounts при перегенерации теряются (остаются в бэкапе).
+
+NB: build_pool()/build_profile() использует и rotation_daemon.py.
 """
 
 import argparse
@@ -120,8 +122,6 @@ def parse_target(name: str) -> Target | None:
             return Target(name, "safari", int(m.group(1)), int(m.group(2)), None, ios=ios)
         # Слитная запись: safari153=15.3, safari170=17.0, safari184=18.4,
         # safari260=26.0, safari2601=26.0.1. Мажор — всегда ДВЕ цифры.
-        # Раньше брали "всё кроме последней цифры": safari2601 -> major=260,
-        # minor=1 -> UA "Version/260.1".
         d = m.group(1)
         if len(d) < 2:
             return None

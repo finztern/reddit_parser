@@ -19,7 +19,7 @@ curl_cffi (impersonate + прокси слота), которым потом и�
     python3 scripts/test_curl_guest.py --account account_5 --write
     python3 scripts/test_curl_guest.py --account account_5 --no-proxy   # дебаг без mihomo
 
-Exit code 0 — хотя бы... нет: 0 только если ВСЕ проверенные слоты получили 200.
+Exit code 0 — только если ВСЕ проверенные слоты получили 200.
 """
 
 import argparse

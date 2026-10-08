@@ -110,6 +110,8 @@ def main() -> int:
     mih = load_yaml(ROOT / "mihomo_config.yaml")
     accs = {a["name"]: a for a in load_yaml(ROOT / "accounts.yaml").get("accounts", [])}
     proxies = {p["name"]: p for p in mih.get("proxies", [])}
+    # ВАЖНО: в группе первая нода — назначенная, остальные (пул для ротации)
+    # идут после неё; "now" с учётом ротации смотри в API mihomo.
     groups = {g["name"]: g["proxies"][0] for g in mih.get("proxy-groups", [])}
     ctrl = mih.get("external-controller", "127.0.0.1:9090")
 
@@ -224,7 +226,7 @@ def main() -> int:
         print("  У самого хоста нет интернета — проблема не в нодах.")
     elif up_ok and not any(up_ok.values()):
         print("  VLESS-сервер недостижим с хоста (TCP/TLS) — упал, заблокирован или подписка Trust.Zone "
-              "истекла. Все 25 нод у вас на одном сервере, поэтому ломаются все разом.")
+              "истекла. Все ноды у вас на одном сервере, поэтому ломаются все разом.")
         print("  Проверь подписку по ссылке из vless_accounts.env и доступность сервера с другой сети.")
     elif not net_ok:
         print("  Порты открыты и сервер отвечает, но через ни один порт не ходит даже нейтральный сайт — "

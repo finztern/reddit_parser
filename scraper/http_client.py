@@ -86,6 +86,15 @@ class CurlSessionHandle:
         self.current = self._build()
         self.swaps += 1
 
+    def set_impersonate(self, impersonate: str):
+        """Смена TLS-отпечатка на лету (ротация идентичности). Новая
+        сессия строится ДО подмены: если таргета нет в установленном
+        curl_cffi, исключение вылетает, а старая сессия остаётся рабочей."""
+        new = cffi_requests.Session(impersonate=impersonate, proxies=self._proxies)
+        self._impersonate = impersonate
+        self.current = new
+        self.swaps += 1
+
 
 async def _fetch_comments_page(
     session: aiohttp.ClientSession,

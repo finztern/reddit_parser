@@ -7,25 +7,26 @@
 подстраивается под очередь пайплайна.
 
 Внутреннее устройство — в [ARCHITECTURE.md](./ARCHITECTURE.md).
+Ротация идентичностей гостевых слотов — раздел ниже и
+[ROTATION_SETUP.md](./ROTATION_SETUP.md).
 
 ## Аккаунты: 10 логин + 15 гостевых
 
 | Слоты | Тип | Откуда cookies | Кто обновляет |
 |---|---|---|---|
 | `account_1..10` | **логин** (реальные аккаунты Reddit) | первый логин руками (`manual_login.py`) | `scripts/refresh_cookies.py`, раз в неделю |
-| `account_11..25` | **гостевые** (анонимная сессия, без логина) | харвест браузером | `scripts/refresh_guest_cookies.py`, раз в час |
+| `account_11..25` | **гостевые** (анонимная сессия, без логина) | харвест браузером | `scripts/refresh_guest_cookies.py`, раз в час; смена идентичности — `scripts/rotation_daemon.py` |
 
-Правила, которые нельзя нарушать (оба джоба пишут в один и тот же
+Правила, которые нельзя нарушать (джобы пишут в один и тот же
 `cookies/account_N.json`):
 
 - `refresh_cookies.py` работает только с `login_accounts` из
   `scripts/refresh_cookies.yaml` (1..10);
 - `refresh_guest_cookies.py` работает только со слотами из `guest_accounts`
   в `scripts/refresh_guest_cookies.yaml` (11..25);
-- **источник правды для `impersonate`/`user_agent` — `accounts.yaml`.** Именно
-  с этим TLS-отпечатком скрапер ходит за `comments.json`; браузер-джобы
-  берут отпечаток оттуда же (при расхождении — WARNING). Менять отпечатки
-  — через `scripts/rotate_fingerprints.py`, он правит оба файла синхронно.
+- **источник правды для `impersonate`/`user_agent` — `accounts.yaml`**, кроме
+  гостевых слотов после ротации (их активный профиль — `state/slots/`).
+  Менять отпечатки вручную — через `scripts/rotate_fingerprints.py`.
 
 Гостевые слоты `enabled: false`, пока для них нет ноды в
 `vless_accounts.env` (строки `account_11 = vless://...` … `account_25 = ...`)
@@ -47,28 +48,32 @@
 │   ├── scheduler.py            # PollScheduler: единые слоты опроса по кругу
 │   ├── governor.py             # QueueGovernor: скорость отправки по очереди пайплайна
 │   ├── health.py               # мониторинг/своп http_executor
+│   ├── identity.py             # state/: заявки на ротацию, активные профили слотов
 │   └── worker.py               # account_worker, supervised()
 ├── scripts/
 │   ├── refresh_cookies.py / .yaml          # логин-аккаунты 1..10
 │   ├── refresh_guest_cookies.py / .yaml    # гостевые слоты 11..25
+│   ├── rotation_daemon.py      # демон ротации идентичностей (хост)
 │   ├── manual_login.py         # первый ручной логин (Xvfb + noVNC)
 │   ├── generate_mihomo_config.py           # mihomo_config.yaml из vless_accounts.env
 │   ├── rotate_fingerprints.py  # смена impersonate+UA (правит accounts.yaml + guest yaml)
-│   ├── rotation.py             # смена ноды/отпечатка на лету (библиотека)
+│   ├── rotation.py             # библиотека: пул нод, mihomo API, precheck
 │   ├── check_nodes.py          # диагностика цепочки mihomo -> нода -> Reddit
 │   ├── test_curl_guest.py      # проверка гостевых cookies БЕЗ браузера (curl_cffi)
-│   └── systemd/                # timer/service джобов
-├── config.yaml                 # тюнинг (hot-reload)
+│   └── systemd/                # timer/service джобов и демона ротации
+├── config.yaml                 # тюнинг (hot-reload), в т.ч. секция rotation
 ├── accounts.yaml               # 25 слотов (читается при старте)
 ├── vless_accounts.env          # account_N = vless://... (секреты, в .gitignore)
+├── all_nodes.txt               # пул нод для ротации, по vless:// на строку (в .gitignore)
 ├── mihomo_config.yaml          # СГЕНЕРИРОВАН — не редактируй руками
 ├── cookies/account_N.json      # cookies (Cookie Editor JSON)
 ├── storage_state/account_N.json# сессии Playwright (логин-аккаунты)
+├── state/                      # заявки, активные профили, реестр идентичностей (rw в контейнере)
 ├── requirements.txt            # зависимости скрапера (в образ)
 ├── requirements-refresh.txt    # зависимости джобов (playwright, curl_cffi)
 ├── Dockerfile
 ├── docker-compose.yml          # Linux (network_mode: host)
-└── docker-compose.bridge.yml   # Mac/Windows
+└── docker-compose.bridge.yml   # Mac/Windows (ротация в этом режиме не работает)
 ```
 
 ## Установка
@@ -85,8 +90,7 @@ venv/bin/playwright install --with-deps chromium firefox webkit
 
 ### 2. Ноды
 
-`vless_accounts.env` — по строке на слот (для 1..10 уже есть, для 11..25
-допиши):
+`vless_accounts.env` — по строке на слот:
 
 ```
 account_11 = vless://uuid@host:port?...#name
@@ -98,23 +102,27 @@ docker compose restart mihomo
 ```
 
 Если рядом лежит `all_nodes.txt` (пул нод для ротации), генератор добавляет
-его ноды в каждую группу `pg-account_N` — нужно для `rotation.py`.
+его ноды в `proxies`, а все ноды — в каждую группу `pg-account_N`.
 Слоты без ссылки в `.env` получат предупреждение и останутся без прокси.
 
 ### 3. Запуск скрапера
 
 ```bash
+mkdir -p state && chmod 777 state
 docker compose up -d --build           # Linux
 docker compose logs -f scraper
 # Mac/Windows: docker compose -f docker-compose.bridge.yml up -d --build
 ```
+
+После любых правок кода в `scraper/` или `main.py` образ нужно
+пересобирать (`--build`), иначе контейнер работает со старым кодом.
 
 Без Docker: `pip install -r requirements.txt`, `mihomo -f mihomo_config.yaml`,
 `python3 main.py`.
 
 `config.yaml` перечитывается на лету (~5 с). `accounts.yaml` — только при
 старте: после правки `docker compose restart scraper`. Содержимое
-`cookies/account_N.json` перечитывается на лету.
+`cookies/account_N.json` и `state/slots/account_N.json` — на лету.
 
 ## Cookies
 
@@ -126,12 +134,9 @@ docker compose logs -f scraper
    venv/bin/python3 scripts/manual_login.py --list
    venv/bin/python3 scripts/manual_login.py account_1
    ```
-   Скрипт сам проверит cookies запросом `comments.json` и запишет
-   `cookies/account_1.json` + `storage_state/account_1.json`.
-2. Дальше `refresh_cookies.py` раз в неделю подтверждает сессию (через тот
-   же прокси-порт и тот же движок браузера, что в `impersonate`) и атомарно
-   обновляет файл. Разлогиненный аккаунт он **не трогает** — только ERROR и
-   ненулевой exit code.
+2. Дальше `refresh_cookies.py` раз в неделю подтверждает сессию и атомарно
+   обновляет файл. Разлогиненный аккаунт он **не трогает** — только ERROR
+   и ненулевой exit code.
    ```bash
    venv/bin/python3 scripts/refresh_cookies.py --account account_1 [--no-headless] [--dry-run]
    ```
@@ -139,11 +144,9 @@ docker compose logs -f scraper
 ### Гостевые слоты (11..25)
 
 С мая 2026 Reddit отдаёт 403 на `.json` без cookies, но хватает анонимной
-сессии из настоящего браузера. `refresh_guest_cookies.py` для каждого слота:
-открывает reddit.com через прокси слота (`domcontentloaded` + пауза, а не
-`networkidle`), снимает cookies, **верифицирует** их запросом `comments.json`
-тем же `impersonate` и только при 200 перезаписывает файл. Слоты, не
-прошедшие верификацию, повторяются в конце прогона.
+сессии из настоящего браузера. `refresh_guest_cookies.py` открывает
+reddit.com через прокси слота, снимает cookies, **верифицирует** их запросом
+`comments.json` тем же `impersonate` и только при 200 перезаписывает файл.
 
 ```bash
 venv/bin/python3 scripts/refresh_guest_cookies.py                       # все гостевые
@@ -152,34 +155,46 @@ venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless --dry-run
 ```
 
 Самая короткая из cookies (`session_tracker`) живёт ~2 ч, поэтому таймер — раз
-в час.
-
-Альтернатива без браузера: `scripts/test_curl_guest.py --account account_12`
-пробует получить гостевые cookies тем же curl_cffi (`--write` — записать). Если
-для твоих нод это даёт 200, Playwright для гостей можно не использовать.
+в час. Слоты, которые в этот момент в ротации, джоб пропускает.
 
 ### Что происходит, когда cookies протухли
 
-После `max_consecutive_auth_errors` подряд 401/403 воркер **не завершается**
-(раньше завершался навсегда и до ручного restart не возвращался): он уходит в
-паузу, раз в `auth_dead_cooldown_seconds` пробует запрос, а когда refresh-джоб
-кладёт новый файл — подхватывает его, сбрасывает счётчик и продолжает.
+После `max_consecutive_auth_errors` подряд 401/403 воркер **не завершается**:
+он уходит в паузу, раз в `auth_dead_cooldown_seconds` пробует запрос, а когда
+refresh-джоб кладёт новый файл — подхватывает его и продолжает.
 
 ### systemd
 
 ```bash
-sudo cp scripts/systemd/refresh-* /etc/systemd/system/
-# поправь User=, WorkingDirectory=, путь к venv в обоих .service
+sudo cp scripts/systemd/refresh-* scripts/systemd/rotation-daemon.service /etc/systemd/system/
+# поправь User=, WorkingDirectory=, путь к venv в .service
 sudo systemctl daemon-reload
-sudo systemctl enable --now refresh-cookies.timer refresh-guest-cookies.timer
+sudo systemctl enable --now refresh-cookies.timer refresh-guest-cookies.timer rotation-daemon
 ```
 
-Оба джоба поднимают браузер, поэтому в `.service` стоит общий `flock`
-(`/tmp/reddit_scraper_browser.lock`) — одновременно они не запустятся. Гостевой
-юнит использует `xvfb-run` (под systemd нет DISPLAY; `apt install xvfb`) —
-для headless-режима убери `xvfb-run` и `--no-headless`.
+Все браузерные джобы берут общий `flock` (`/tmp/reddit_scraper_browser.lock`) —
+одновременно они не запустятся.
 
-## Смена отпечатка
+## Ротация идентичностей гостевых слотов
+
+Когда у гостевого слота `rotation.empty_streak_trigger` пустых листингов
+подряд (мягкий бан IP/сессии), воркер кладёт заявку в `state/requests/`.
+`scripts/rotation_daemon.py` (на хосте) меняет **идентичность** слота — ноду
+VLESS + отпечаток (impersonate/UA/engine/device) + гео, харвестит новые
+cookies, верифицирует их и подкладывает слоту. Забаненная идентичность
+запоминается с временем бана и возвращается в работу через
+`rotation.ban_cooldown_hours`. Всё состояние — в `state/` на хосте, поэтому
+рестарты контейнеров его не теряют.
+
+```bash
+venv/bin/python3 scripts/rotation_daemon.py --status   # слоты, идентичности, мёртвые ноды, время жизни до бана
+journalctl -u rotation-daemon -f
+```
+
+Настройки — секция `rotation:` в `config.yaml`; установка и нюансы —
+[ROTATION_SETUP.md](./ROTATION_SETUP.md). Пул нод — `all_nodes.txt`.
+
+## Смена отпечатка вручную
 
 ```bash
 venv/bin/python3 scripts/rotate_fingerprints.py --dry-run
@@ -191,28 +206,21 @@ docker compose restart scraper
 Правит `accounts.yaml` и `refresh_guest_cookies.yaml` синхронно (бэкапы
 `*.bak-<время>`). Логин-аккаунты не трогает без `--include-login`.
 
-`scripts/rotation.py` умеет менять ноду на лету через API mihomo, но
-оркестрирующего джоба (`refresh_guest_cookies_auto.py`) в репозитории нет —
-без него это библиотека, самостоятельно ничего не запускающая.
-
 ## Ключевые настройки `config.yaml`
 
 - `stream_subs` — поток (`["all"]`).
 - `max_age_seconds` — комментарии старше отбрасываются до дедупа.
 - `stream_start_interval_seconds`, `stream_min/max_interval_seconds`,
-  `overlap_target_low/high` — слоты планировщика и их самоподстройка по доле
-  дублей на первой странице.
-- `pagination_max_pages` — `0` = без лимита (фактически ≤10 страниц; останов по
-  пересечению с виденными / `max_age`).
+  `overlap_target_low/high` — слоты планировщика и их самоподстройка.
+- `pagination_max_pages` — `0` = без лимита (фактически ≤10 страниц).
 - `queue_control.*` — авто-скорость отправки по очереди пайплайна
   (`GET /queue`); `target_rate_per_second` — статичный fallback.
-  `QUEUE_CONTROL_URL` (env) перекрывает `url` (нужно в bridge-режиме).
 - `batch_max_items`, `token_wait_timeout_seconds`, `seen_cache_size`.
-- `ratelimit_safety_margin`, `ratelimit_max_interval_seconds` — личный бюджет
-  аккаунта по `X-Ratelimit-*`.
+- `ratelimit_safety_margin`, `ratelimit_max_interval_seconds`.
 - `base_backoff_seconds`, `max_backoff_seconds`, `max_consecutive_auth_errors`,
   `auth_dead_cooldown_seconds`.
 - `cookie_reload_check_interval_seconds`.
+- `rotation.*` — ротация идентичностей (см. выше).
 
 ## Логи
 
@@ -221,6 +229,7 @@ docker compose restart scraper
 [stream] уникальных=42.0/с опросов=1.30/с интервал_слота=0.77s доля_дублей(ewma)=0.38 аккаунтов_готово=8/10
 [governor] bpipe_queue=310/2000 upipe=0/200 degraded=False | потолок 80 -> 100/с (реально 72/с) | ...
 [health] http_executor: active=0 submitted=5120 completed=5120 ... swaps=0 pool_size=32
+[account_14] пусто 6 раз подряд — заявка на смену идентичности (state/requests), опрос на паузе
 ```
 
 ## Диагностика
@@ -230,19 +239,17 @@ venv/bin/python3 scripts/check_nodes.py                 # все ноды
 venv/bin/python3 scripts/check_nodes.py --account account_5
 ```
 
-Показывает, на каком слое ломается цепочка: интернет хоста → порты mihomo →
-VLESS-сервер → нода → Reddit.
-
 ## Известные ограничения
 
 - Многоаккаунтовый скрейпинг с датацентровых IP в принципе заметен антиботам;
   регулярные `backoff` в логах — сигнал снижать нагрузку, а не игнорировать.
 - Дедуп-кэш только в памяти и обнуляется при рестарте.
 - Если `store_items` возвращает `не_подтв > 0` — смотри warning-строки
-  `pipeline.py` (недоступен пайплайн или слишком большой `batch_max_items`/413).
+  `pipeline.py`.
 - Гостевые профили с Safari/iOS запускаются в Playwright WebKit на Linux:
-  TLS/JS-отпечаток браузера при харвесте не идентичен реальному Safari — для
-  самих запросов важен только `impersonate`, но если Reddit отвергает такие
-  cookies (верификация ≠ 200) — переведи слот на chrome/firefox-профиль.
+  если Reddit отвергает такие cookies (верификация ≠ 200) — переведи слот на
+  chrome/firefox-профиль.
+- Версия `curl_cffi` в контейнере не должна быть старее, чем в venv на хосте:
+  иначе воркер не сможет применить новый `impersonate`.
 - `docker-compose.yml` тянет `metacubex/mihomo:latest`; для воспроизводимых
   сборок зафиксируй тег.

@@ -1,16 +1,17 @@
 import asyncio
 import random
+import time
 
 import aiohttp
 
+from . import identity
 from .config import ConfigStore, CookieFileWatcher
-from .constants import BASE_DIR, DEFAULT_CONNECT_TIMEOUT_SECONDS, PROXY_HOST, log
+from .constants import BASE_DIR, DEFAULT_CONNECT_TIMEOUT_SECONDS, PROXY_HOST, STORE_ENDPOINT_OVERRIDE, log
 from .health import ExecutorHandle, ExecutorHealth
 from .http_client import CurlSessionHandle, fetch_comments
-from .pipeline import build_payload
+from .pipeline import build_payload, send_batch_to_store
 from .scheduler import PollOutcome, PollScheduler
-from .sender import Sender
-from .state import BackoffState, SeenCache
+from .state import BackoffState, SeenCache, TokenBucket
 
 # Как часто проверять появление/починку cookies-файла, пока его нет
 # (гостевой слот ещё не харвестился) или он не читается.
@@ -22,6 +23,10 @@ COOKIE_WAIT_SECONDS = 60
 EMPTY_BASE_COOLDOWN = 3.0
 EMPTY_MAX_COOLDOWN = 60.0
 EMPTY_SWAP_AFTER = 3
+
+# Пока идёт ротация (заявка pending/working) воркер не опрашивает Reddit
+# и лишь раз в столько секунд заглядывает, не закончилась ли она.
+ROTATION_POLL_SECONDS = 5.0
 
 
 def _fullname(c: dict) -> str:
@@ -46,9 +51,10 @@ def rl_cooldown(ratelimit: dict | None, margin: float, max_interval: float) -> f
 async def account_worker(
     account: dict,
     config: ConfigStore,
+    bucket: TokenBucket,
     seen: SeenCache,
     scheduler: PollScheduler,
-    sender: Sender,
+    store_session: aiohttp.ClientSession,
     http_executor: ExecutorHandle,
     executor_health: ExecutorHealth | None = None,
 ):
@@ -78,6 +84,18 @@ async def account_worker(
 
     user_agent = account.get("user_agent") or config.get("user_agent", "Mozilla/5.0")
     impersonate = account.get("impersonate") or config.get("impersonate", "chrome")
+
+    # Активный профиль слота после ротации (state/slots/account_N.json)
+    # ПЕРЕКРЫВАЕТ accounts.yaml — иначе после рестарта контейнера слот
+    # откатился бы на старый отпечаток, а нода и cookies уже новые.
+    profile_watcher = identity.SlotProfileWatcher(name)
+    prof = profile_watcher.load_if_changed(force=True)
+    if prof:
+        impersonate = prof["impersonate"]
+        user_agent = prof.get("user_agent") or user_agent
+        log.info("[%s] профиль из state/slots: impersonate=%s нода=%s (перекрывает accounts.yaml)",
+                 name, impersonate, prof.get("node"))
+
     # NB: реальные запросы к Reddit идут через curl_cffi с impersonate (он
     # сам ставит UA/заголовки, соответствующие TLS-отпечатку). Эти headers
     # живут только в aiohttp-сессии (хранилище cookie_jar).
@@ -96,6 +114,7 @@ async def account_worker(
     )
     auth_dead = False  # cookies отвергнуты — ждём обновления файла
     empty_streak = 0   # подряд пустых листингов (200, children=[]) на 1-й странице
+    next_request_at = 0.0  # не просить ротацию раньше (wall clock)
 
     slot = scheduler.register(name)
     log.info("[%s] Старт (прокси %s, impersonate=%s) — жду слоты планировщика", name, proxy_url, impersonate)
@@ -107,8 +126,39 @@ async def account_worker(
 
                 outcome: PollOutcome | None = None
                 cooldown = 0.0
-                queued = 0
+                sent = 0
                 try:
+                    # ---- ротация идентичности (демон на хосте) ----
+                    rot = config.get("rotation", {}) or {}
+                    rot_on = bool(rot.get("enabled", False)) and name in (rot.get("slots") or [])
+                    force_profile = False
+                    if rot_on:
+                        req = identity.read_request(name)
+                        if req:
+                            st = req.get("status")
+                            age = time.time() - float(req.get("ts") or 0)
+                            if st in ("pending", "working") and age < float(rot.get("request_timeout_seconds", 1800)):
+                                cooldown = ROTATION_POLL_SECONDS
+                                continue  # ждём демона, Reddit не трогаем
+                            identity.clear_request(name)
+                            if st in ("done", "rejected"):
+                                retry_after = float(req.get("retry_after") or 0)
+                                next_request_at = max(next_request_at, retry_after)
+                                if st == "done":
+                                    empty_streak = 0
+                                    backoff.register_success()
+                                    auth_dead = False
+                                    force_profile = True
+                                    log.info("[%s] ротация выполнена — возобновляю опрос с новой идентичностью", name)
+                                else:
+                                    wait = max(0.0, retry_after - time.time())
+                                    log.warning("[%s] ротация отклонена (%s) — продолжаю как есть, "
+                                                "следующая заявка не раньше чем через %.0fs",
+                                                name, req.get("reason"), wait)
+                            else:
+                                log.warning("[%s] заявка на ротацию зависла (%s, %.0fs) — снимаю",
+                                            name, st, age)
+
                     max_age = config.get("max_age_seconds", 120)
                     max_pages = config.get("pagination_max_pages", 5)
                     pg_min = config.get("pagination_delay_min_seconds", 0.1)
@@ -117,12 +167,33 @@ async def account_worker(
                     rl_max = config.get("ratelimit_max_interval_seconds", 900)
                     timeout = config.get("request_timeout_seconds", 10)
                     connect_timeout = config.get("connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS)
+                    token_wait_timeout = config.get("token_wait_timeout_seconds", 0.5)
+                    store_endpoint = STORE_ENDPOINT_OVERRIDE or config.get("store_endpoint")
+                    batch_max_items = config.get("batch_max_items", 500)
                     base_url = config.get("reddit_base_url", "https://www.reddit.com")
                     fetch_limit = min(100, config.get("fetch_limit", 100))
                     subs_joined = "+".join(config.get("stream_subs", ["all"]))
 
+                    # Профиль (impersonate) — раньше cookies: демон пишет
+                    # state/slots/* ДО замены cookies-файла.
+                    new_prof = profile_watcher.load_if_changed(force=force_profile)
+                    profile_changed = False
+                    if new_prof is not None and new_prof["impersonate"] != impersonate:
+                        try:
+                            curl_session.set_impersonate(new_prof["impersonate"])
+                            log.info("[%s] impersonate %s -> %s (нода %s)", name, impersonate,
+                                     new_prof["impersonate"], new_prof.get("node"))
+                            impersonate = new_prof["impersonate"]
+                            profile_changed = True
+                            empty_streak = 0
+                            backoff.register_success()
+                            auth_dead = False
+                        except Exception as e:
+                            log.error("[%s] не смог применить impersonate=%s (версия curl_cffi в "
+                                      "контейнере старее хоста?): %s", name, new_prof["impersonate"], e)
+
                     cookie_watcher.min_check_interval = config.get("cookie_reload_check_interval_seconds", 30)
-                    new_cookies = cookie_watcher.load_if_changed()
+                    new_cookies = cookie_watcher.load_if_changed(force=profile_changed or force_profile)
                     if new_cookies is not None:
                         session.cookie_jar.clear()
                         session.cookie_jar.update_cookies(new_cookies)
@@ -135,8 +206,7 @@ async def account_worker(
                             auth_dead = False
                             log.info("[%s] новые cookies — сбрасываю счётчик auth-ошибок, возобновляю опрос", name)
 
-                    # Скорость отправки теперь ведёт Sender (ровными порциями)
-                    # под потолком QueueGovernor; воркер только наполняет буфер.
+                    # Потолок отправки (bucket.rate) ведёт QueueGovernor.
 
                     # Остановка пагинации: как только на странице встретился
                     # уже виденный комментарий — догнали, дальше листать не надо.
@@ -172,8 +242,8 @@ async def account_worker(
                     if result.error_kind == "auth":
                         cooldown, should_stop = backoff.register_auth_error()
                         if should_stop:
-                            # Пауза с редкими пробами; новые cookies (hot-reload
-                            # выше) сами возобновляют работу.
+                            # Пауза с редкими пробами; новые cookies
+                            # (hot-reload выше) сами возобновляют работу.
                             cooldown = max(cooldown, float(config.get("auth_dead_cooldown_seconds", 120)))
                             if not auth_dead:
                                 auth_dead = True
@@ -201,6 +271,20 @@ async def account_worker(
                             curl_session.swap()  # свежее соединение/keep-alive
                         log.warning("[%s] пустой листинг подряд %d — отдых %.1fs",
                                     name, empty_streak, cooldown)
+
+                        # Долго пусто -> просим демона сменить идентичность
+                        # (нода + отпечаток + cookies). Сами ничего не меняем.
+                        if (rot_on and empty_streak >= int(rot.get("empty_streak_trigger", 6))
+                                and time.time() >= next_request_at):
+                            try:
+                                identity.write_request(name, "empty_listing", empty_streak)
+                                next_request_at = time.time() + float(rot.get("request_cooldown_seconds", 600))
+                                cooldown = ROTATION_POLL_SECONDS
+                                log.warning("[%s] пусто %d раз подряд — заявка на смену идентичности "
+                                            "(state/requests), опрос на паузе", name, empty_streak)
+                            except OSError as e:
+                                log.error("[%s] не смог записать заявку на ротацию (state/ смонтирован "
+                                          "на запись?): %s", name, e)
                         continue
 
                     if result.error_kind == "network":
@@ -219,20 +303,37 @@ async def account_worker(
                         if p is None or p["_age_seconds"] > max_age:
                             continue
                         payloads.append(p)
-                    # Старые первыми: буфер Sender'а — FIFO, самые старые
-                    # должны уйти раньше, пока не протухли по max_age.
-                    payloads.sort(key=lambda p: p["_age_seconds"], reverse=True)
+                    payloads.sort(key=lambda p: p["_age_seconds"])
 
-                    to_queue: list[dict] = []
-                    dropped_dup = 0
+                    to_send: list[dict] = []
+                    dropped_dup = dropped_rate = 0
                     for p in payloads:
                         if not await seen.try_claim(p["external_id"]):
                             dropped_dup += 1
                             continue
-                        to_queue.append(p)
+                        if not await _acquire_with_retry(bucket, token_wait_timeout):
+                            await seen.release(p["external_id"])
+                            dropped_rate += 1
+                            continue
+                        to_send.append(p)
 
-                    # Отправку (confirm/release в SeenCache) делает Sender.
-                    queued = await sender.put_many(to_queue)
+                    if to_send:
+                        done_ids: set[str] = set()
+                        try:
+                            ok_flags = await send_batch_to_store(
+                                store_session, store_endpoint, to_send, name, batch_max_items
+                            )
+                            for p, ok in zip(to_send, ok_flags):
+                                if ok:
+                                    await seen.confirm(p["external_id"])
+                                    sent += 1
+                                else:
+                                    await seen.release(p["external_id"])
+                                done_ids.add(p["external_id"])
+                        finally:
+                            for p in to_send:
+                                if p["external_id"] not in done_ids:
+                                    await seen.release(p["external_id"])
 
                     outcome = PollOutcome(
                         page_len=stats["first_len"], dupes=stats["first_dupes"],
@@ -241,16 +342,26 @@ async def account_worker(
                     cooldown = rl_cooldown(result.ratelimit, margin, rl_max)
 
                     log.info(
-                        "[%s] r/%s стр=%d получено=%d дубли_стр1=%d/%d в_буфер=%d дубли=%d "
-                        "буфер=%d догнали=%s cooldown=%.1fs",
+                        "[%s] r/%s стр=%d получено=%d дубли_стр1=%d/%d отправлено=%d "
+                        "не_подтв=%d срезано_лимитом=%d догнали=%s cooldown=%.1fs",
                         name, subs_joined, result.pages_fetched, len(comments),
-                        stats["first_dupes"], stats["first_len"], queued, dropped_dup,
-                        sender.backlog, stats["overlap"], cooldown,
+                        stats["first_dupes"], stats["first_len"], sent,
+                        len(to_send) - sent, dropped_rate, stats["overlap"], cooldown,
                     )
                 finally:
-                    scheduler.release(slot, outcome, cooldown, queued)
+                    scheduler.release(slot, outcome, cooldown, sent)
     finally:
         scheduler.unregister(slot)
+
+
+async def _acquire_with_retry(bucket: TokenBucket, deadline: float) -> bool:
+    start = time.monotonic()
+    while True:
+        if await bucket.try_acquire():
+            return True
+        if time.monotonic() - start >= deadline:
+            return False
+        await asyncio.sleep(0.02)
 
 
 async def supervised(

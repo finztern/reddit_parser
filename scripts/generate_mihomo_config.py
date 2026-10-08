@@ -4,7 +4,7 @@
   - vless_accounts.env   — файл вида account_1 = vless://...
   - accounts.yaml        — берём оттуда proxy_port для каждого account_N
   - all_nodes.txt        — (опционально) пул дополнительных нод для
-                           ротации (см. scripts/rotation.py)
+                           ротации (см. scripts/rotation_daemon.py)
 
 Запуск (из корня проекта):
 
@@ -24,11 +24,11 @@
 их воркер не сможет подключиться. Это касается и гостевых слотов
 account_11..25: пока для них нет ссылок, они должны быть enabled: false.
 
-Если рядом лежит all_nodes.txt, его ноды добавляются в proxies и в
-КАЖДУЮ группу pg-account_N (после назначенной ноды) — тогда
-rotation.py сможет переключать ноду через API mihomo без рестарта.
-(Раньше эта функция существовала в rotation.extend_with_pool(), но
-генератор её не вызывал — select в mihomo отвергал ноды пула.)
+Если рядом лежит all_nodes.txt, его ноды добавляются в proxies, а ВСЕ
+ноды (пул + ноды других аккаунтов) — в КАЖДУЮ группу pg-account_N (после
+назначенной ноды) — тогда rotation_daemon.py сможет переключать ноду
+через API mihomo без рестарта. Какие ноды слот вправе брать, решает
+демон (ноды логин-аккаунтов гостям не отдаются).
 """
 
 from __future__ import annotations
@@ -258,7 +258,7 @@ def main() -> None:
         print("ОШИБКА: не удалось собрать ни одного прокси — проверь vless_accounts.env", file=sys.stderr)
         sys.exit(1)
 
-    # Пул нод для ротации (опционально, нужен scripts/rotation.py + all_nodes.txt).
+    # Пул нод для ротации (опционально, нужен all_nodes.txt).
     # Импорт ленивый: rotation сам импортирует этот модуль.
     pool_added = 0
     try:

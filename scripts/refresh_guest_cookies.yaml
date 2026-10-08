@@ -6,7 +6,10 @@
 #  Логин-аккаунты account_1..10 обслуживает refresh_cookies.py
 #  (см. refresh_cookies.yaml) — их здесь НЕТ и быть не должно.
 #
-#  ВАЖНО: файл читается ТОЛЬКО refresh_guest_cookies.py.
+#  ВАЖНО: файл читается refresh_guest_cookies.py и rotation_daemon.py.
+#  После ротации активный профиль слота (отпечаток/нода/гео) лежит в
+#  state/slots/account_N.json и ПЕРЕКРЫВАЕТ записи ниже — этот файл при
+#  ротации не переписывается.
 # ============================================================
 
 headless: true
@@ -49,8 +52,7 @@ geo_defaults:
 
 # Гео per-слот — под реальную геолокацию VLESS-ноды слота (в комментарии —
 # планируемая нода). Поправь, когда впишешь реальные ноды в
-# vless_accounts.env. При ротации ноды rotation.py кладёт geo прямо в
-# запись слота ниже (ключ geo) — оно приоритетнее account_geo.
+# vless_accounts.env. При ротации демон кладёт гео в state/slots/.
 account_geo:
   account_11: {locale: "de-CH", timezone_id: "Europe/Zurich"}       # ch2
   account_12: {locale: "cs-CZ", timezone_id: "Europe/Prague"}       # cz1
@@ -71,12 +73,8 @@ account_geo:
 # ------------------------------------------------------------
 #  Гостевые слоты: account_N -> (engine/channel/device, UA, impersonate).
 #
-#  Раньше этот файл расходился с accounts.yaml почти во всех слотах
-#  (например account_11: тут safari180/webkit, а скрапер ходил как
-#  chrome133a) — cookies получал один "браузер", запросы шли с другим
-#  TLS-отпечатком. Теперь все значения СИНХРОННЫ с accounts.yaml, а сам
-#  refresh_guest_cookies.py дополнительно берёт impersonate/user_agent
-#  из accounts.yaml и ругается при расхождении.
+#  Значения СИНХРОННЫ с accounts.yaml; refresh_guest_cookies.py берёт
+#  impersonate/user_agent из accounts.yaml и ругается при расхождении.
 #  Менять отпечатки — через scripts/rotate_fingerprints.py (правит оба).
 #
 #  channel: null -> bundled-движок Playwright. channel: chrome/msedge —

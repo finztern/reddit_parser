@@ -1,8 +1,9 @@
 # Зависимости для scripts/refresh_cookies.py, scripts/refresh_guest_cookies.py,
-# scripts/manual_login.py, scripts/rotation.py, scripts/rotate_fingerprints.py,
-# scripts/check_nodes.py, scripts/test_curl_guest.py — сознательно отдельный
-# файл от requirements.txt основного скрапера (main.py + scraper/): тяжёлые
-# зависимости Playwright не должны попадать в образ scraper'а.
+# scripts/manual_login.py, scripts/rotation.py, scripts/rotation_daemon.py,
+# scripts/rotate_fingerprints.py, scripts/check_nodes.py,
+# scripts/test_curl_guest.py — сознательно отдельный файл от requirements.txt
+# основного скрапера (main.py + scraper/): тяжёлые зависимости Playwright не
+# должны попадать в образ scraper'а.
 #
 # Установка (venv в корне проекта — его же используют systemd-юниты):
 #   python3 -m venv venv

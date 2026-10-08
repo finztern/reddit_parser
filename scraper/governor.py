@@ -1,5 +1,5 @@
 """
-QueueGovernor — авто-подстройка потолка скорости отправки по очереди пайплайна.
+QueueGovernor — авто-подстройка скорости отправки по очереди пайплайна.
 
 Раз в poll_interval_seconds читает GET queue_control.url (например
 http://192.168.0.101:9000/queue):
@@ -9,26 +9,16 @@ http://192.168.0.101:9000/queue):
    "bpipe_queue": 0, "bpipe_max": 2000, "bpipe_inflight": 0,
    "bpipe_instances": 2}
 
-и двигает ПОТОЛОК скорости (bucket.rate). Реальную равномерную отправку
-обеспечивает Sender (scraper/sender.py) — он шлёт со скоростью притока, а
-потолок лишь ограничивает её сверху.
+и двигает потолок общего TokenBucket так, чтобы bpipe_queue держалась
+не ниже target_min (пайплайн не простаивает), но не раздувалась до
+переполнения.
 
-Что исправлено относительно прошлой версии (пила "обвал -> залп"):
-
-  * Коллектор обновляет очередь раз в ~2 с, а мы опрашивали каждые 0.5 с и
-    на КАЖДОМ тике умножали потолок (x1.25 вверх / x0.5 в панике) по одному и
-    тому же устаревшему значению. Теперь шаги не чаще, чем раз в
-    adjust_interval_seconds (панике — panic_interval_seconds), чтобы
-    дождаться эффекта прошлого шага.
-  * Поднимать потолок имеет смысл, только если отправку реально сдерживает
-    именно он (Sender.is_cap_limited). Если комментариев просто приходит
-    меньше потолка — поднимать нечего, раньше потолок вхолостую разгонялся
-    до 80+/с и переставал что-либо ограничивать.
+Управляется только потолок отправки. Частоту опроса Reddit по-прежнему
+адаптирует PollScheduler по доле дублей.
 """
 
 import asyncio
 import time
-from typing import Callable
 
 import aiohttp
 
@@ -44,14 +34,11 @@ def _num(v, default=None):
 
 
 class QueueGovernor:
-    def __init__(self, config, bucket: TokenBucket, session: aiohttp.ClientSession, log,
-                 is_limited: Callable[[], bool] | None = None):
+    def __init__(self, config, bucket: TokenBucket, session: aiohttp.ClientSession, log):
         self.config = config
         self.bucket = bucket
         self.session = session
         self.log = log
-        # True -> потолок реально сдерживает отправку (можно поднимать).
-        self._is_limited = is_limited or (lambda: True)
 
         self.rate: float = bucket.rate
         self.observed: float | None = None  # EWMA реально выданных токенов/сек
@@ -65,7 +52,6 @@ class QueueGovernor:
         self._last_log = 0.0
         self._last_status: dict | None = None
         self._last_reason = "старт"
-        self._last_change = 0.0  # monotonic последнего изменения потолка
 
     def _cfg(self) -> dict:
         return self.config.get("queue_control", {}) or {}
@@ -89,12 +75,13 @@ class QueueGovernor:
             self.log.warning("[governor] не удалось прочитать %s: %s", url, e)
             return None
 
-    def _decide(self, q: dict, c: dict, now: float) -> tuple[float, str]:
+    def _decide(self, q: dict, c: dict) -> tuple[float, str]:
         """Возвращает (новый потолок, причина)."""
         rate = self.rate
         observed = self.observed or 0.0
         min_rate = float(c.get("min_rate", 5))
         max_rate = float(c.get("max_rate", 400))
+        initial = float(c.get("initial_rate", 80))
 
         bq = _num(q.get("bpipe_queue"))
         if bq is None:
@@ -125,40 +112,25 @@ class QueueGovernor:
             w in action for w in ("slow", "pause", "stop")
         )
 
-        adjust_every = float(c.get("adjust_interval_seconds", 2.0))
-        panic_every = float(c.get("panic_interval_seconds", 3.0))
-        since = now - self._last_change
-
         # База для торможения — реальная скорость, а не раздутый потолок.
         base = min(rate, max(observed, min_rate))
 
         if panic:
-            if since < panic_every:
-                return rate, "ПАНИКА — жду эффекта прошлого шага"
             new = base * float(c.get("panic_factor", 0.5))
             reason = "ПАНИКА (degraded/очереди почти полные)"
         elif slow_action or bq > high:
-            if since < adjust_every:
-                return rate, "очередь высокая — жду эффекта прошлого шага"
             new = base * float(c.get("down_factor", 0.8))
             reason = f"сервер просит притормозить (action={action})" if slow_action \
                 else f"bpipe_queue={bq:.0f} > {high:.0f} — тормозим"
         elif bq < up_thr:
-            if since < adjust_every:
-                return rate, f"bpipe_queue={bq:.0f} < {up_thr:.0f} — жду эффекта прошлого шага"
-            if not self._is_limited():
-                return rate, (f"bpipe_queue={bq:.0f} < {up_thr:.0f}, но приток ниже потолка — "
-                              "поднимать нечего")
-            ceiling = max(observed * float(c.get("rate_ceiling_over_observed", 2.0)), min_rate)
-            new = min(max_rate, max(rate, min(rate * float(c.get("up_factor", 1.5)), ceiling)))
-            reason = f"bpipe_queue={bq:.0f} < {up_thr:.0f} и упёрлись в потолок — ускоряемся"
+            ceiling = max(observed * float(c.get("rate_ceiling_over_observed", 2.0)), initial)
+            new = min(max_rate, max(rate, min(rate * float(c.get("up_factor", 1.25)), ceiling)))
+            reason = f"bpipe_queue={bq:.0f} < {up_thr:.0f} — ускоряемся"
         else:
-            return rate, f"bpipe_queue={bq:.0f} в норме — держим"
+            new = rate
+            reason = f"bpipe_queue={bq:.0f} в норме — держим"
 
-        new = max(min_rate, min(max_rate, new))
-        if abs(new - rate) > 1e-9:
-            self._last_change = now
-        return new, reason
+        return max(min_rate, min(max_rate, new)), reason
 
     def _apply(self, new_rate: float):
         self.rate = new_rate
@@ -179,7 +151,9 @@ class QueueGovernor:
             self._last_granted, self._last_t = granted, now
 
             url = self._url(c)
-            # default False — как в main.py.
+            # default False — как в main.py (раньше здесь было True, и при
+            # отсутствии ключа enabled main считал governor выключенным,
+            # а он работал).
             if not c.get("enabled", False) or not url:
                 if self._active:
                     self._active = False
@@ -193,7 +167,6 @@ class QueueGovernor:
                 self._fallback = False
                 self._active_since = now
                 self._last_ok = None
-                self._last_change = now
                 self._apply(float(c.get("initial_rate", 80)))
                 self.log.info("[governor] включён: url=%s target_min=%s стартовый потолок=%.0f/с",
                               url, c.get("target_min", 200), self.rate)
@@ -207,7 +180,7 @@ class QueueGovernor:
                     self._fallback = False
                     self.log.info("[governor] эндпоинт очереди снова доступен")
                 old = self.rate
-                new, reason = self._decide(status, c, now)
+                new, reason = self._decide(status, c)
                 self._last_reason = reason
                 self._apply(new)
                 changed = abs(new - old) > max(1.0, old * 0.05)

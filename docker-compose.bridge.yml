@@ -5,10 +5,11 @@
 #
 # ЛОГИ: см. комментарий в docker-compose.yml — тот же лимит json-file.
 #
-# ОГРАНИЧЕНИЕ: scripts/rotation.py ходит в API mihomo на 127.0.0.1:9090 —
-# в bridge-режиме этот порт внутри контейнера недоступен с хоста
-# (external-controller слушает 127.0.0.1 контейнера), так что смена ноды
-# на лету в этом режиме не работает. Для rotation используй Linux-вариант.
+# ОГРАНИЧЕНИЕ: scripts/rotation.py и scripts/rotation_daemon.py ходят в
+# API mihomo на 127.0.0.1:9090 — в bridge-режиме этот порт внутри
+# контейнера недоступен с хоста (external-controller слушает 127.0.0.1
+# контейнера), так что смена ноды на лету в этом режиме не работает. Для
+# ротации используй Linux-вариант.
 
 x-logging: &default-logging
   driver: json-file
@@ -40,6 +41,7 @@ services:
       - ./config.yaml:/app/config.yaml:ro
       - ./accounts.yaml:/app/accounts.yaml:ro
       - ./cookies:/app/cookies:ro
+      - ./state:/app/state
     environment:
       - CONFIG_PATH=/app/config.yaml
       - ACCOUNTS_PATH=/app/accounts.yaml

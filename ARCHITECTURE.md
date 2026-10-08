@@ -19,7 +19,8 @@
         ┌───────────────┬───────────┴───────┬───────────────┐
   account_worker   account_worker      account_worker   ...
   (account_1)      (account_2)         (account_N)
-  свой proxy_port, cookies, impersonate, BackoffState, CookieFileWatcher
+  свой proxy_port, cookies, impersonate, BackoffState, CookieFileWatcher,
+  SlotProfileWatcher
         ▲ слот выдаёт PollScheduler (по кругу, с джиттером)
         │
         └──► GET /r/all/comments.json ─► фильтр max_age ─► SeenCache
@@ -29,7 +30,9 @@
     refresh_cookies.py        (логин, account_1..10)   ─┐ пишут атомарно
     refresh_guest_cookies.py  (гости, account_11..25)  ─┤ cookies/account_N.json
     manual_login.py           (первый логин)           ─┘      │
+    rotation_daemon.py        (смена идентичности)  ──────────►│
                                            CookieFileWatcher ◄─┘ (hot-reload)
+    state/requests, state/slots  ◄──► воркер (заявки / активный профиль)
 ```
 
 Все аккаунты опрашивают **один и тот же поток** (`stream_subs`, обычно
@@ -39,8 +42,8 @@
 
 Общие объекты: `TokenBucket`, `SeenCache`, `PollScheduler`, `QueueGovernor`,
 `ExecutorHandle`, `ConfigStore`. Своё на аккаунт: proxy-порт, cookies +
-`CookieFileWatcher`, `impersonate`/UA, `curl_cffi.Session`
-(`CurlSessionHandle`), `BackoffState`, слот планировщика.
+`CookieFileWatcher`, `impersonate`/UA (+ `SlotProfileWatcher`),
+`curl_cffi.Session` (`CurlSessionHandle`), `BackoffState`, слот планировщика.
 
 Аккаунты 1..10 — логин, 11..25 — гостевые: для самого скрапера разницы нет
 (оба читают `cookies/account_N.json`), отличается только джоб, который этот
@@ -56,76 +59,64 @@
 **Остановка.** Процесс завершается только: по SIGTERM/SIGINT, при падении
 любой «ядерной» задачи (config_reload, governor, health, scheduler, stats) или
 когда завершились **все** воркеры. Завершение одного воркера процесс не
-останавливает (раньше `FIRST_COMPLETED` по всем задачам именно так и делал, и
-docker перезапускал процесс по кругу).
+останавливает.
 
 ### `scraper/scheduler.py` — `PollScheduler`
 Раз в `interval` секунд (± `stream_jitter_ratio`) выбирает по кругу
 аккаунта, который не занят и у которого `not_before` (его личный
 rate-limit-кулдаун) наступил, и кладёт ему слот в очередь. `interval`
-подстраивается по доле дублей на 1-й странице (EWMA): мало дублей → чаще
-(можем пропускать комментарии), много → реже.
+подстраивается по доле дублей на 1-й странице (EWMA).
 
 ### `scraper/governor.py` — `QueueGovernor`
-Читает `GET queue_control.url` (JSON: `bpipe_queue`, `bpipe_max`,
-`upipe_queue`, `degraded`, `action`) и двигает потолок `TokenBucket`:
-ускоряется, пока `bpipe_queue < target_min * headroom_ratio`, тормозит выше
-`target_high`, резко — при `degraded`/почти полных очередях. Если эндпоинт
-молчит дольше `stale_seconds` — fallback на `target_rate_per_second`. URL
-можно переопределить env `QUEUE_CONTROL_URL`.
+Читает `GET queue_control.url` и двигает потолок `TokenBucket`. Если эндпоинт
+молчит дольше `stale_seconds` — fallback на `target_rate_per_second`.
 
 ### `scraper/worker.py` — `account_worker`
-1. Если `cookies/account_N.json` нет — ждёт его появления (раз в минуту);
-   так гостевой слот можно включить до первого харвеста.
-2. Регистрирует слот и в цикле ждёт слот от планировщика.
-3. На каждом слоте: читает актуальный конфиг; `CookieFileWatcher` (по mtime,
-   не чаще `cookie_reload_check_interval_seconds`) — при изменении файла
-   обновляет `session.cookie_jar`, пересоздаёт `curl_cffi`-сессию (она копит
-   `Set-Cookie`, старые значения не должны конфликтовать с новыми) и сбрасывает
-   счётчик auth-ошибок.
+1. Если `cookies/account_N.json` нет — ждёт его появления (раз в минуту).
+2. Читает активный профиль слота `state/slots/account_N.json` (если есть) —
+   он перекрывает `impersonate`/UA из `accounts.yaml`. Регистрирует слот в
+   планировщике.
+3. На каждом слоте: проверяет заявку на ротацию (pending/working — слот
+   пропускается, Reddit не опрашивается); читает актуальный конфиг;
+   `SlotProfileWatcher` — при смене профиля меняет `impersonate`
+   (`CurlSessionHandle.set_impersonate`); `CookieFileWatcher` — при смене
+   файла обновляет cookies и пересоздаёт `curl_cffi`-сессию.
 4. `fetch_comments(..., stop_when=…)`: страницы листаются, пока не встретится
-   уже виденный комментарий («догнали»), страница не станет старше `max_age`,
-   не кончится `after` или не будет достигнут лимит страниц.
-5. Ошибки: `rate_or_server` (429/5xx) → экспоненциальный кулдаун аккаунта
-   (+`Retry-After`); `network` → мягкий кулдаун ≤30 с; `auth` (401/403) →
-   кулдаун, а после `max_consecutive_auth_errors` подряд — **пауза с редкими
-   пробами** (`auth_dead_cooldown_seconds`), а не завершение воркера. Новые
-   cookies от refresh-джоба сами выводят воркер из паузы.
-6. Успех: `build_payload` → фильтр `max_age` → сортировка по свежести →
-   `SeenCache.try_claim` → токен `TokenBucket` → батч в `/store_items` →
-   `confirm()`/`release()` по каждому элементу (с `finally`-страховкой).
-7. `cooldown` аккаунта = `reset / (remaining * ratelimit_safety_margin)` по
-   `X-Ratelimit-*`, максимум `ratelimit_max_interval_seconds`; передаётся в
-   `scheduler.release()`.
+   уже виденный комментарий, страница не станет старше `max_age`, не кончится
+   `after` или не будет достигнут лимит страниц.
+5. Ошибки: `rate_or_server` (429/5xx) → экспоненциальный кулдаун; `network`
+   → мягкий кулдаун ≤30 с; `auth` (401/403) → кулдаун, после
+   `max_consecutive_auth_errors` подряд — пауза с редкими пробами;
+   `empty` (пустой листинг) → растущий кулдаун, а при
+   `rotation.empty_streak_trigger` подряд — заявка на ротацию.
+6. Успех: `build_payload` → фильтр `max_age` → `SeenCache.try_claim` →
+   токен `TokenBucket` → батч в `/store_items` → `confirm()`/`release()`.
+7. `cooldown` аккаунта = `reset / (remaining * ratelimit_safety_margin)`.
 
 `supervised()` перезапускает воркер при исключениях (экспоненциальная
 задержка до 60 с); штатный `return` не перезапускает.
 
+### `scraper/identity.py`
+Обмен состоянием с демоном ротации через `state/` (атомарная запись):
+`requests/account_N.json` (заявка и её результат), `slots/account_N.json`
+(активный профиль слота), `SlotProfileWatcher`.
+
 ### `scraper/http_client.py`
 `_fetch_comments_page` — один запрос `curl_cffi` в `http_executor` под
-`asyncio.wait_for(connect + read + slack)`; cookies берутся из
-`session.cookie_jar` на каждый запрос. `fetch_comments` — пагинация.
-`pagination_max_pages <= 0` = «без лимита» (≤10 страниц; раньше 0
-останавливал листание сразу после первой страницы).
+`asyncio.wait_for`; `fetch_comments` — пагинация. `CurlSessionHandle` —
+сессия аккаунта, `swap()` / `set_impersonate()`.
 
 ### `scraper/health.py`
-`ExecutorHandle` пересоздаёт пул при зависании потоков `curl_cffi`
-(`wait_for` не убивает физический поток). `ExecutorHealth` считает занятость
-текущего пула; у каждого пула своё **поколение**, завершения задач старых
-пулов игнорируются (раньше они уводили `active` в минус и ломали следующий
-своп). Предохранители: `swap_cooldown`, `fatal_leak_multiplier` → `SystemExit`
-(docker перезапустит).
+`ExecutorHandle` пересоздаёт пул при зависании потоков `curl_cffi`;
+`ExecutorHealth` считает занятость текущего пула по поколениям.
 
 ### `scraper/state.py`
-`TokenBucket`, `SeenCache` (двухфазный `try_claim → confirm/release`;
-элемент считается виденным только после подтверждённой отправки),
+`TokenBucket`, `SeenCache` (двухфазный `try_claim → confirm/release`),
 `BackoffState`.
 
 ### `scraper/pipeline.py`
-`build_payload` (схема коллектора: `content`, `external_id`, `created_at`,
-`external_parent_id` для `t1_`/`t3_`, `summary` и т.д.) и
-`send_batch_to_store` (чанки по `min(batch_max_items, 1000)`, поэлементные
-результаты, 413/ошибки → весь чанк `False`).
+`build_payload` (схема коллектора) и `send_batch_to_store` (чанки по
+`min(batch_max_items, 1000)`, поэлементные результаты).
 
 ### `scraper/config.py`
 `ConfigStore` (hot-reload), `load_accounts`, `load_cookies`,
@@ -135,50 +126,60 @@ rate-limit-кулдаун) наступил, и кладёт ему слот в 
 
 `curl_cffi` синхронный → `run_in_executor`. `wait_for` на таймауте отменяет
 только asyncio-обёртку, поток остаётся занят. Меры: запас потоков, раздельные
-connect/read-таймауты, `wait_for` с запасом, пересоздание `curl`-сессии
-аккаунта при таймауте, и своп всего пула (`health.py`).
+connect/read-таймауты, пересоздание `curl`-сессии аккаунта при таймауте, и
+своп всего пула (`health.py`).
 
 ## 4. Дедуп и надёжность доставки
 
-Любой сбой на пути (HTTP-ответ, таймаут, исключение, отмена задачи) →
-`release()`: элемент будет подхвачен на следующем опросе, пока не протух по
-`max_age_seconds`. Если пайплайн недоступен дольше `max_age_seconds`, часть
-комментариев теряется — осознанный компромисс свежести и доставки.
+Любой сбой на пути → `release()`: элемент будет подхвачен на следующем
+опросе, пока не протух по `max_age_seconds`.
 
 ## 5. Конфигурация и hot-reload
 
 `config.yaml` — каждые `CONFIG_RELOAD_SECONDS` (5 с). `accounts.yaml` — один
-раз при старте. Файл cookies конкретного аккаунта — на лету
-(`CookieFileWatcher`). Env: `CONFIG_PATH`, `ACCOUNTS_PATH`, `PROXY_HOST`,
-`STORE_ENDPOINT`, `QUEUE_CONTROL_URL`, `CONFIG_RELOAD_SECONDS`, `LOG_FILE`,
+раз при старте. Файл cookies конкретного аккаунта и профиль слота — на лету.
+Env: `CONFIG_PATH`, `ACCOUNTS_PATH`, `PROXY_HOST`, `STORE_ENDPOINT`,
+`QUEUE_CONTROL_URL`, `CONFIG_RELOAD_SECONDS`, `STATE_DIR`, `LOG_FILE`,
 `EXECUTOR_*`.
 
 ## 6. Внешние джобы (cookies)
 
-Единственная точка пересечения с процессом скрапера — файл
-`cookies/account_N.json`. Джобы пишут его атомарно (`os.replace()` из
-tmp-файла в той же директории), поэтому воркер всегда видит целый файл.
+Точки пересечения с процессом скрапера — `cookies/account_N.json` и `state/`.
+Файлы пишутся атомарно (`os.replace()` из tmp в той же директории).
 
-- **`refresh_cookies.py`** — логин-аккаунты (`login_accounts`). Браузерный
-  движок выводится из `impersonate` (firefox → firefox, chrome → chromium,
-  safari → webkit); контекст идёт через тот же `proxy_port`; залогиненность —
-  по позитивному признаку (`/api/me.json` → `data.name`), при её отсутствии
-  файл не трогается. Пишутся только cookies домена reddit.com.
-- **`refresh_guest_cookies.py`** — гостевые слоты (`guest_accounts`).
-  `impersonate`/UA берутся из `accounts.yaml`; харвест → верификация
-  `comments.json` тем же `curl_cffi`-отпечатком → запись только при 200;
-  повторный проход по сорвавшимся слотам.
+- **`refresh_cookies.py`** — логин-аккаунты.
+- **`refresh_guest_cookies.py`** — гостевые слоты: харвест → верификация →
+  запись только при 200. Слоты в ротации пропускает, активный профиль после
+  ротации перекрывает `accounts.yaml`.
 - **`manual_login.py`** — первичный логин через Xvfb + x11vnc + noVNC.
-- Один браузер за раз: последовательный цикл внутри джоба + общий `flock` в
-  systemd-юнитах между джобами.
+- Один браузер за раз: общий `flock` (`/tmp/reddit_scraper_browser.lock`).
 
-Прокси-порт у джобов и скрапера **один и тот же** (`proxy_port` из
-`accounts.yaml`) — иначе Reddit увидит одну сессию с двух IP.
+Прокси-порт у джобов и скрапера **один и тот же** (`proxy_port`).
 
-## 7. Случайность (анти-детект)
+## 7. Ротация идентичностей (`scripts/rotation_daemon.py`)
+
+Идентичность = нода + отпечаток + гео (cookies — отдельно, харвестятся
+заново). Реестр — `state/identities.json`: у каждой идентичности `banned_at`,
+у слота — активная идентичность и история ротаций.
+
+Поток: воркер → заявка `pending` → демон (под browser-lock): ставит бан
+текущей идентичности, выбирает кандидата (целинные ноды с новым отпечатком →
+отлежавшиеся забаненные, самая старая первой), переключает ноду в mihomo
+(`PUT /proxies/pg-account_N`), проверяет живость, харвестит и верифицирует
+cookies, затем пишет `state/slots/account_N.json` и подкладывает cookies,
+после чего `status=done`. При неудаче — откат ноды и `rejected` с
+`retry_after`.
+
+Защиты: лимит ротаций в сутки на слот; массовые заявки (≥ доли слотов) —
+считаются сбоем Reddit/сети, а не баном; ноды логин-аккаунтов не отдаются;
+одна нода — один слот. Каждые `reconcile_seconds` демон сверяет выбор ноды в
+mihomo с реестром (после рестарта mihomo `select` сбрасывается).
+Переживает рестарты контейнеров и демона.
+
+## 8. Случайность (анти-детект)
 
 1. Фаза слотов: единый планировщик + `stream_jitter_ratio`.
 2. Паузы между страницами пагинации (`pagination_delay_*`).
-3. Личный кулдаун аккаунта по `X-Ratelimit-*` (адаптивный, не «круглый»).
+3. Личный кулдаун аккаунта по `X-Ratelimit-*`.
 4. Разные `impersonate`+UA на аккаунт; гео браузера джобов = гео ноды.
 5. `stagger_seconds` между аккаунтами в refresh-джобах.
