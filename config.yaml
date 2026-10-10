@@ -2,9 +2,8 @@
 #  Общий конфиг скрапера. Перечитывается на лету каждые ~5 сек.
 #
 #  Схема: все аккаунты опрашивают один поток (stream_subs, по умолчанию
-#  r/all) по слотам от единого планировщика. Скорость отправки в пайплайн
-#  регулирует QueueGovernor по состоянию очереди коллектора
-#  (см. секцию queue_control ниже).
+#  r/all) по слотам от единого планировщика ПО СПРОСУ. Отправка в пайплайн
+#  идёт по состоянию очереди коллектора (Sender, секция queue_control ниже).
 # ============================================================
 
 # ---- Что опрашиваем ----
@@ -45,44 +44,53 @@ pagination_delay_max_seconds: 0.4
 # ---- Свежесть / отправка ----
 max_age_seconds: 15
 
-# СТАТИЧЕСКИЙ лимит отправки в store_items (элементов/сек, на все аккаунты).
-# Используется как fallback: когда queue_control.enabled = false, либо
-# когда эндпоинт очереди недоступен дольше stale_seconds.
-target_rate_per_second: 80
+# fallback-скорость (элементов/сек): используется, только когда
+# queue_control.enabled = false либо /queue недоступна дольше stale_seconds.
+# В этом режиме батч уходит раз в send_batch_size / target_rate_per_second.
+target_rate_per_second: 55
 
-# ---- Авто-подстройка скорости по очереди пайплайна ----
-# QueueGovernor раз в poll_interval_seconds читает GET {url} (JSON с
-# bpipe_queue / bpipe_max / upipe_queue / upipe_limit / degraded / action)
-# и двигает потолок отправки (TokenBucket) в диапазоне [min_rate, max_rate]:
-#   bpipe_queue < target_min * headroom_ratio -> ускоряемся (x up_factor)
-#   bpipe_queue > target_high                 -> тормозим (x down_factor)
-#   между ними                                -> держим как есть
-#   degraded / очереди почти полные / action=slow* -> резко тормозим
+# ---- Отправка по очереди пайплайна (Sender, scraper/sender.py) ----
+# Цель: bpipe_inflight всегда == inflight_target, а очередь ожидания
+# bpipe_queue всегда готова накормить реплики (>= queue_target).
+# Sender раз в poll_interval_seconds читает GET {url} (JSON с bpipe_queue /
+# bpipe_inflight / bpipe_max / degraded / action). Если bpipe_queue <
+# queue_target — уходит батч из самых свежих комментариев буфера (самые
+# свежие первыми). Опрос Reddit идёт ПО СПРОСУ: буфер полон -> аккаунты
+# отдыхают; очереди не хватает данных -> слоты с минимальным интервалом.
 #
 # url можно переопределить переменной окружения QUEUE_CONTROL_URL
 # (нужно в bridge-режиме Docker, где 127.0.0.1 — это сам контейнер).
 queue_control:
   enabled: true
   url: "http://127.0.0.1:9000/queue"
-  poll_interval_seconds: 0.5
+  poll_interval_seconds: 0.3
   request_timeout_seconds: 2
 
-  target_min: 200
-  headroom_ratio: 1.25
-  # target_high: 1000
-  high_fraction: 0.5
+  # Сколько элементов должно быть "в работе" у реплик (2 реплики x 64).
+  inflight_target: 128
+  # Сколько должно ждать в очереди, чтобы реплики не простаивали
+  # (по умолчанию = inflight_target).
+  # queue_target: 128
+  # Размер батча в /store_items (по умолчанию = inflight_target).
+  # send_batch_size: 128
 
-  min_rate: 5
-  max_rate: 400
-  initial_rate: 80
+  # Неполный батч шлём, только если очередь почти пуста
+  # (< low_queue_fraction * queue_target) или самый старый комментарий
+  # буфера уже старше flush_age_fraction * max_age_seconds.
+  low_queue_fraction: 0.5
+  flush_age_fraction: 0.6
 
-  up_factor: 1.25
-  down_factor: 0.8
-  panic_factor: 0.5
-  panic_fraction: 0.9
-  rate_ceiling_over_observed: 2.0
+  # Буфер держим около send_batch_size * buffer_target_factor (достаточно,
+  # чтобы разом забить очередь), потолок — buffer_max_factor; при
+  # переполнении вытесняются самые старые.
+  buffer_target_factor: 1.25
+  buffer_max_factor: 3.0
 
-  respect_server_action: true
+  # Пауза после отправки: /queue ещё не успела отразить батч.
+  min_send_gap_seconds: 0.4
+
+  panic_fraction: 0.9           # bpipe_queue >= 90% bpipe_max (или degraded) — не шлём
+  respect_server_action: true   # action=slow*/pause*/stop* — не шлём
   stale_seconds: 30
   log_every_seconds: 30
 
@@ -90,13 +98,13 @@ queue_control:
 seen_cache_size: 40000
 
 store_endpoint: "http://127.0.0.1:9000/store_items"
+# верхняя граница размера одного POST (сам батч — queue_control.send_batch_size)
 batch_max_items: 500
 
 user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Safari/537.36"
 
 request_timeout_seconds: 10
 connect_timeout_seconds: 5
-token_wait_timeout_seconds: 0.5
 
 cookie_reload_check_interval_seconds: 30
 

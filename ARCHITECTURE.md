@@ -8,10 +8,9 @@
                     ┌────────────────────────────────────────┐
                     │                main.py                  │
                     │ ConfigStore (hot-reload)                │
-                    │ TokenBucket  — потолок отправки         │
+                    │ Sender       — буфер + отправка по /queue│
                     │ SeenCache    — дедуп                    │
-                    │ PollScheduler— слоты опроса             │
-                    │ QueueGovernor— ведёт потолок TokenBucket│
+                    │ PollScheduler— слоты опроса по спросу   │
                     │ ExecutorHandle/Health — пул curl_cffi   │
                     │ aiohttp.ClientSession (store_items)     │
                     └───────────────┬────────────────────────┘
@@ -21,10 +20,10 @@
   (account_1)      (account_2)         (account_N)
   свой proxy_port, cookies, impersonate, BackoffState, CookieFileWatcher,
   SlotProfileWatcher
-        ▲ слот выдаёт PollScheduler (по кругу, с джиттером)
+        ▲ слот выдаёт PollScheduler (самому давно не опрашивавшемуся, по спросу Sender)
         │
         └──► GET /r/all/comments.json ─► фильтр max_age ─► SeenCache
-             ─► TokenBucket ─► POST /store_items (батч)
+             ─► буфер Sender ─► POST /store_items (батч, самые свежие первыми, по /queue)
 
   Вне процесса (хост, systemd):
     refresh_cookies.py        (логин, account_1..10)   ─┐ пишут атомарно
@@ -40,7 +39,7 @@
 «слоты» аккаунтам по кругу. Это убирает пачки одновременных запросов и
 почти все дубли от пересекающихся опросов.
 
-Общие объекты: `TokenBucket`, `SeenCache`, `PollScheduler`, `QueueGovernor`,
+Общие объекты: `Sender`, `SeenCache`, `PollScheduler`,
 `ExecutorHandle`, `ConfigStore`. Своё на аккаунт: proxy-порт, cookies +
 `CookieFileWatcher`, `impersonate`/UA (+ `SlotProfileWatcher`),
 `curl_cffi.Session` (`CurlSessionHandle`), `BackoffState`, слот планировщика.
@@ -52,24 +51,37 @@
 ## 2. Модули
 
 ### `main.py`
-Поднимает общие объекты, `QueueGovernor`, `PollScheduler`, health-цикл и по
+Поднимает общие объекты, `Sender`, `PollScheduler`, health-цикл и по
 задаче `account_worker` на каждый `enabled: true` аккаунт (через
 `supervised()`). Пул `ThreadPoolExecutor` — `max(32, 2 * аккаунтов)`.
 
 **Остановка.** Процесс завершается только: по SIGTERM/SIGINT, при падении
-любой «ядерной» задачи (config_reload, governor, health, scheduler, stats) или
+любой «ядерной» задачи (config_reload, sender, health, scheduler, stats) или
 когда завершились **все** воркеры. Завершение одного воркера процесс не
 останавливает.
 
 ### `scraper/scheduler.py` — `PollScheduler`
-Раз в `interval` секунд (± `stream_jitter_ratio`) выбирает по кругу
-аккаунта, который не занят и у которого `not_before` (его личный
-rate-limit-кулдаун) наступил, и кладёт ему слот в очередь. `interval`
-подстраивается по доле дублей на 1-й странице (EWMA).
+Раз в `interval` секунд (± `stream_jitter_ratio`) выбирает среди готовых
+аккаунтов (не заняты, `not_before` — личный rate-limit-кулдаун — наступил)
+того, кто **дольше всех не опрашивался**, и кладёт ему слот в очередь.
+Слоты выдаются **по спросу** `Sender.demand()`: буфер полон — пауза (аккаунты
+отдыхают); буфера меньше батча при голодной очереди — слоты идут с
+`stream_min_interval_seconds` (подключается больше аккаунтов). `interval`
+подстраивается по доле дублей на 1-й странице (EWMA); первый опрос после
+паузы в подстройке не участвует.
 
-### `scraper/governor.py` — `QueueGovernor`
-Читает `GET queue_control.url` и двигает потолок `TokenBucket`. Если эндпоинт
-молчит дольше `stale_seconds` — fallback на `target_rate_per_second`.
+### `scraper/sender.py` — `Sender`
+Воркеры кладут комментарии в буфер (`put_many`; id остаётся в
+`SeenCache._pending`). Раз в `poll_interval_seconds` Sender читает
+`GET queue_control.url` (`bpipe_queue`, `bpipe_inflight`, `degraded`, ...);
+если `bpipe_queue < queue_target`, уходит батч `send_batch_size` из самых
+свежих комментариев буфера, в порядке свежести. Цель: `bpipe_inflight ==
+inflight_target` (реплики загружены), очередь всегда готова их накормить.
+Неполный батч — только если очередь почти пуста либо данные «созрели»;
+протухшие (`max_age_seconds`) выбрасываются, при переполнении буфера
+вытесняются самые старые. При ошибке отправки свежие элементы возвращаются
+в буфер. Если `/queue` молчит дольше `stale_seconds` — fallback на
+`target_rate_per_second`.
 
 ### `scraper/worker.py` — `account_worker`
 1. Если `cookies/account_N.json` нет — ждёт его появления (раз в минуту).
@@ -90,7 +102,7 @@ rate-limit-кулдаун) наступил, и кладёт ему слот в 
    `empty` (пустой листинг) → растущий кулдаун, а при
    `rotation.empty_streak_trigger` подряд — заявка на ротацию.
 6. Успех: `build_payload` → фильтр `max_age` → `SeenCache.try_claim` →
-   токен `TokenBucket` → батч в `/store_items` → `confirm()`/`release()`.
+   `Sender.put_many` (буфер) → батч в `/store_items` по очереди bpipe → `confirm()`/`release()` (в Sender).
 7. `cooldown` аккаунта = `reset / (remaining * ratelimit_safety_margin)`.
 
 `supervised()` перезапускает воркер при исключениях (экспоненциальная
@@ -111,7 +123,7 @@ rate-limit-кулдаун) наступил, и кладёт ему слот в 
 `ExecutorHealth` считает занятость текущего пула по поколениям.
 
 ### `scraper/state.py`
-`TokenBucket`, `SeenCache` (двухфазный `try_claim → confirm/release`),
+`SeenCache` (двухфазный `try_claim → confirm/release`),
 `BackoffState`.
 
 ### `scraper/pipeline.py`

@@ -1,40 +1,6 @@
 import asyncio
 import random
-import time
 from collections import deque
-
-
-# ---------------------------------------------------------------- #
-#  Общий rate limiter (token bucket) на отправку в store_items
-# ---------------------------------------------------------------- #
-
-class TokenBucket:
-    def __init__(self, rate_per_second: float):
-        self.rate = rate_per_second
-        self.capacity = max(rate_per_second, 1.0)
-        self.tokens = self.capacity
-        self.last_refill = time.monotonic()
-        self.lock = asyncio.Lock()
-        # Сколько токенов выдано за всё время — QueueGovernor по разнице
-        # считает реальную скорость отправки (токенов/сек).
-        self.granted = 0
-
-    def update_rate(self, rate_per_second: float):
-        if rate_per_second != self.rate:
-            self.rate = rate_per_second
-            self.capacity = max(rate_per_second, 1.0)
-
-    async def try_acquire(self) -> bool:
-        async with self.lock:
-            now = time.monotonic()
-            elapsed = now - self.last_refill
-            self.last_refill = now
-            self.tokens = min(self.capacity, self.tokens + elapsed * self.rate)
-            if self.tokens >= 1.0:
-                self.tokens -= 1.0
-                self.granted += 1
-                return True
-            return False
 
 
 # ---------------------------------------------------------------- #
