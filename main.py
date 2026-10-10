@@ -9,9 +9,11 @@ Reddit fresh-comments scraper -> POST /store_items (batch)
 слотов подстраивается по доле дублей на первой странице ответа.
 Пагинация идёт до пересечения с уже виденными комментариями.
 
-Скорость отправки в пайплайн (потолок TokenBucket) ведёт QueueGovernor
-(scraper/governor.py) по состоянию очереди коллектора (queue_control в
-config.yaml): цель — чтобы bpipe_queue не опускалась ниже target_min.
+Опрос идёт по спросу, а отправка — по очереди пайплайна: Sender
+(scraper/sender.py) держит буфер свежих комментариев и шлёт батч
+(inflight_target, по умолчанию 128, самые свежие первыми), когда
+bpipe_queue опускается ниже queue_target. Буфер полон — планировщик не
+выдаёт слоты, аккаунты отдыхают (queue_control в config.yaml).
 
 Общий SeenCache, health-мониторинг executor'а, graceful shutdown —
 см. ARCHITECTURE.md.
@@ -35,10 +37,10 @@ from scraper.constants import (
     QUEUE_CONTROL_URL_OVERRIDE,
     log,
 )
-from scraper.governor import QueueGovernor
 from scraper.health import ExecutorHandle, ExecutorHealth, health_report_loop
 from scraper.scheduler import PollScheduler
-from scraper.state import SeenCache, TokenBucket
+from scraper.sender import Sender
+from scraper.state import SeenCache
 from scraper.worker import account_worker, supervised
 
 
@@ -67,22 +69,18 @@ async def main():
     qc = config.get("queue_control", {}) or {}
     qc_url = QUEUE_CONTROL_URL_OVERRIDE or qc.get("url")
     qc_enabled = bool(qc.get("enabled", False)) and bool(qc_url)
-    start_rate = float(qc.get("initial_rate", 80)) if qc_enabled else float(config.get("target_rate_per_second", 80))
 
     log.info(
-        "Запуск: %d аккаунт(ов), поток=r/%s, скорость=%s, max_age=%ss, "
-        "batch_max_items=%s, старт_интервал_слота=%ss, proxy_host=%s",
+        "Запуск: %d аккаунт(ов), поток=r/%s, отправка=%s, max_age=%ss, "
+        "старт_интервал_слота=%ss, proxy_host=%s",
         len(accounts), "+".join(config.get("stream_subs", ["all"])),
-        f"авто по очереди ({qc_url}, target_min={qc.get('target_min', 200)})"
-        if qc_enabled else f"статичная {start_rate}/сек",
-        config.get("max_age_seconds"),
-        config.get("batch_max_items", 500), config.get("stream_start_interval_seconds", 1.5),
+        f"по очереди bpipe ({qc_url}, inflight_target={qc.get('inflight_target', 128)})"
+        if qc_enabled else f"статичная {config.get('target_rate_per_second', 80)}/сек (очередь выключена)",
+        config.get("max_age_seconds"), config.get("stream_start_interval_seconds", 1.5),
         PROXY_HOST,
     )
 
-    bucket = TokenBucket(start_rate)
     seen = SeenCache(config.get("seen_cache_size", 40000))
-    scheduler = PollScheduler(config.get)
 
     http_executor_max_workers = max(32, len(accounts) * 2)
     http_executor_handle = ExecutorHandle(
@@ -101,13 +99,14 @@ async def main():
     try:
         store_connector = aiohttp.TCPConnector(ttl_dns_cache=300, keepalive_timeout=60)
         async with aiohttp.ClientSession(connector=store_connector) as store_session:
-            governor = QueueGovernor(config, bucket, store_session, log)
+            sender = Sender(config, seen, store_session, log)
+            scheduler = PollScheduler(config.get, demand=sender.demand)
 
             # "Ядро" — без любой из этих задач процесс бессмыслен: падение
             # одной из них останавливает процесс (docker перезапустит).
             core_tasks = [
                 asyncio.create_task(config.reload_loop(), name="config_reload_loop"),
-                asyncio.create_task(governor.run(), name="queue_governor"),
+                asyncio.create_task(sender.run(), name="sender"),
                 asyncio.create_task(
                     health_report_loop(
                         executor_health,
@@ -130,7 +129,7 @@ async def main():
                     asyncio.create_task(
                         supervised(
                             account_worker,
-                            account, config, bucket, seen, scheduler, store_session,
+                            account, config, sender, seen, scheduler,
                             http_executor_handle,
                             executor_health,
                             name=account["name"],

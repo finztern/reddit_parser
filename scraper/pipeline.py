@@ -62,6 +62,7 @@ def build_payload(comment_data: dict) -> dict | None:
         "external_parent_id": external_parent_id,
         "summary": summary,
         "_age_seconds": time.time() - created_utc,
+        "_created_utc": float(created_utc),
     }
 
 

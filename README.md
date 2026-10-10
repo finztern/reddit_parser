@@ -44,9 +44,9 @@
 │   ├── models.py               # FetchResult
 │   ├── http_client.py          # запросы к Reddit (curl_cffi) + пагинация
 │   ├── pipeline.py             # payload комментария + батч-отправка в /store_items
-│   ├── state.py                # TokenBucket, SeenCache, BackoffState
-│   ├── scheduler.py            # PollScheduler: единые слоты опроса по кругу
-│   ├── governor.py             # QueueGovernor: скорость отправки по очереди пайплайна
+│   ├── state.py                # SeenCache, BackoffState
+│   ├── scheduler.py            # PollScheduler: слоты опроса по спросу, самый давний аккаунт первым
+│   ├── sender.py               # Sender: буфер + отправка батчей по очереди bpipe, свежие первыми
 │   ├── health.py               # мониторинг/своп http_executor
 │   ├── identity.py             # state/: заявки на ротацию, активные профили слотов
 │   └── worker.py               # account_worker, supervised()
@@ -213,9 +213,13 @@ docker compose restart scraper
 - `stream_start_interval_seconds`, `stream_min/max_interval_seconds`,
   `overlap_target_low/high` — слоты планировщика и их самоподстройка.
 - `pagination_max_pages` — `0` = без лимита (фактически ≤10 страниц).
-- `queue_control.*` — авто-скорость отправки по очереди пайплайна
-  (`GET /queue`); `target_rate_per_second` — статичный fallback.
-- `batch_max_items`, `token_wait_timeout_seconds`, `seen_cache_size`.
+- `queue_control.*` — отправка по очереди пайплайна (`GET /queue`):
+  `inflight_target` (128) — сколько должно быть в работе у реплик,
+  `queue_target` — сколько держать в очереди ожидания, `send_batch_size`,
+  `low_queue_fraction`/`flush_age_fraction` — когда можно слать неполный
+  батч, `buffer_target_factor`/`buffer_max_factor` — размер буфера.
+  `target_rate_per_second` — fallback, если `/queue` недоступна.
+- `batch_max_items`, `seen_cache_size`.
 - `ratelimit_safety_margin`, `ratelimit_max_interval_seconds`.
 - `base_backoff_seconds`, `max_backoff_seconds`, `max_consecutive_auth_errors`,
   `auth_dead_cooldown_seconds`.
@@ -225,9 +229,9 @@ docker compose restart scraper
 ## Логи
 
 ```
-[account_1] r/all стр=2 получено=140 дубли_стр1=38/100 отправлено=61 не_подтв=0 срезано_лимитом=0 догнали=True cooldown=3.2s
-[stream] уникальных=42.0/с опросов=1.30/с интервал_слота=0.77s доля_дублей(ewma)=0.38 аккаунтов_готово=8/10
-[governor] bpipe_queue=310/2000 upipe=0/200 degraded=False | потолок 80 -> 100/с (реально 72/с) | ...
+[account_1] r/all стр=2 получено=140 дубли_стр1=38/100 в_буфер=61 дубли=79 буфер=140 догнали=True cooldown=3.2s
+[stream] в_буфер=42.0/с опросов=1.30/с интервал_слота=0.77s доля_дублей(ewma)=0.38 аккаунтов_готово=8/10
+[send] отправлено=44.8/с батчей=9 (неполных 0) приток=52.0/с буфер=131 | bpipe: очередь=190 inflight=128/128 | протухло=3 вытеснено=0 не_подтв=0 тиков_без_данных=0/100 режим=по очереди
 [health] http_executor: active=0 submitted=5120 completed=5120 ... swaps=0 pool_size=32
 [account_14] пусто 6 раз подряд — заявка на смену идентичности (state/requests), опрос на паузе
 ```

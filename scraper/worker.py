@@ -6,12 +6,13 @@ import aiohttp
 
 from . import identity
 from .config import ConfigStore, CookieFileWatcher
-from .constants import BASE_DIR, DEFAULT_CONNECT_TIMEOUT_SECONDS, PROXY_HOST, STORE_ENDPOINT_OVERRIDE, log
+from .constants import BASE_DIR, DEFAULT_CONNECT_TIMEOUT_SECONDS, PROXY_HOST, log
 from .health import ExecutorHandle, ExecutorHealth
 from .http_client import CurlSessionHandle, fetch_comments
-from .pipeline import build_payload, send_batch_to_store
+from .pipeline import build_payload
 from .scheduler import PollOutcome, PollScheduler
-from .state import BackoffState, SeenCache, TokenBucket
+from .sender import Sender
+from .state import BackoffState, SeenCache
 
 # Как часто проверять появление/починку cookies-файла, пока его нет
 # (гостевой слот ещё не харвестился) или он не читается.
@@ -51,10 +52,9 @@ def rl_cooldown(ratelimit: dict | None, margin: float, max_interval: float) -> f
 async def account_worker(
     account: dict,
     config: ConfigStore,
-    bucket: TokenBucket,
+    sender: Sender,
     seen: SeenCache,
     scheduler: PollScheduler,
-    store_session: aiohttp.ClientSession,
     http_executor: ExecutorHandle,
     executor_health: ExecutorHealth | None = None,
 ):
@@ -167,9 +167,6 @@ async def account_worker(
                     rl_max = config.get("ratelimit_max_interval_seconds", 900)
                     timeout = config.get("request_timeout_seconds", 10)
                     connect_timeout = config.get("connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS)
-                    token_wait_timeout = config.get("token_wait_timeout_seconds", 0.5)
-                    store_endpoint = STORE_ENDPOINT_OVERRIDE or config.get("store_endpoint")
-                    batch_max_items = config.get("batch_max_items", 500)
                     base_url = config.get("reddit_base_url", "https://www.reddit.com")
                     fetch_limit = min(100, config.get("fetch_limit", 100))
                     subs_joined = "+".join(config.get("stream_subs", ["all"]))
@@ -205,8 +202,6 @@ async def account_worker(
                             backoff.consecutive_auth_errors = 0
                             auth_dead = False
                             log.info("[%s] новые cookies — сбрасываю счётчик auth-ошибок, возобновляю опрос", name)
-
-                    # Потолок отправки (bucket.rate) ведёт QueueGovernor.
 
                     # Остановка пагинации: как только на странице встретился
                     # уже виденный комментарий — догнали, дальше листать не надо.
@@ -305,35 +300,17 @@ async def account_worker(
                         payloads.append(p)
                     payloads.sort(key=lambda p: p["_age_seconds"])
 
-                    to_send: list[dict] = []
-                    dropped_dup = dropped_rate = 0
+                    # Комментарии не отправляются сразу: они claim'ятся и уходят в
+                    # буфер Sender'а, который шлёт их батчами по состоянию очереди
+                    # bpipe, самые свежие первыми.
+                    to_buffer: list[dict] = []
+                    dropped_dup = 0
                     for p in payloads:
                         if not await seen.try_claim(p["external_id"]):
                             dropped_dup += 1
                             continue
-                        if not await _acquire_with_retry(bucket, token_wait_timeout):
-                            await seen.release(p["external_id"])
-                            dropped_rate += 1
-                            continue
-                        to_send.append(p)
-
-                    if to_send:
-                        done_ids: set[str] = set()
-                        try:
-                            ok_flags = await send_batch_to_store(
-                                store_session, store_endpoint, to_send, name, batch_max_items
-                            )
-                            for p, ok in zip(to_send, ok_flags):
-                                if ok:
-                                    await seen.confirm(p["external_id"])
-                                    sent += 1
-                                else:
-                                    await seen.release(p["external_id"])
-                                done_ids.add(p["external_id"])
-                        finally:
-                            for p in to_send:
-                                if p["external_id"] not in done_ids:
-                                    await seen.release(p["external_id"])
+                        to_buffer.append(p)
+                    sent = await sender.put_many(to_buffer)
 
                     outcome = PollOutcome(
                         page_len=stats["first_len"], dupes=stats["first_dupes"],
@@ -342,26 +319,16 @@ async def account_worker(
                     cooldown = rl_cooldown(result.ratelimit, margin, rl_max)
 
                     log.info(
-                        "[%s] r/%s стр=%d получено=%d дубли_стр1=%d/%d отправлено=%d "
-                        "не_подтв=%d срезано_лимитом=%d догнали=%s cooldown=%.1fs",
+                        "[%s] r/%s стр=%d получено=%d дубли_стр1=%d/%d в_буфер=%d "
+                        "дубли=%d буфер=%d догнали=%s cooldown=%.1fs",
                         name, subs_joined, result.pages_fetched, len(comments),
                         stats["first_dupes"], stats["first_len"], sent,
-                        len(to_send) - sent, dropped_rate, stats["overlap"], cooldown,
+                        dropped_dup, sender.backlog, stats["overlap"], cooldown,
                     )
                 finally:
                     scheduler.release(slot, outcome, cooldown, sent)
     finally:
         scheduler.unregister(slot)
-
-
-async def _acquire_with_retry(bucket: TokenBucket, deadline: float) -> bool:
-    start = time.monotonic()
-    while True:
-        if await bucket.try_acquire():
-            return True
-        if time.monotonic() - start >= deadline:
-            return False
-        await asyncio.sleep(0.02)
 
 
 async def supervised(

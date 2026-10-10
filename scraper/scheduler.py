@@ -4,9 +4,15 @@
 Идея: аккаунты НЕ опрашивают Reddit каждый по своему таймеру (это давало
 пачки запросов + огромное число дублей на одном и том же листинге r/all).
 Вместо этого планировщик раз в `interval` секунд (с джиттером) выдаёт
-"слот" одному аккаунту по кругу. Аккаунт, у которого по его собственным
-X-Ratelimit-* ещё не наступил not_before, пропускается — свой бюджет
-каждый аккаунт считает независимо.
+"слот" одному аккаунту — тому из готовых, который ДОЛЬШЕ ВСЕХ не
+опрашивался (остальные отдыхают дольше). Аккаунт, у которого по его
+собственным X-Ratelimit-* ещё не наступил not_before, пропускается — свой
+бюджет каждый аккаунт считает независимо.
+
+Опрос идёт ПО СПРОСУ: слоты выдаются, только пока Sender.demand() говорит,
+что буфер отправки не полон (DEMAND_NONE — ждём). Если очереди пайплайна не
+хватает данных (DEMAND_URGENT) — слоты идут с минимальным интервалом,
+подключая больше аккаунтов.
 
 `interval` подстраивается по доле дублей на первой странице ответа:
   - мало дублей (почти пропуск между опросами) -> опрашиваем чаще;
@@ -29,21 +35,24 @@ class PollOutcome:
 
 
 class AccountSlot:
-    __slots__ = ("name", "not_before", "busy", "alive", "queue")
+    __slots__ = ("name", "not_before", "busy", "alive", "queue", "last_poll", "after_pause")
 
     def __init__(self, name: str):
         self.name = name
         self.not_before = 0.0
+        self.last_poll = 0.0        # monotonic последней выдачи слота (0 = ещё не опрашивался)
+        self.after_pause = False    # слот выдан после простоя по спросу — доле дублей верить нельзя
         self.busy = False
         self.alive = True
         self.queue: asyncio.Queue = asyncio.Queue(maxsize=1)
 
 
 class PollScheduler:
-    def __init__(self, get):
+    def __init__(self, get, demand=None):
         self._get = get  # ConfigStore.get — конфиг читается на лету
+        self._demand = demand  # Sender.demand: 0 — не опрашивать, 1 — обычно, 2 — срочно
+        self._idle = False     # был простой из-за полного буфера
         self.slots: list[AccountSlot] = []
-        self._rr = 0
         self.interval = float(get("stream_start_interval_seconds", 1.5))
         self._ewma_overlap: float | None = None
         self._sent = deque()    # (ts, n) отправленных уникальных
@@ -69,8 +78,11 @@ class PollScheduler:
         self._polls.append(now)
         if sent:
             self._sent.append((now, sent))
-        if outcome is not None:
+        # после простоя (полный буфер) первая страница не пересекается с
+        # виденным не из-за пропуска, а из-за паузы — не подстраиваем интервал
+        if outcome is not None and not slot.after_pause:
             self._adapt(outcome)
+        slot.after_pause = False
 
     def _adapt(self, o: PollOutcome):
         g = self._get
@@ -95,25 +107,36 @@ class PollScheduler:
         )
 
     def _pick(self, now: float) -> AccountSlot | None:
-        n = len(self.slots)
-        for k in range(n):
-            idx = (self._rr + k) % n
-            s = self.slots[idx]
+        """Среди готовых аккаунтов — тот, что дольше всех не опрашивался."""
+        best = None
+        for s in self.slots:
             if s.alive and not s.busy and s.not_before <= now:
-                self._rr = idx + 1
-                return s
-        return None
+                if best is None or s.last_poll < best.last_poll:
+                    best = s
+        return best
 
     async def run(self):
         while True:
-            slot = self._pick(time.monotonic())
+            mode = self._demand() if self._demand else 1
+            if mode <= 0:
+                self._idle = True
+                await asyncio.sleep(0.05)
+                continue
+            now = time.monotonic()
+            slot = self._pick(now)
             if slot is None:
                 await asyncio.sleep(0.05)
                 continue
             slot.busy = True
+            slot.last_poll = now
+            slot.after_pause = self._idle
+            self._idle = False
             slot.queue.put_nowait(True)
+            interval = self.interval
+            if mode >= 2:  # очереди пайплайна не хватает данных — максимальный темп
+                interval = float(self._get("stream_min_interval_seconds", 0.4))
             j = self._get("stream_jitter_ratio", 0.2)
-            await asyncio.sleep(self.interval * random.uniform(1 - j, 1 + j))
+            await asyncio.sleep(interval * random.uniform(1 - j, 1 + j))
 
     async def stats_loop(self, log, every: float = 10.0, window: float = 30.0):
         while True:
@@ -127,7 +150,7 @@ class PollScheduler:
             polls = len(self._polls) / window
             ready = sum(1 for s in self.slots if s.not_before <= now)
             log.info(
-                "[stream] уникальных=%.1f/с опросов=%.2f/с интервал_слота=%.2fs "
+                "[stream] в_буфер=%.1f/с опросов=%.2f/с интервал_слота=%.2fs "
                 "доля_дублей(ewma)=%s аккаунтов_готово=%d/%d",
                 uniq, polls, self.interval,
                 "n/a" if self._ewma_overlap is None else f"{self._ewma_overlap:.2f}",

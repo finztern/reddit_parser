@@ -1,201 +1,318 @@
 """
-Sender — сглаживание отправки в /store_items.
+Sender — отправка в /store_items по состоянию очереди пайплайна (bpipe).
 
-Раньше каждый воркер после опроса сразу слал весь свой батч (60-100
-комментариев) в пайплайн -> очередь коллектора то пустая, то залпом. Теперь
-воркеры только КЛАДУТ комментарии в общий буфер (put_many), а единственный
-отправитель каждые `send_tick_seconds` отдаёт из него небольшие порции с
-ровной скоростью:
+Цель: реплики пайплайна всегда загружены (bpipe_inflight == inflight_target,
+по умолчанию 128), а очередь ожидания bpipe_queue всегда готова их
+накормить (>= queue_target, по умолчанию = inflight_target). Тогда в момент,
+когда реплики закончат обработку, следующий батч уже лежит в очереди.
 
-    target = max(приток_ewma * headroom, бэклог / drain_horizon)
-    rate   = min(потолок_governor, max(min_rate, target))
+Как это работает:
 
-То есть шлём примерно с той скоростью, с какой комментарии реально
-приходят (пачки от опросов растягиваются во времени), а накопившийся бэклог
-сливаем за ~drain_horizon секунд. Потолок (bucket.rate) ведёт QueueGovernor
-по состоянию очереди коллектора и работает только как верхняя граница.
-
-Дедуп: id остаётся в SeenCache._pending, пока комментарий лежит в буфере
-(другие аккаунты видят его как дубль -> "догнали" работает), confirm() — после
-подтверждённой отправки, release() — при ошибке/протухании/переполнении.
+  * Воркеры только КЛАДУТ комментарии в буфер (put_many). Id остаётся в
+    SeenCache._pending, пока комментарий в буфере: другие аккаунты видят его
+    как дубль, "догнали" в пагинации работает.
+  * PollScheduler спрашивает demand(): опрашивать Reddit нужно, только пока
+    буфер меньше `buffer_target_factor * batch`. Буфер полон — аккаунты
+    отдыхают (не жгут X-Ratelimit-бюджет и не копят старьё).
+  * Раз в `poll_interval_seconds` читается GET queue_control.url. Если
+    bpipe_queue < queue_target — уходит батч (send_batch_size, по умолчанию
+    = inflight_target) из САМЫХ СВЕЖИХ комментариев буфера, в порядке
+    свежести (самые свежие первыми). Неполный батч шлётся, только если
+    очередь почти пуста (< low_queue_fraction * queue_target) или самый
+    старый элемент уже "созрел" (flush_age_fraction * max_age).
+  * Комментарии старше max_age перед отправкой выбрасываются; при
+    переполнении буфера (buffer_max_factor * batch) вытесняются самые старые.
+  * Если /queue молчит дольше stale_seconds — fallback: батч раз в
+    batch / target_rate_per_second секунд.
 """
 
 import asyncio
-import math
 import time
-from collections import deque
 
 import aiohttp
 
-from .constants import STORE_ENDPOINT_OVERRIDE
+from .constants import QUEUE_CONTROL_URL_OVERRIDE, SERVER_HARD_BATCH_LIMIT, STORE_ENDPOINT_OVERRIDE
 from .pipeline import send_batch_to_store
-from .state import SeenCache, TokenBucket
+from .state import SeenCache
+
+# demand(): что нужно планировщику
+DEMAND_NONE = 0     # буфер полон — Reddit не опрашиваем
+DEMAND_NORMAL = 1   # буфер не полон — опрашиваем в обычном темпе
+DEMAND_URGENT = 2   # буфер меньше батча, а пайплайну нужны данные — темп максимальный
+
+
+def _num(v, default=None):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return default
 
 
 class Sender:
-    def __init__(self, config, bucket: TokenBucket, seen: SeenCache,
-                 session: aiohttp.ClientSession, log):
+    def __init__(self, config, seen: SeenCache, session: aiohttp.ClientSession, log):
         self.config = config
-        self.bucket = bucket
         self.seen = seen
         self.session = session
         self.log = log
 
-        self._buf: deque[dict] = deque()
-        self._supply: float | None = None   # EWMA притока, шт/с
-        self._enq_since_tick = 0
-        self._limited_until = 0.0
-        self.rate_eff = 0.0
+        self._buf: list[dict] = []
+        self._status: dict | None = None     # последний ответ /queue
+        self._last_ok: float | None = None   # monotonic последнего успешного /queue
+        self._started = time.monotonic()
+        self._fallback = False
+        self._hold_until = 0.0               # не слать раньше (после отправки/ошибки)
+        self._last_send = 0.0
+        self._starving = False               # очереди нужны данные, а в буфере меньше батча
 
         # окно статистики
+        self._w_batches = 0
         self._w_sent = 0
+        self._w_partial = 0
         self._w_failed = 0
         self._w_expired = 0
-        self._w_overflow = 0
+        self._w_evicted = 0
         self._w_enq = 0
+        self._w_starved_ticks = 0
+        self._w_ticks = 0
 
     # ---- конфиг ----
-    def _c(self, key, default):
-        return self.config.get(key, default)
+    def _qc(self) -> dict:
+        return self.config.get("queue_control", {}) or {}
+
+    def _inflight_target(self) -> int:
+        return max(1, int(self._qc().get("inflight_target", 128)))
+
+    def _batch(self) -> int:
+        b = int(self._qc().get("send_batch_size", self._inflight_target()))
+        return max(1, min(b, SERVER_HARD_BATCH_LIMIT))
+
+    def _queue_target(self) -> int:
+        return max(1, int(self._qc().get("queue_target", self._inflight_target())))
+
+    def _fill_target(self) -> int:
+        return max(self._batch(), int(self._batch() * float(self._qc().get("buffer_target_factor", 1.25))))
+
+    def _buffer_max(self) -> int:
+        return max(self._fill_target(), int(self._batch() * float(self._qc().get("buffer_max_factor", 3.0))))
+
+    def _url(self) -> str | None:
+        return QUEUE_CONTROL_URL_OVERRIDE or self._qc().get("url")
 
     # ---- публичное API ----
     @property
     def backlog(self) -> int:
         return len(self._buf)
 
-    def is_cap_limited(self) -> bool:
-        """True, если за последние секунды отправку реально сдерживал потолок
-        governor'а (а не нехватка комментариев). Только тогда имеет смысл его
-        поднимать."""
-        return time.monotonic() < self._limited_until
+    def demand(self) -> int:
+        """Нужен ли планировщику новый опрос Reddit прямо сейчас."""
+        n = len(self._buf)
+        if n >= self._fill_target():
+            return DEMAND_NONE
+        if self._starving and n < self._batch():
+            return DEMAND_URGENT
+        return DEMAND_NORMAL
 
     async def put_many(self, items: list[dict]) -> int:
         """Кладёт уже claim'нутые (seen.try_claim) payload'ы в буфер.
-        Возвращает, сколько принято."""
+        При переполнении вытесняет самые старые."""
         if not items:
             return 0
-        now = time.monotonic()
-        for p in items:
-            p["_queued_at"] = now
-            self._buf.append(p)
-        self._enq_since_tick += len(items)
+        self._buf.extend(items)
         self._w_enq += len(items)
 
-        max_items = int(self._c("send_buffer_max_items", 5000))
-        while len(self._buf) > max_items:
-            old = self._buf.popleft()
-            await self.seen.release(old["external_id"])
-            self._w_overflow += 1
+        cap = self._buffer_max()
+        if len(self._buf) > cap:
+            self._buf.sort(key=lambda p: p["_created_utc"], reverse=True)  # свежие первыми
+            evicted = self._buf[cap:]
+            del self._buf[cap:]
+            for p in evicted:
+                await self.seen.release(p["external_id"])
+            self._w_evicted += len(evicted)
         return len(items)
 
-    # ---- внутреннее ----
-    def _update_supply(self, dt: float):
-        if dt <= 0:
-            return
-        inst = self._enq_since_tick / dt
-        self._enq_since_tick = 0
-        tau = max(0.5, float(self._c("send_supply_tau_seconds", 5.0)))
-        a = 1.0 - math.exp(-dt / tau)
-        self._supply = inst if self._supply is None else self._supply + a * (inst - self._supply)
+    # ---- /queue ----
+    async def _fetch(self, url: str, timeout: float) -> dict | None:
+        try:
+            async with self.session.get(url, timeout=aiohttp.ClientTimeout(total=timeout)) as resp:
+                if resp.status != 200:
+                    self.log.warning("[send] %s ответил %s", url, resp.status)
+                    return None
+                data = await resp.json(content_type=None)
+                return data if isinstance(data, dict) else None
+        except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as e:
+            self.log.warning("[send] не удалось прочитать %s: %s", url, e)
+            return None
 
-    @staticmethod
-    def _age(p: dict, now: float) -> float:
-        return p["_age_seconds"] + (now - p["_queued_at"])
-
-    async def _sweep_head(self, now: float, max_age: float):
-        while self._buf and self._age(self._buf[0], now) > max_age:
-            p = self._buf.popleft()
-            await self.seen.release(p["external_id"])
-            self._w_expired += 1
-
-    async def _tick(self, now: float):
-        max_age = float(self._c("max_age_seconds", 120))
-        await self._sweep_head(now, max_age)
-
-        backlog = len(self._buf)
-        cap = max(0.0, float(self.bucket.rate))
-        supply = self._supply or 0.0
-        headroom = float(self._c("send_supply_headroom", 1.15))
-        horizon = max(0.2, float(self._c("send_drain_horizon_seconds", 1.5)))
-        floor = float(self._c("send_min_rate", 2.0))
-        burst = float(self._c("send_burst_seconds", 0.3))
-
-        target = max(supply * headroom, backlog / horizon)
-        rate = min(cap, max(floor, target))
-        self.rate_eff = rate
-
-        if supply * headroom > cap or backlog > cap * 2 * horizon:
-            self._limited_until = now + 3.0
-
-        if backlog == 0:
-            self.bucket.idle()  # не копим токены "про запас" -> не будет залпа после простоя
-            return
-
-        n = self.bucket.take(backlog, rate, burst)
-        if n <= 0:
-            return
-
-        items: list[dict] = []
-        while self._buf and len(items) < n:
-            p = self._buf.popleft()
-            if self._age(p, now) > max_age:
+    # ---- буфер ----
+    async def _expire(self):
+        max_age = float(self.config.get("max_age_seconds", 15))
+        now_wall = time.time()
+        keep = []
+        for p in self._buf:
+            if now_wall - p["_created_utc"] > max_age:
                 await self.seen.release(p["external_id"])
                 self._w_expired += 1
-                continue
-            items.append(p)
-        if len(items) < n:
-            self.bucket.refund(n - len(items))
-        if items:
-            await self._send(items)
+            else:
+                keep.append(p)
+        self._buf = keep
 
-    async def _send(self, items: list[dict]):
-        endpoint = STORE_ENDPOINT_OVERRIDE or self._c("store_endpoint", None)
-        batch_max = int(self._c("batch_max_items", 500))
+    def _oldest_age(self) -> float:
+        if not self._buf:
+            return 0.0
+        return time.time() - min(p["_created_utc"] for p in self._buf)
+
+    def _take_freshest(self, n: int) -> list[dict]:
+        self._buf.sort(key=lambda p: p["_created_utc"], reverse=True)  # самые свежие первыми
+        batch = self._buf[:n]
+        del self._buf[:n]
+        return batch
+
+    async def _send(self, items: list[dict]) -> int:
+        endpoint = STORE_ENDPOINT_OVERRIDE or self.config.get("store_endpoint")
+        if not endpoint:
+            self.log.error("[send] store_endpoint не задан — выбрасываю %d элементов", len(items))
+            for p in items:
+                await self.seen.release(p["external_id"])
+            return 0
+
+        max_age = float(self.config.get("max_age_seconds", 15))
+        sent = 0
         done: set[str] = set()
+        retry: list[dict] = []
         try:
-            if not endpoint:
-                self.log.error("[send] store_endpoint не задан — выбрасываю %d элементов", len(items))
-                return
-            flags = await send_batch_to_store(self.session, endpoint, items, "send", batch_max)
+            flags = await send_batch_to_store(
+                self.session, endpoint, items, "send", int(self.config.get("batch_max_items", 500))
+            )
+            now_wall = time.time()
             for p, ok in zip(items, flags):
+                done.add(p["external_id"])
                 if ok:
                     await self.seen.confirm(p["external_id"])
-                    self._w_sent += 1
+                    sent += 1
+                elif now_wall - p["_created_utc"] <= max_age:
+                    retry.append(p)          # вернём в буфер, пока не протухло
+                    self._w_failed += 1
                 else:
                     await self.seen.release(p["external_id"])
                     self._w_failed += 1
-                done.add(p["external_id"])
         finally:
             for p in items:
                 if p["external_id"] not in done:
                     await self.seen.release(p["external_id"])
+        if retry:
+            self._buf.extend(retry)
+            self._hold_until = max(self._hold_until, time.monotonic() + 1.0)  # не долбим упавший пайплайн
+        return sent
+
+    async def _flush(self, n: int, partial: bool):
+        items = self._take_freshest(n)
+        if not items:
+            return
+        sent = await self._send(items)
+        self._w_batches += 1
+        self._w_sent += sent
+        if partial:
+            self._w_partial += 1
+        self._last_send = time.monotonic()
+        # /queue ещё не отразит отправленное — учитываем сами до следующего опроса
+        if self._status is not None and not self._fallback:
+            self._status["bpipe_queue"] = (_num(self._status.get("bpipe_queue"), 0.0) or 0.0) + sent
+        self._hold_until = max(self._hold_until, self._last_send + float(self._qc().get("min_send_gap_seconds", 0.4)))
+
+    # ---- решение ----
+    async def _tick(self):
+        c = self._qc()
+        now = time.monotonic()
+        await self._expire()
+        n = len(self._buf)
+        batch = self._batch()
+        qt = self._queue_target()
+        self._w_ticks += 1
+
+        url = self._url()
+        live = bool(c.get("enabled", False)) and bool(url)
+        status = None
+        if live:
+            status = await self._fetch(url, float(c.get("request_timeout_seconds", 2.0)))
+            if status is not None:
+                self._status = status
+                self._last_ok = now
+                if self._fallback:
+                    self._fallback = False
+                    self.log.info("[send] /queue снова доступна — работаю по очереди")
+            else:
+                since = self._last_ok if self._last_ok is not None else self._started
+                if not self._fallback and now - since > float(c.get("stale_seconds", 30)):
+                    self._fallback = True
+                    self.log.warning("[send] /queue недоступна > %.0fs — fallback: батч раз в %.2fs "
+                                     "(target_rate_per_second=%s)", float(c.get("stale_seconds", 30)),
+                                     batch / max(1.0, float(self.config.get("target_rate_per_second", 80))),
+                                     self.config.get("target_rate_per_second", 80))
+
+        flush_age = float(self.config.get("max_age_seconds", 15)) * float(c.get("flush_age_fraction", 0.6))
+
+        # ---------- fallback / очередь выключена: ровный темп ----------
+        if not live or self._fallback or (status is None and self._status is None):
+            self._starving = False
+            gap = batch / max(1.0, float(self.config.get("target_rate_per_second", 80)))
+            if now >= self._hold_until and now - self._last_send >= gap and n:
+                if n >= batch or self._oldest_age() >= flush_age:
+                    await self._flush(batch, partial=n < batch)
+            return
+
+        st = self._status
+        if status is None:
+            return  # разовый сбой опроса: решение примем на следующем тике
+
+        bq = _num(st.get("bpipe_queue"))
+        if bq is None:
+            return
+        bmax = _num(st.get("bpipe_max"))
+        panic = bool(st.get("degraded")) or bool(bmax and bq >= bmax * float(c.get("panic_fraction", 0.9)))
+        action = str(st.get("action", "")).lower()
+        slow = bool(c.get("respect_server_action", True)) and any(w in action for w in ("slow", "pause", "stop"))
+
+        starving = bq < qt * float(c.get("low_queue_fraction", 0.5))
+        # планировщику нужен максимальный темп, только если очереди реально не хватает данных
+        self._starving = bq < qt and n < batch and not panic and not slow
+        if self._starving:
+            self._w_starved_ticks += 1
+
+        if panic or slow or now < self._hold_until or bq >= qt or n == 0:
+            return
+
+        if n >= batch:
+            await self._flush(batch, partial=False)
+        elif starving or self._oldest_age() >= flush_age:
+            # очередь почти пуста (или данные уже созрели) — шлём что есть, не простаиваем
+            await self._flush(n, partial=True)
 
     def _log_window(self, elapsed: float):
         e = max(elapsed, 1e-6)
+        st = self._status or {}
         self.log.info(
-            "[send] отправлено=%.1f/с приток=%.1f/с (ewma %.1f) темп=%.1f/с потолок=%.0f/с "
-            "буфер=%d протухло=%d переполнение=%d не_подтв=%d упор_в_потолок=%s",
-            self._w_sent / e, self._w_enq / e, self._supply or 0.0, self.rate_eff,
-            self.bucket.rate, len(self._buf), self._w_expired, self._w_overflow,
-            self._w_failed, self.is_cap_limited(),
+            "[send] отправлено=%.1f/с батчей=%d (неполных %d) приток=%.1f/с буфер=%d | "
+            "bpipe: очередь=%s inflight=%s/%d | протухло=%d вытеснено=%d не_подтв=%d "
+            "тиков_без_данных=%d/%d режим=%s",
+            self._w_sent / e, self._w_batches, self._w_partial, self._w_enq / e, len(self._buf),
+            st.get("bpipe_queue", "n/a"), st.get("bpipe_inflight", "n/a"), self._inflight_target(),
+            self._w_expired, self._w_evicted, self._w_failed,
+            self._w_starved_ticks, self._w_ticks, "fallback" if self._fallback else "по очереди",
         )
-        self._w_sent = self._w_failed = self._w_expired = self._w_overflow = self._w_enq = 0
+        self._w_batches = self._w_sent = self._w_partial = self._w_failed = 0
+        self._w_expired = self._w_evicted = self._w_enq = 0
+        self._w_starved_ticks = self._w_ticks = 0
 
     async def run(self):
-        last = time.monotonic()
-        win_start = last
+        win_start = time.monotonic()
         while True:
-            tick = max(0.05, float(self._c("send_tick_seconds", 0.25)))
-            await asyncio.sleep(tick)
-            now = time.monotonic()
-            dt = now - last
-            last = now
             try:
-                self._update_supply(dt)
-                await self._tick(now)
+                await self._tick()
             except Exception:
                 self.log.exception("[send] ошибка в цикле отправки — продолжаю")
-            every = float(self._c("send_log_every_seconds", 10.0))
+            await asyncio.sleep(max(0.05, float(self._qc().get("poll_interval_seconds", 0.3))))
+            now = time.monotonic()
+            every = float(self._qc().get("log_every_seconds", 30))
             if now - win_start >= every:
                 self._log_window(now - win_start)
                 win_start = now
