@@ -9,6 +9,7 @@ from curl_cffi import requests as cffi_requests
 import aiohttp
 
 from .constants import DEFAULT_CONNECT_TIMEOUT_SECONDS, HTTP_EXECUTOR_SLACK_SECONDS, log
+from .geo import build_accept_language
 from .health import ExecutorHandle, ExecutorHealth
 from .models import FetchResult
 
@@ -73,11 +74,19 @@ class CurlSessionHandle:
     вызывается при hot-reload cookies: сессия копит Set-Cookie от Reddit,
     и устаревшие значения не должны конфликтовать со свежими из файла."""
 
-    def __init__(self, impersonate: str, proxies: dict | None):
+    def __init__(self, impersonate: str, proxies: dict | None, locale: str | None = None):
         self._impersonate = impersonate
         self._proxies = proxies
+        self._locale = locale
+        self.accept_language = build_accept_language(locale, impersonate)
         self.current = self._build()
         self.swaps = 0
+
+    def set_locale(self, locale: str | None):
+        """Смена локали (гео ноды) на лету; сессию пересоздавать не нужно —
+        заголовок подставляется на каждый запрос."""
+        self._locale = locale
+        self.accept_language = build_accept_language(locale, self._impersonate)
 
     def _build(self) -> cffi_requests.Session:
         return cffi_requests.Session(impersonate=self._impersonate, proxies=self._proxies)
@@ -92,6 +101,8 @@ class CurlSessionHandle:
         curl_cffi, исключение вылетает, а старая сессия остаётся рабочей."""
         new = cffi_requests.Session(impersonate=impersonate, proxies=self._proxies)
         self._impersonate = impersonate
+        # формат Accept-Language зависит от семейства браузера
+        self.accept_language = build_accept_language(self._locale, impersonate)
         self.current = new
         self.swaps += 1
 
@@ -125,6 +136,7 @@ async def _fetch_comments_page(
         url,
         params=params,
         cookies=cookies,
+        headers={"Accept-Language": curl_session.accept_language},
         timeout=(connect_timeout, timeout),
         allow_redirects=True,
     )

@@ -7,6 +7,7 @@ import aiohttp
 from . import identity
 from .config import ConfigStore, CookieFileWatcher
 from .constants import BASE_DIR, DEFAULT_CONNECT_TIMEOUT_SECONDS, PROXY_HOST, log
+from .geo import build_accept_language, pick_locale
 from .health import ExecutorHandle, ExecutorHealth
 from .http_client import CurlSessionHandle, fetch_comments
 from .pipeline import build_payload
@@ -99,13 +100,18 @@ async def account_worker(
     # NB: реальные запросы к Reddit идут через curl_cffi с impersonate (он
     # сам ставит UA/заголовки, соответствующие TLS-отпечатку). Эти headers
     # живут только в aiohttp-сессии (хранилище cookie_jar).
+    # Локаль = гео ноды слота: профиль после ротации (state/slots) ->
+    # accounts.yaml:locale -> en-US. Из неё строится Accept-Language для
+    # curl-запросов (формат зависит от семейства браузера по impersonate).
+    locale = pick_locale(prof, account)
     headers = {
         "User-Agent": user_agent,
         "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
+        "Accept-Language": build_accept_language(locale, impersonate),
     }
     curl_session = CurlSessionHandle(
-        impersonate=impersonate, proxies={"http": proxy_url, "https": proxy_url}
+        impersonate=impersonate, proxies={"http": proxy_url, "https": proxy_url},
+        locale=locale,
     )
     backoff = BackoffState(
         base_seconds=config.get("base_backoff_seconds", 5),
@@ -117,7 +123,8 @@ async def account_worker(
     next_request_at = 0.0  # не просить ротацию раньше (wall clock)
 
     slot = scheduler.register(name)
-    log.info("[%s] Старт (прокси %s, impersonate=%s) — жду слоты планировщика", name, proxy_url, impersonate)
+    log.info("[%s] Старт (прокси %s, impersonate=%s, Accept-Language=%s) — жду слоты планировщика",
+             name, proxy_url, impersonate, curl_session.accept_language)
 
     try:
         async with aiohttp.ClientSession(cookies=cookies, headers=headers) as session:
@@ -175,6 +182,13 @@ async def account_worker(
                     # state/slots/* ДО замены cookies-файла.
                     new_prof = profile_watcher.load_if_changed(force=force_profile)
                     profile_changed = False
+                    if new_prof is not None:
+                        # гео ноды могло смениться вместе с профилем
+                        new_locale = pick_locale(new_prof, account)
+                        if new_locale != locale:
+                            log.info("[%s] локаль %s -> %s", name, locale, new_locale)
+                            locale = new_locale
+                            curl_session.set_locale(locale)
                     if new_prof is not None and new_prof["impersonate"] != impersonate:
                         try:
                             curl_session.set_impersonate(new_prof["impersonate"])
