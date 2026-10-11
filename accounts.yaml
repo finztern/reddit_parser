@@ -37,6 +37,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_1.json
     proxy_port: 7892
+    locale: sr-RS
     impersonate: firefox147
     user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:147.0) Gecko/20100101 Firefox/147.0"
 
@@ -44,6 +45,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_2.json
     proxy_port: 7891
+    locale: bg-BG
     impersonate: firefox135
     user_agent: "Mozilla/5.0 (X11; Linux x86_64; rv:135.0) Gecko/20100101 Firefox/135.0"
 
@@ -51,6 +53,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_3.json
     proxy_port: 7893
+    locale: cs-CZ
     impersonate: chrome150
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
@@ -58,6 +61,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_4.json
     proxy_port: 7894
+    locale: ja-JP
     impersonate: chrome145
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
 
@@ -65,6 +69,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_5.json
     proxy_port: 7895
+    locale: en-SG
     impersonate: firefox147
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:147.0) Gecko/20100101 Firefox/147.0"
 
@@ -72,6 +77,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_6.json
     proxy_port: 7896
+    locale: hu-HU
     impersonate: chrome150
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
 
@@ -79,6 +85,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_7.json
     proxy_port: 7897
+    locale: nl-BE
     impersonate: chrome120
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
@@ -86,6 +93,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_8.json
     proxy_port: 7898
+    locale: sq-AL
     impersonate: chrome142
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
 
@@ -93,6 +101,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_9.json
     proxy_port: 7899
+    locale: uk-UA
     impersonate: chrome119
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36"
 
@@ -100,6 +109,7 @@ accounts:
     enabled: true
     cookie_file: cookies/account_10.json
     proxy_port: 7900
+    locale: de-DE
     impersonate: firefox133
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0"
 
@@ -111,6 +121,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_11.json
     proxy_port: 7901
+    locale: de-CH
     impersonate: chrome133a
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
 
@@ -118,6 +129,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_12.json
     proxy_port: 7902
+    locale: cs-CZ
     impersonate: safari260
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 
@@ -125,6 +137,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_13.json
     proxy_port: 7903
+    locale: da-DK
     impersonate: chrome131
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
 
@@ -132,6 +145,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_14.json
     proxy_port: 7904
+    locale: lv-LV
     impersonate: safari180_ios
     user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1"
 
@@ -139,6 +153,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_15.json
     proxy_port: 7905
+    locale: en-CA
     impersonate: safari260_ios
     user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1"
 
@@ -146,6 +161,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_16.json
     proxy_port: 7906
+    locale: en-IN
     impersonate: chrome136
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36"
 
@@ -153,6 +169,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_17.json
     proxy_port: 7907
+    locale: en-US
     impersonate: safari170
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
@@ -160,6 +177,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_18.json
     proxy_port: 7908
+    locale: en-GB
     impersonate: safari184_ios
     user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1"
 
@@ -167,6 +185,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_19.json
     proxy_port: 7909
+    locale: fr-FR
     impersonate: chrome131_android
     user_agent: "Mozilla/5.0 (Linux; Android 14; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36"
 
@@ -174,6 +193,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_20.json
     proxy_port: 7910
+    locale: tr-TR
     impersonate: safari2601
     # было "Version/260.1" (баг парсинга safari2601 в rotate_fingerprints.py)
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0.1 Safari/605.1.15"
@@ -182,6 +202,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_21.json
     proxy_port: 7911
+    locale: da-DK
     impersonate: safari180
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
 
@@ -189,6 +210,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_22.json
     proxy_port: 7912
+    locale: nl-NL
     impersonate: chrome124
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
@@ -196,6 +218,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_23.json
     proxy_port: 7913
+    locale: fi-FI
     impersonate: firefox144
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:144.0) Gecko/20100101 Firefox/144.0"
 
@@ -203,6 +226,7 @@ accounts:
     enabled: false
     cookie_file: cookies/account_24.json
     proxy_port: 7914
+    locale: en-CA
     impersonate: chrome123
     user_agent: "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
@@ -213,5 +237,6 @@ accounts:
     enabled: false
     cookie_file: cookies/account_25.json
     proxy_port: 7915
+    locale: sk-SK
     impersonate: chrome145
     user_agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
