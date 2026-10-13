@@ -15,7 +15,7 @@
 | Слоты | Тип | Откуда cookies | Кто обновляет |
 |---|---|---|---|
 | `account_1..10` | **логин** (реальные аккаунты Reddit) | первый логин руками (`manual_login.py`) | `scripts/refresh_cookies.py`, раз в неделю |
-| `account_11..25` | **гостевые** (анонимная сессия, без логина) | харвест браузером | `scripts/refresh_guest_cookies.py`, раз в час; смена идентичности — `scripts/rotation_daemon.py` |
+| `account_11..N` | **гостевые** (анонимная сессия, без логина) | харвест браузером | `scripts/refresh_guest_cookies.py`, раз в час; смена идентичности — `scripts/rotation_daemon.py` |
 
 Правила, которые нельзя нарушать (джобы пишут в один и тот же
 `cookies/account_N.json`):
@@ -149,13 +149,38 @@ reddit.com через прокси слота, снимает cookies, **вер�
 `comments.json` тем же `impersonate` и только при 200 перезаписывает файл.
 
 ```bash
-venv/bin/python3 scripts/refresh_guest_cookies.py                       # все гостевые
+venv/bin/python3 scripts/refresh_guest_cookies.py                       # все гостевые, параллельно
 venv/bin/python3 scripts/refresh_guest_cookies.py --account account_12
+venv/bin/python3 scripts/refresh_guest_cookies.py --workers 1           # последовательно, как раньше
 venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless --dry-run
 ```
 
 Самая короткая из cookies (`session_tracker`) живёт ~2 ч, поэтому таймер — раз
 в час. Слоты, которые в этот момент в ротации, джоб пропускает.
+
+**Параллельность.** Слоты раздаются по N браузерным воркерам (каждый — отдельный
+процесс со своим Playwright и своим набором слотов, файлы cookies не
+пересекаются). N выбирается автоматически:
+`min(parallel_browsers, CPU, (MemAvailable − memory_reserve_mb) / browser_memory_mb, слотов)`;
+`--workers N` задаёт его явно. Перед запуском каждого браузера воркер ждёт, пока
+`MemAvailable ≥ min_free_memory_mb` (защита от OOM): не дождался — слот уходит в
+повторный проход. Все пять параметров — в `scripts/refresh_guest_cookies.yaml`
+(по умолчанию 6 / 600 / 1000 / 700 МБ, ждать 120 с). 55 слотов одним воркером
+шли бы ~30 минут, шестью — ~6.
+
+### Добавить гостевые слоты
+
+`scripts/add_guest_slots.py` берёт свободные **живые** ноды из `all_nodes.txt`
+(проверка через API mihomo), раскладывает их по слотам с разбросом по странам,
+подбирает свободные порты и уникальные отпечатки, ставит гео по стране ноды и
+правит `vless_accounts.env`, `accounts.yaml`, `scripts/refresh_guest_cookies.yaml`
+и `config.yaml` (`rotation.slots`). Часть нод остаётся про запас для ротации
+(`--spare`, по умолчанию 8). Без `--apply` только печатает план.
+
+```bash
+venv/bin/python3 scripts/add_guest_slots.py --count 30            # план
+venv/bin/python3 scripts/add_guest_slots.py --count 30 --apply    # запись (с бэкапами)
+```
 
 ### Что происходит, когда cookies протухли
 

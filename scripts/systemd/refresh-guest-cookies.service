@@ -1,6 +1,10 @@
 # /etc/systemd/system/refresh-guest-cookies.service
 #
-# Харвест гостевых cookies для слотов account_11..25.
+# Харвест гостевых cookies для всех слотов из guest_accounts (account_11..N).
+#
+# Слоты харвестятся ПАРАЛЛЕЛЬНО: число браузерных воркеров считается из
+# свободной RAM/CPU (потолок parallel_browsers в refresh_guest_cookies.yaml),
+# --workers N задаёт его явно. Все воркеры работают под одним flock ниже.
 #
 # ПУТИ: см. комментарий в refresh-cookies.service (оба сервиса на одном
 # каталоге и одном venv).
@@ -23,7 +27,8 @@ User=sashko
 Group=sashko
 WorkingDirectory=/home/sashko/reddit_scraper
 ExecStart=/usr/bin/flock /tmp/reddit_scraper_browser.lock /usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24" /home/sashko/reddit_scraper/venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless
-# 15 слотов x (загрузка + пауза + stagger) + повторный проход + ожидание lock.
+# слоты / воркеры x (загрузка + пауза + stagger) + повторный проход + ожидание lock.
+# 55 слотов на 6 воркеров ~6-10 минут; запас на --workers 1 и ожидание lock.
 TimeoutStartSec=3600
 
 [Install]
