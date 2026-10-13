@@ -143,6 +143,7 @@ async def _fetch_comments_page(
 
     total_wait = connect_timeout + timeout + HTTP_EXECUTOR_SLACK_SECONDS
 
+    resp = None
     try:
         loop = asyncio.get_running_loop()
         future = loop.run_in_executor(http_executor.current, call)
@@ -184,10 +185,23 @@ async def _fetch_comments_page(
         log.warning("[%s] Ошибка запроса к Reddit (проверь mihomo/порт): %s", account_name, e)
         return FetchResult(error_kind="network")
     except (json.JSONDecodeError, ValueError) as e:
+        body = ""
+        try:
+            body = resp.text if resp is not None else ""
+        except Exception:
+            pass
+        try:
+            hdrs = {k: v for k, v in resp.headers.items() if k.lower() in _DEBUG_HEADERS + ("content-type",)}
+        except Exception:
+            hdrs = {}
         log.warning(
-            "[%s] Reddit вернул 200, но тело не распарсилось как JSON "
-            "(похоже на капчу/интерстишл CDN): %s", account_name, e,
+            "[%s] 200, но не JSON: len=%d body=%r hdr=%s (%s)",
+            account_name, len(body), body[:200], hdrs, e,
         )
+        # пустое тело или HTML-заглушка = мягкий бан, а не сетевая ошибка:
+        # пусть сработает путь "empty" (рост кулдауна + заявка на ротацию)
+        if not body.strip() or body.lstrip()[:1] == "<":
+            return FetchResult(status=200, error_kind="empty", ratelimit=parse_ratelimit_headers(resp) if resp is not None else None)
         return FetchResult(error_kind="network")
 
     listing_data = data.get("data", {}) if isinstance(data, dict) else {}
