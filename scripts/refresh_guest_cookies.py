@@ -36,7 +36,14 @@ session_tracker (~2 часа), поэтому джоб рассчитан на �
 (retry_failed_passes) — иначе следующая попытка только через час, а
 гостевая cookie живёт ~2ч.
 
-Один браузерный процесс одновременно (последовательный цикл).
+Параллельность: слоты раздаются по N воркерам (--workers, по умолчанию
+считается автоматически из свободной RAM и числа CPU, потолок —
+parallel_browsers в refresh_guest_cookies.yaml). Каждый воркер — отдельный
+процесс этого же скрипта со своим Playwright и СВОИМ подмножеством слотов
+(cookies/account_N.json у воркеров не пересекаются). Перед запуском каждого
+браузера воркер ждёт, пока MemAvailable >= min_free_memory_mb, иначе слот
+помечается неудачным и повторяется в повторном проходе (защита от OOM).
+--workers 1 — прежний последовательный режим в одном процессе.
 
 Установка:
 
@@ -50,6 +57,8 @@ session_tracker (~2 часа), поэтому джоб рассчитан на �
 
     venv/bin/python3 scripts/refresh_guest_cookies.py
     venv/bin/python3 scripts/refresh_guest_cookies.py --account account_12
+    venv/bin/python3 scripts/refresh_guest_cookies.py --workers 4
+    venv/bin/python3 scripts/refresh_guest_cookies.py --workers 1     # последовательно
     venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless
     venv/bin/python3 scripts/refresh_guest_cookies.py --dry-run
 """
@@ -57,6 +66,8 @@ session_tracker (~2 часа), поэтому джоб рассчитан на �
 import argparse
 import copy
 import os
+import signal
+import subprocess
 import sys
 import time
 from dataclasses import dataclass
@@ -115,6 +126,16 @@ DEFAULT_CONFIG = {
     "verify_timeout_seconds": 20,
     "retry_failed_passes": 1,
     "stagger_seconds": 12,
+    # --- параллельный харвест ---
+    # Потолок одновременных браузеров (воркеров). Реальное число =
+    # min(parallel_browsers, CPU, (MemAvailable - memory_reserve_mb) //
+    # browser_memory_mb, число слотов); --workers N задаёт его явно.
+    "parallel_browsers": 6,
+    "browser_memory_mb": 600,       # консервативная оценка: браузер + node-драйвер Playwright
+    "memory_reserve_mb": 1000,      # запас RAM под хост, mihomo, scraper
+    "min_free_memory_mb": 700,      # воркер не стартует браузер, пока MemAvailable ниже
+    "memory_wait_seconds": 120,     # сколько ждать освобождения RAM, потом слот -> неудача
+    "worker_start_stagger_seconds": 4,  # пауза между стартами воркеров (пик CPU)
     "geo_defaults": {
         "locale": "en-US",
         "timezone_id": "America/New_York",
@@ -344,6 +365,136 @@ def apply_rotation_overrides(accounts: list[dict], cfg: dict) -> list[dict]:
 
 
 # ---------------------------------------------------------------- #
+#  Память и параллельный режим
+# ---------------------------------------------------------------- #
+
+ENGINE_WEIGHT = {"chromium": 1.0, "firefox": 1.3, "webkit": 1.2}
+
+
+def read_mem_available_mb() -> int | None:
+    """MemAvailable из /proc/meminfo в МБ (None — не Linux / не прочитали)."""
+    try:
+        with open("/proc/meminfo", "r", encoding="ascii") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) // 1024
+    except (OSError, ValueError, IndexError):
+        pass
+    return None
+
+
+def wait_for_memory(cfg: dict, name: str) -> bool:
+    """Ждёт, пока свободной RAM станет не меньше min_free_memory_mb.
+    False — не дождались за memory_wait_seconds (слот пойдёт в повтор)."""
+    need = int(cfg.get("min_free_memory_mb") or 0)
+    if need <= 0:
+        return True
+    deadline = time.monotonic() + float(cfg.get("memory_wait_seconds") or 0)
+    warned = False
+    while True:
+        avail = read_mem_available_mb()
+        if avail is None or avail >= need:
+            return True
+        if not warned:
+            log.warning("[%s] мало свободной RAM (%d МБ < %d МБ) — жду до %.0fс",
+                        name, avail, need, float(cfg.get("memory_wait_seconds") or 0))
+            warned = True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(5)
+
+
+def pick_worker_count(requested: int | None, n_slots: int, cfg: dict,
+                      mem_mb: int | None, cpus: int | None) -> int:
+    """requested: None/0 — авто, N>0 — ровно N (но не больше числа слотов)."""
+    if n_slots <= 0:
+        return 1
+    if requested:
+        return max(1, min(int(requested), n_slots))
+    cap = max(1, int(cfg.get("parallel_browsers") or 1))
+    by_cpu = max(1, cpus or 1)
+    if mem_mb is None:
+        by_mem = cap
+    else:
+        per = max(1, int(cfg.get("browser_memory_mb") or 600))
+        reserve = max(0, int(cfg.get("memory_reserve_mb") or 0))
+        by_mem = max(1, (mem_mb - reserve) // per)
+    return max(1, min(cap, by_cpu, by_mem, n_slots))
+
+
+def _slot_engine(account: dict, cfg: dict) -> str:
+    spec = cfg["guest_accounts"].get(account["name"]) or {}
+    if spec.get("engine"):
+        return spec["engine"]
+    imp = account.get("impersonate") or spec.get("impersonate")
+    try:
+        return infer_profile(imp)["engine"]
+    except Exception:
+        return "chromium"
+
+
+def split_shards(accounts: list[dict], cfg: dict, n: int) -> list[list[dict]]:
+    """Раскладывает слоты по n воркерам жадно (самые тяжёлые — первыми, в
+    самый лёгкий воркер): firefox/webkit тяжелее chromium, поэтому
+    round-robin по номеру дал бы перекос по RAM. Пустые воркеры не
+    возвращаются; внутри воркера порядок — по номеру слота."""
+    n = max(1, min(n, len(accounts)))
+    shards: list[list[dict]] = [[] for _ in range(n)]
+    load = [0.0] * n
+    ordered = sorted(accounts, key=lambda a: (-ENGINE_WEIGHT.get(_slot_engine(a, cfg), 1.0), _acc_num(a["name"])))
+    for a in ordered:
+        i = min(range(n), key=lambda k: (load[k], k))
+        shards[i].append(a)
+        load[i] += ENGINE_WEIGHT.get(_slot_engine(a, cfg), 1.0)
+    for sh in shards:
+        sh.sort(key=lambda a: _acc_num(a["name"]))
+    return [sh for sh in shards if sh]
+
+
+def _acc_num(name: str) -> int:
+    tail = name.rsplit("_", 1)[-1]
+    return int(tail) if tail.isdigit() else 0
+
+
+def run_parallel(shards: list[list[dict]], cfg: dict, config_path: Path, dry_run: bool) -> int:
+    """Запускает по подпроцессу на шард (этот же скрипт, --workers 1) и ждёт
+    всех. Код возврата: 0 — все слоты у всех воркеров успешны."""
+    script = str(Path(__file__).resolve())
+    procs: list[subprocess.Popen] = []
+
+    def _terminate(*_):
+        for pr in procs:
+            if pr.poll() is None:
+                pr.terminate()
+
+    old_term = signal.signal(signal.SIGTERM, lambda *a: (_terminate(), sys.exit(143)))
+    try:
+        for i, shard in enumerate(shards):
+            if i > 0 and cfg["worker_start_stagger_seconds"] > 0:
+                time.sleep(cfg["worker_start_stagger_seconds"])
+            cmd = [sys.executable, script, "--workers", "1", "--config", str(config_path),
+                   "--headless" if cfg["headless"] else "--no-headless"]
+            if dry_run:
+                cmd.append("--dry-run")
+            for a in shard:
+                cmd += ["--account", a["name"]]
+            env = {**os.environ, "GUEST_SHARD": f"{i + 1}/{len(shards)}"}
+            log.info("воркер %d/%d: %d слот(ов): %s", i + 1, len(shards), len(shard),
+                     ", ".join(a["name"] for a in shard))
+            procs.append(subprocess.Popen(cmd, env=env))
+        rc = 0
+        for pr in procs:
+            if pr.wait() != 0:
+                rc = 1
+        return rc
+    except KeyboardInterrupt:
+        _terminate()
+        raise
+    finally:
+        signal.signal(signal.SIGTERM, old_term)
+
+
+# ---------------------------------------------------------------- #
 #  main
 # ---------------------------------------------------------------- #
 
@@ -352,6 +503,10 @@ def _run_pass(pw, accounts: list[dict], cfg: dict, dry_run: bool) -> list[Accoun
     for i, account in enumerate(accounts):
         if i > 0 and cfg["stagger_seconds"] > 0:
             time.sleep(cfg["stagger_seconds"])
+        if not wait_for_memory(cfg, account["name"]):
+            results.append(AccountResult(account["name"], False,
+                                         "мало свободной RAM — слот отложен до повторного прохода"))
+            continue
         try:
             result = process_guest_account(pw, account, cfg, dry_run)
         except Exception as e:
@@ -367,6 +522,11 @@ def main() -> int:
     parser.add_argument("--headless", dest="headless", action="store_true", default=None)
     parser.add_argument("--no-headless", dest="headless", action="store_false")
     parser.add_argument("--dry-run", action="store_true", help="Ничего не записывать в cookies/.")
+    parser.add_argument(
+        "--workers", type=int, default=None,
+        help="Сколько браузеров параллельно (воркер = процесс). По умолчанию — авто по RAM/CPU "
+             "(потолок parallel_browsers в yaml); 1 — последовательно в одном процессе.",
+    )
     parser.add_argument(
         "--config", default=None,
         help="Путь к refresh_guest_cookies.yaml (по умолчанию scripts/refresh_guest_cookies.yaml, "
@@ -400,11 +560,28 @@ def main() -> int:
     accounts = [all_accounts[n] for n in sorted(wanted & set(all_accounts) & guest_slot_names, key=_num)]
     accounts = apply_rotation_overrides(accounts, cfg)
     if not accounts:
+        if os.environ.get("GUEST_SHARD"):
+            log.info("воркер %s: все его слоты сейчас в ротации — нечего делать", os.environ["GUEST_SHARD"])
+            return 0
         log.error("Нет ни одного гостевого слота для обработки — проверь accounts.yaml / %s / --account "
                   "(или все слоты сейчас в ротации)", config_path)
         return 1
 
-    log.info("refresh_guest_cookies: старт, %d слот(ов), headless=%s, stagger=%.0fs%s",
+    shard_tag = os.environ.get("GUEST_SHARD")  # выставляет родитель в run_parallel
+    workers = 1 if shard_tag else pick_worker_count(
+        args.workers, len(accounts), cfg, read_mem_available_mb(), os.cpu_count())
+    if workers > 1:
+        shards = split_shards(accounts, cfg, workers)
+        log.info("refresh_guest_cookies: %d слот(ов) -> %d параллельных воркер(ов) "
+                 "(RAM свободно: %s МБ, CPU: %s, потолок parallel_browsers=%s)%s",
+                 len(accounts), len(shards), read_mem_available_mb(), os.cpu_count(),
+                 cfg["parallel_browsers"], " [DRY-RUN]" if args.dry_run else "")
+        rc = run_parallel(shards, cfg, config_path, args.dry_run)
+        log.info("refresh_guest_cookies: все воркеры завершились, код=%d", rc)
+        return rc
+
+    log.info("refresh_guest_cookies: старт%s, %d слот(ов), headless=%s, stagger=%.0fs%s",
+             f" [воркер {shard_tag}]" if shard_tag else "",
              len(accounts), cfg["headless"], cfg["stagger_seconds"], " [DRY-RUN]" if args.dry_run else "")
 
     final: dict[str, AccountResult] = {}
