@@ -72,8 +72,7 @@ venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mih
 
 ## 6. Запуск
 ```bash
-sudo cp scripts/systemd/rotation-daemon.service /etc/systemd/system/
-sudo systemctl daemon-reload && sudo systemctl enable --now rotation-daemon
+sudo scripts/install_systemd.sh --enable      # ставит и включает rotation-daemon (и таймеры харвеста)
 journalctl -u rotation-daemon -f
 venv/bin/python3 scripts/rotation_daemon.py --status
 docker compose up -d --build scraper

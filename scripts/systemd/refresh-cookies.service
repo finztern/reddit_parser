@@ -1,19 +1,19 @@
-# /etc/systemd/system/refresh-cookies.service
+# Шаблон юнита: обновление сессий ЛОГИН-аккаунтов (account_1..10).
+# Гостевые слоты обслуживает refresh-guest-cookies.service.
 #
-# Обновление сессий ЛОГИН-аккаунтов (account_1..10). Гостевые слоты
-# обслуживает refresh-guest-cookies.service.
-#
-# ПУТИ: WorkingDirectory/ExecStart ниже — поправь под свою установку.
-# Раньше у двух сервисов были РАЗНЫЕ каталоги (reddit_scraper и
-# reddit_parser) — теперь оба на /home/sashko/reddit_scraper; venv — в
-# корне проекта (`python3 -m venv venv`, см. requirements-refresh.txt).
+# НЕ копируй руками: @USER@, @GROUP@ и @ROOT@ подставляет установщик
+#     scripts/install_systemd.sh     (см. README, раздел "systemd")
 #
 # User/Group: браузеры Playwright стоят в кеше пользователя
-# (~/.cache/ms-playwright), root их не видит.
+# (~/.cache/ms-playwright), root их не видит. venv — в @ROOT@/venv
+# (`python3 -m venv venv`, см. requirements-refresh.txt).
 #
-# flock: оба джоба (логин и гостевой) поднимают браузер — на слабом хосте
-# одновременный запуск = OOM. Общий lock-файл ставит их в очередь
-# (ожидание блокировки входит в TimeoutStartSec).
+# flock: все браузерные джобы (логин, гостевой, демон ротации) берут общий
+# lock-файл — одновременный запуск нескольких наборов браузеров на слабом
+# хосте = OOM. Ожидание блокировки входит в TimeoutStartSec.
+#
+# OOMScoreAdjust: при нехватке памяти ядро убивает браузерный джоб, а не
+# скрапер/mihomo (джоб сам повторит слот в следующем проходе).
 
 [Unit]
 Description=Reddit scraper - обновление cookies логин-аккаунтов (Playwright job)
@@ -22,10 +22,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=sashko
-Group=sashko
-WorkingDirectory=/home/sashko/reddit_scraper
-ExecStart=/usr/bin/flock /tmp/reddit_scraper_browser.lock /home/sashko/reddit_scraper/venv/bin/python3 scripts/refresh_cookies.py --config scripts/refresh_cookies.yaml
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+Environment=PYTHONUNBUFFERED=1
+OOMScoreAdjust=500
+ExecStart=/usr/bin/flock /tmp/reddit_scraper_browser.lock @ROOT@/venv/bin/python3 scripts/refresh_cookies.py --config scripts/refresh_cookies.yaml
 # Ненулевой exit code (хотя бы один аккаунт разлогинен) переводит юнит в
 # failed — виден в `systemctl status refresh-cookies.service` /
 # `journalctl -u refresh-cookies.service`.

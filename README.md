@@ -7,10 +7,11 @@
 подстраивается под очередь пайплайна.
 
 Внутреннее устройство — в [ARCHITECTURE.md](./ARCHITECTURE.md).
+**Новый сервер с нуля — [DEPLOY.md](./DEPLOY.md)** (пошагово, сразу 45 гостевых слотов).
 Ротация идентичностей гостевых слотов — раздел ниже и
 [ROTATION_SETUP.md](./ROTATION_SETUP.md).
 
-## Аккаунты: 10 логин + 15 гостевых
+## Аккаунты: 10 логин + 45 гостевых
 
 | Слоты | Тип | Откуда cookies | Кто обновляет |
 |---|---|---|---|
@@ -23,13 +24,14 @@
 - `refresh_cookies.py` работает только с `login_accounts` из
   `scripts/refresh_cookies.yaml` (1..10);
 - `refresh_guest_cookies.py` работает только со слотами из `guest_accounts`
-  в `scripts/refresh_guest_cookies.yaml` (11..25);
+  в `scripts/refresh_guest_cookies.yaml` (11..55);
 - **источник правды для `impersonate`/`user_agent` — `accounts.yaml`**, кроме
   гостевых слотов после ротации (их активный профиль — `state/slots/`).
   Менять отпечатки вручную — через `scripts/rotate_fingerprints.py`.
 
 Гостевые слоты `enabled: false`, пока для них нет ноды в
-`vless_accounts.env` (строки `account_11 = vless://...` … `account_25 = ...`)
+`vless_accounts.env` (строки `account_11 = vless://...` … `account_55 = ...`; их проще всего
+раздать скриптом `scripts/add_guest_slots.py`, см. ниже)
 и не отработал первый харвест. Если слот включён, а cookies-файла ещё нет,
 воркер ждёт его появления (раз в минуту), а не падает.
 
@@ -141,7 +143,7 @@ docker compose logs -f scraper
    venv/bin/python3 scripts/refresh_cookies.py --account account_1 [--no-headless] [--dry-run]
    ```
 
-### Гостевые слоты (11..25)
+### Гостевые слоты (11..55)
 
 С мая 2026 Reddit отдаёт 403 на `.json` без cookies, но хватает анонимной
 сессии из настоящего браузера. `refresh_guest_cookies.py` открывает
@@ -176,10 +178,14 @@ venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless --dry-run
 правит `vless_accounts.env`, `accounts.yaml`, `scripts/refresh_guest_cookies.yaml`
 и `config.yaml` (`rotation.slots`). Часть нод остаётся про запас для ротации
 (`--spare`, по умолчанию 8). Без `--apply` только печатает план.
+Слоты `account_11..55` уже описаны в репозитории — скрипт **раздаёт ноды готовым слотам**
+(`--count 0`, сначала закрываются слоты без ноды); `--count N` создаёт дополнительные
+(`account_56...`). Подробно для нового сервера — [DEPLOY.md](./DEPLOY.md).
 
 ```bash
-venv/bin/python3 scripts/add_guest_slots.py --count 30            # план
-venv/bin/python3 scripts/add_guest_slots.py --count 30 --apply    # запись (с бэкапами)
+venv/bin/python3 scripts/add_guest_slots.py --count 0             # план: раздать ноды слотам 11..55
+venv/bin/python3 scripts/add_guest_slots.py --count 0 --apply     # запись (с бэкапами)
+venv/bin/python3 scripts/add_guest_slots.py --count 20 --apply    # + 20 новых слотов
 ```
 
 ### Что происходит, когда cookies протухли
@@ -190,11 +196,14 @@ refresh-джоб кладёт новый файл — подхватывает �
 
 ### systemd
 
+Юниты в `scripts/systemd/` — шаблоны без вшитых путей. Установщик подставляет
+пользователя и каталог проекта, копирует в `/etc/systemd/system` и (с `--enable`)
+включает таймеры и демон ротации:
+
 ```bash
-sudo cp scripts/systemd/refresh-* scripts/systemd/rotation-daemon.service /etc/systemd/system/
-# поправь User=, WorkingDirectory=, путь к venv в .service
-sudo systemctl daemon-reload
-sudo systemctl enable --now refresh-cookies.timer refresh-guest-cookies.timer rotation-daemon
+sudo scripts/install_systemd.sh --enable             # все юниты
+sudo scripts/install_systemd.sh --enable --no-login  # без логин-аккаунтов
+scripts/install_systemd.sh --out /tmp/units          # только отрисовать (без root и systemctl)
 ```
 
 Все браузерные джобы берут общий `flock` (`/tmp/reddit_scraper_browser.lock`) —

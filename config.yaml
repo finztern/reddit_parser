@@ -150,6 +150,36 @@ rotation:
     - account_23
     - account_24
     - account_25
+    - account_26
+    - account_27
+    - account_28
+    - account_29
+    - account_30
+    - account_31
+    - account_32
+    - account_33
+    - account_34
+    - account_35
+    - account_36
+    - account_37
+    - account_38
+    - account_39
+    - account_40
+    - account_41
+    - account_42
+    - account_43
+    - account_44
+    - account_45
+    - account_46
+    - account_47
+    - account_48
+    - account_49
+    - account_50
+    - account_51
+    - account_52
+    - account_53
+    - account_54
+    - account_55
 
   # --- воркер ---
   # Сколько пустых листингов подряд до заявки (кулдауны 3,6,12,24,48,60с —

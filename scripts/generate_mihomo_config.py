@@ -63,11 +63,15 @@ def load_account_ports() -> dict[str, int]:
 
 def load_vless_links() -> dict[str, str]:
     """account_1 -> 'vless://...' из vless_accounts.env (некомментированные строки)."""
-    if not VLESS_ENV_PATH.exists():
-        print(f"ОШИБКА: не найден {VLESS_ENV_PATH}", file=sys.stderr)
-        sys.exit(1)
-
     links: dict[str, str] = {}
+    if not VLESS_ENV_PATH.exists():
+        # Чистый сервер: ссылок на слоты ещё нет, есть только пул нод
+        # (all_nodes.txt) — mihomo поднимется с одним пулом, а ноды слотам
+        # раздаст scripts/add_guest_slots.py. Если нет и пула — main() упадёт.
+        print(f"ПРЕДУПРЕЖДЕНИЕ: нет {VLESS_ENV_PATH.name} — считаю, что слотам ещё не назначены ноды",
+              file=sys.stderr)
+        return links
+
     for raw_line in VLESS_ENV_PATH.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -254,10 +258,6 @@ def main() -> None:
     account_links = load_vless_links()
     config = build_config(account_ports, account_links)
 
-    if not config["proxies"]:
-        print("ОШИБКА: не удалось собрать ни одного прокси — проверь vless_accounts.env", file=sys.stderr)
-        sys.exit(1)
-
     # Пул нод для ротации (опционально, нужен all_nodes.txt).
     # Импорт ленивый: rotation сам импортирует этот модуль.
     pool_added = 0
@@ -266,6 +266,14 @@ def main() -> None:
         pool_added = rotation.extend_with_pool(config)
     except Exception as e:  # нет fcntl (Windows), нет curl_cffi и т.п. — пул просто не подключаем
         print(f"ПРЕДУПРЕЖДЕНИЕ: пул нод для ротации не подключён ({e})", file=sys.stderr)
+
+    # Ошибка — только если нет НИ одной ноды: ни назначенной слоту, ни в пуле.
+    # (Раньше проверка шла до пула, и на чистом сервере без ссылок в
+    # vless_accounts.env mihomo нельзя было поднять, чтобы проверить ноды.)
+    if not config["proxies"]:
+        print("ОШИБКА: не удалось собрать ни одного прокси — проверь vless_accounts.env и all_nodes.txt",
+              file=sys.stderr)
+        sys.exit(1)
 
     yaml_text = yaml.safe_dump(config, allow_unicode=True, sort_keys=False, width=120)
     OUTPUT_PATH.write_text(HEADER + yaml_text, encoding="utf-8")

@@ -31,8 +31,11 @@ scripts/add_guest_slots.py — добавляет гостевые слоты и
        config.yaml                         rotation.slots += N
   6. Включает (enabled: true) все гостевые слоты, у которых есть нода
      (--no-enable-existing — не трогать уже существующие).
+  7. --disable-login-without-node: выключает (enabled: false) ЛОГИН-аккаунты,
+     у которых нет ноды в vless_accounts.env, — на чистом сервере без
+     логин-аккаунтов их воркеры только копили бы сетевые ошибки.
 
-Логин-аккаунты (account_1..10) не затрагиваются.
+Логин-аккаунты (account_1..10) не затрагиваются (кроме --disable-login-without-node).
 
 После --apply нужно: сгенерировать mihomo_config.yaml, перезапустить mihomo,
 сходить за cookies, перезапустить scraper — см. вывод скрипта.
@@ -385,6 +388,9 @@ def main() -> int:
     ap.add_argument("--no-probe", action="store_true", help="не проверять живость нод через mihomo")
     ap.add_argument("--no-enable-existing", action="store_true",
                     help="не включать уже существующие гостевые слоты, у которых есть нода")
+    ap.add_argument("--disable-login-without-node", action="store_true",
+                    help="выключить логин-аккаунты, у которых нет ноды в vless_accounts.env "
+                         "(чистый сервер без логин-аккаунтов)")
     ap.add_argument("--nodes-file", default=None, help="пул нод (по умолчанию rotation.nodes_file из config.yaml)")
     ap.add_argument("--probe-url", default=DEFAULT_PROBE_URL)
     ap.add_argument("--probe-timeout-ms", type=int, default=8000)
@@ -498,7 +504,12 @@ def main() -> int:
             if a and name in links and name not in planned and not a.get("enabled", True):
                 to_enable.append(name)
 
-    if not plans and not to_enable:
+    login_off = []
+    if args.disable_login_without_node:
+        login_off = [a["name"] for a in accounts
+                     if a["name"] not in guest and a.get("enabled") and a["name"] not in links]
+
+    if not plans and not to_enable and not login_off:
         print("Изменений нет — выхожу.")
         return 0
 
@@ -512,6 +523,8 @@ def main() -> int:
               f"{'НОВЫЙ слот' if p.is_new else 'нода для существующего слота'}")
     if to_enable:
         print(f"\nБудут включены (enabled: true), нода у них уже есть: {', '.join(to_enable)}")
+    if login_off:
+        print(f"\nБудут ВЫКЛЮЧЕНЫ логин-аккаунты без ноды (enabled: false): {', '.join(login_off)}")
     left = len(alive) - len(chosen)
     print(f"\nЖивых свободных нод останется на ротацию: {left}")
     if left < 5:
@@ -529,7 +542,7 @@ def main() -> int:
 
     # vless_accounts.env
     if plans:
-        env_text = ENV_PATH.read_text(encoding="utf-8")
+        env_text = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
         env_text = env_text.rstrip("\n") + f"\n\n# --- добавлено scripts/add_guest_slots.py {stamp} ---\n"
         env_text += "".join(f"{p.slot} = {p.uri}\n" for p in plans)
         ENV_PATH.write_text(env_text, encoding="utf-8")
@@ -541,6 +554,8 @@ def main() -> int:
             new_accounts = patch_account_fields(new_accounts, p.slot, enabled=True, locale=p.geo["locale"])
     for name in to_enable:
         new_accounts = patch_account_fields(new_accounts, name, enabled=True)
+    for name in login_off:
+        new_accounts = patch_account_fields(new_accounts, name, enabled=False)
     added = [p for p in plans if p.is_new]
     if added:
         new_accounts = (new_accounts.rstrip("\n") + f"\n\n  # --- добавлено scripts/add_guest_slots.py {stamp} ---\n\n"

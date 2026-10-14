@@ -41,7 +41,30 @@ def vless(i, name):
     return f"vless://00000000-0000-4000-8000-{i:012d}@host{i}.example.net:443?security=tls&type=tcp&sni=h{i}.example.net#{name}"
 
 
-def build_fixture(tmp: Path, mihomo_port: int):
+def trim_to_25_slots(tmp: Path):
+    """В репо уже лежат слоты 26..55. Для сценария «добавить НОВЫЕ слоты» берём
+    базу из 25 аккаунтов: вырезаем 26..55 из accounts.yaml, guest yaml и
+    rotation.slots."""
+    import re
+
+    acc = (tmp / "accounts.yaml").read_text(encoding="utf-8")
+    cut = acc.index("  # --- Гостевые слоты (26..55) ---")
+    (tmp / "accounts.yaml").write_text(acc[:cut].rstrip("\n") + "\n", encoding="utf-8")
+
+    gp = tmp / "scripts" / "refresh_guest_cookies.yaml"
+    text = gp.read_text(encoding="utf-8")
+    m = re.search(r"(?m)^guest_accounts:[ \t]*\n", text)
+    guest = yaml.safe_load(text)["guest_accounts"]
+    guest = {k: v for k, v in guest.items() if int(k.split("_")[1]) <= 25}
+    gp.write_text(text[:m.start()] + yaml.safe_dump({"guest_accounts": guest}, allow_unicode=True,
+                                                    sort_keys=False, width=200), encoding="utf-8")
+
+    cfg = (tmp / "config.yaml").read_text(encoding="utf-8")
+    cfg = re.sub(r"(?m)^    - account_(2[6-9]|[3-5]\d)\s*\n", "", cfg)
+    (tmp / "config.yaml").write_text(cfg, encoding="utf-8")
+
+
+def build_fixture(tmp: Path, mihomo_port: int, trim: bool = True):
     (tmp / "scripts").mkdir()
     for f in ("generate_mihomo_config.py", "rotate_fingerprints.py", "rotation.py", "add_guest_slots.py"):
         shutil.copy2(ROOT / "scripts" / f, tmp / "scripts" / f)
@@ -49,6 +72,8 @@ def build_fixture(tmp: Path, mihomo_port: int):
     shutil.copy2(ROOT / "accounts.yaml", tmp / "accounts.yaml")
     shutil.copy2(ROOT / "config.yaml", tmp / "config.yaml")
 
+    if trim:
+        trim_to_25_slots(tmp)
     cfg = (tmp / "config.yaml").read_text(encoding="utf-8")
     cfg = cfg.replace('mihomo_api: "http://127.0.0.1:9090"', f'mihomo_api: "http://127.0.0.1:{mihomo_port}"')
     (tmp / "config.yaml").write_text(cfg, encoding="utf-8")
@@ -278,3 +303,69 @@ def test_pick_profiles_reuses_only_when_targets_run_out():
                 sys.modules.pop(k, None)
             else:
                 sys.modules[k] = v
+
+
+def test_fresh_server_bootstrap():
+    """Новый сервер: в репо уже 55 слотов, есть только пул нод (без
+    vless_accounts.env). generate_mihomo_config поднимает конфиг из одного
+    пула, а add_guest_slots --count 0 раздаёт ноды готовым слотам 11..55."""
+    import importlib
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeMihomo)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tmp = Path(tempfile.mkdtemp(prefix="freshserver-"))
+    try:
+        build_fixture(tmp, srv.server_port, trim=False)
+        (tmp / "vless_accounts.env").unlink()                       # чистый сервер
+        pool = [vless(200 + k, f"{COUNTRIES[k % len(COUNTRIES)]}{k + 1}") for k in range(60)]
+        (tmp / "all_nodes.txt").write_text("\n".join(pool) + "\n", encoding="utf-8")
+
+        env = {**os.environ, "PYTHONPATH": str(tmp / "stubs"), "PYTHONDONTWRITEBYTECODE": "1"}
+        gen = lambda: subprocess.run([sys.executable, str(tmp / "scripts" / "generate_mihomo_config.py")],
+                                     cwd=tmp, env=env, capture_output=True, text=True, timeout=60)
+
+        # 1) mihomo из одного пула (без назначенных нод) — раньше тут была ошибка
+        g = gen()
+        assert g.returncode == 0, g.stdout + g.stderr
+        mh = yaml.safe_load((tmp / "mihomo_config.yaml").read_text(encoding="utf-8"))
+        assert len(mh["proxies"]) == 60 and mh["listeners"] == []
+
+        # 2) ноды раздаются ГОТОВЫМ слотам 11..55 (новые слоты не создаются)
+        r = run(tmp, "--count", "0", "--seed", "3", "--apply", "--disable-login-without-node")
+        assert r.returncode == 0, r.stdout + r.stderr
+        accounts = yaml.safe_load((tmp / "accounts.yaml").read_text(encoding="utf-8"))["accounts"]
+        assert len(accounts) == 55, "новых слотов быть не должно"
+        # логин-аккаунты без ноды выключены, гостевые включены
+        assert not any(a["enabled"] for a in accounts if int(a["name"].split("_")[1]) <= 10)
+        links = {l.split("=", 1)[0].strip(): l.split("=", 1)[1].strip()
+                 for l in (tmp / "vless_accounts.env").read_text(encoding="utf-8").splitlines()
+                 if l.startswith("account_")}
+        assert sorted(links, key=lambda k: int(k.split("_")[1])) == [f"account_{n}" for n in range(11, 56)]
+        assert len({v.split("#", 1)[0] for v in links.values()}) == 45
+        assert 60 - 45 >= 8, "запас на ротацию должен сохраниться"
+
+        # 3) гео слота = страна ноды (accounts.yaml:locale и guest spec geo)
+        sys.path.insert(0, str(tmp / "scripts"))
+        sys.modules.pop("rotation", None)
+        rot = importlib.import_module("rotation")
+        guest = yaml.safe_load((tmp / "scripts" / "refresh_guest_cookies.yaml").read_text(encoding="utf-8"))
+        by = {a["name"]: a for a in accounts}
+        for n in range(11, 56):
+            slot = f"account_{n}"
+            geo = rot.geo_for(urllib.parse.unquote(links[slot].split("#", 1)[1]))
+            assert guest["guest_accounts"][slot]["geo"] == geo, slot
+            assert by[slot]["locale"] == geo["locale"], slot
+            assert by[slot]["enabled"] is True
+        # у слотов 11..25 в account_geo не осталось устаревшего «планового» гео
+        for n in range(11, 26):
+            planned = guest["account_geo"][f"account_{n}"]
+            assert planned == guest["guest_accounts"][f"account_{n}"]["geo"], f"account_{n}: account_geo не обновлён"
+
+        # 4) теперь mihomo получает 45 слушателей
+        g = gen()
+        assert g.returncode == 0, g.stdout + g.stderr
+        mh = yaml.safe_load((tmp / "mihomo_config.yaml").read_text(encoding="utf-8"))
+        assert len(mh["listeners"]) == 45
+    finally:
+        srv.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)

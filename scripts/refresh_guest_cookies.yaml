@@ -1,7 +1,7 @@
 # ============================================================
 #  Конфиг scripts/refresh_guest_cookies.py — независимого Playwright-
 #  джоба, который харвестит АНОНИМНЫЕ (без логина) cookies для
-#  ГОСТЕВЫХ слотов account_11..25 и обновляет cookies/account_N.json.
+#  ГОСТЕВЫХ слотов account_11..55 и обновляет cookies/account_N.json.
 #
 #  Логин-аккаунты account_1..10 обслуживает refresh_cookies.py
 #  (см. refresh_cookies.yaml) — их здесь НЕТ и быть не должно.
@@ -161,3 +161,161 @@ guest_accounts:
     channel: null
     user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36
     impersonate: chrome145
+  account_26:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36
+    impersonate: chrome123
+  account_27:
+    engine: webkit
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15
+    impersonate: safari180
+  account_28:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
+    impersonate: chrome131
+  account_29:
+    engine: webkit
+    channel: null
+    device: iPhone 15 Pro
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1
+    impersonate: safari184_ios
+  account_30:
+    engine: webkit
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0.1 Safari/605.1.15
+    impersonate: safari2601
+  account_31:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36
+    impersonate: chrome133a
+  account_32:
+    engine: firefox
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64; rv:144.0) Gecko/20100101 Firefox/144.0
+    impersonate: firefox144
+  account_33:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36
+    impersonate: chrome145
+  account_34:
+    engine: chromium
+    channel: null
+    device: Galaxy S9+
+    user_agent: Mozilla/5.0 (Linux; Android 12; SM-G965F) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36
+    impersonate: chrome131_android
+  account_35:
+    engine: webkit
+    channel: null
+    device: iPhone 15
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1
+    impersonate: safari260_ios
+  account_36:
+    engine: webkit
+    channel: null
+    device: iPhone 14
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1
+    impersonate: safari180_ios
+  account_37:
+    engine: webkit
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15
+    impersonate: safari260
+  account_38:
+    engine: webkit
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15
+    impersonate: safari170
+  account_39:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36
+    impersonate: chrome136
+  account_40:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36
+    impersonate: chrome124
+  account_41:
+    engine: webkit
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15
+    impersonate: safari260
+  account_42:
+    engine: webkit
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15
+    impersonate: safari170
+  account_43:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36
+    impersonate: chrome145
+  account_44:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36
+    impersonate: chrome131
+  account_45:
+    engine: webkit
+    channel: null
+    device: iPhone 15 Pro
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1
+    impersonate: safari260_ios
+  account_46:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36
+    impersonate: chrome136
+  account_47:
+    engine: webkit
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0.1 Safari/605.1.15
+    impersonate: safari2601
+  account_48:
+    engine: firefox
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:144.0) Gecko/20100101 Firefox/144.0
+    impersonate: firefox144
+  account_49:
+    engine: webkit
+    channel: null
+    device: iPhone 15
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1
+    impersonate: safari180_ios
+  account_50:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36
+    impersonate: chrome133a
+  account_51:
+    engine: webkit
+    channel: null
+    device: iPhone 14
+    user_agent: Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1
+    impersonate: safari184_ios
+  account_52:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36
+    impersonate: chrome124
+  account_53:
+    engine: webkit
+    channel: null
+    user_agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15
+    impersonate: safari180
+  account_54:
+    engine: chromium
+    channel: null
+    user_agent: Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36
+    impersonate: chrome123
+  account_55:
+    engine: chromium
+    channel: null
+    device: Pixel 5
+    user_agent: Mozilla/5.0 (Linux; Android 13; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36
+    impersonate: chrome131_android

@@ -1,20 +1,19 @@
-# /etc/systemd/system/refresh-guest-cookies.service
+# Шаблон юнита: харвест гостевых cookies для всех слотов из guest_accounts
+# (account_11..N). Слоты харвестятся ПАРАЛЛЕЛЬНО: число браузерных воркеров
+# считается из свободной RAM/CPU (потолок parallel_browsers в
+# scripts/refresh_guest_cookies.yaml), --workers N задаёт его явно. Все
+# воркеры работают под одним flock ниже.
 #
-# Харвест гостевых cookies для всех слотов из guest_accounts (account_11..N).
+# НЕ копируй руками: @USER@, @GROUP@ и @ROOT@ подставляет установщик
+#     scripts/install_systemd.sh     (см. README, раздел "systemd")
 #
-# Слоты харвестятся ПАРАЛЛЕЛЬНО: число браузерных воркеров считается из
-# свободной RAM/CPU (потолок parallel_browsers в refresh_guest_cookies.yaml),
-# --workers N задаёт его явно. Все воркеры работают под одним flock ниже.
+# Окно браузера (--no-headless) требует дисплея, которого под systemd нет, —
+# его даёт xvfb-run (apt install xvfb). Если окно не нужно, убери xvfb-run
+# и --no-headless (и поставь headless: true в refresh_guest_cookies.yaml).
 #
-# ПУТИ: см. комментарий в refresh-cookies.service (оба сервиса на одном
-# каталоге и одном venv).
-#
-# --no-headless под systemd без DISPLAY падал бы ("Missing X server").
-# Если нужен именно ОКОННЫЙ режим браузера — xvfb-run даёт виртуальный
-# дисплей (apt install xvfb). Для headless-режима убери xvfb-run и
-# --no-headless (headless: true в refresh_guest_cookies.yaml).
-#
-# flock — общий lock с refresh-cookies.service (один браузер за раз).
+# flock — общий lock с refresh-cookies.service и демоном ротации (один набор
+# браузеров за раз). OOMScoreAdjust — при нехватке памяти первым убивается
+# этот джоб, а не скрапер/mihomo.
 
 [Unit]
 Description=Reddit scraper - обновление гостевых (анонимных) cookies (Playwright job)
@@ -23,10 +22,12 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-User=sashko
-Group=sashko
-WorkingDirectory=/home/sashko/reddit_scraper
-ExecStart=/usr/bin/flock /tmp/reddit_scraper_browser.lock /usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24" /home/sashko/reddit_scraper/venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+Environment=PYTHONUNBUFFERED=1
+OOMScoreAdjust=500
+ExecStart=/usr/bin/flock /tmp/reddit_scraper_browser.lock /usr/bin/xvfb-run -a --server-args="-screen 0 1920x1080x24" @ROOT@/venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless
 # слоты / воркеры x (загрузка + пауза + stagger) + повторный проход + ожидание lock.
 # 55 слотов на 6 воркеров ~6-10 минут; запас на --workers 1 и ожидание lock.
 TimeoutStartSec=3600
