@@ -111,6 +111,18 @@ venv/bin/python3 scripts/filter_nodes.py --write      # + all_nodes.reddit_ok.tx
 venv/bin/python3 scripts/add_guest_slots.py --count 0 --require-reddit --apply   # раздать только годные
 ```
 
+Если ноды слотам **уже выданы** (а Reddit их не пускает), `--require-reddit` их не заменит —
+нужен `--replace-banned`: он проверяет ноды выданных слотов и меняет забаненные на годные
+(остальные слоты не трогает, старые строки в `vless_accounts.env` закомментированы):
+
+```bash
+sudo systemctl stop rotation-daemon 2>/dev/null          # демон не должен писать state параллельно
+venv/bin/python3 scripts/add_guest_slots.py --count 0 --replace-banned --spare 4            # план
+venv/bin/python3 scripts/add_guest_slots.py --count 0 --replace-banned --spare 4 --apply
+venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo
+sudo systemctl start rotation-daemon 2>/dev/null
+```
+
 Нужен mihomo Meta (параметр `expected` в delay-API). Если «годными» оказались все ноды,
 перепроверь вручную: `curl -x http://127.0.0.1:ПОРТ -o /dev/null -w "%{http_code}\n" https://www.reddit.com/`.
 

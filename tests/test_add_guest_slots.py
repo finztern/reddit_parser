@@ -105,6 +105,9 @@ def build_fixture(tmp: Path, mihomo_port: int, trim: bool = True):
     return pool
 
 
+BANNED: set = set()   # имена нод, которые «живы», но Reddit (expected=200) их не пускает
+
+
 class FakeMihomo(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
@@ -113,6 +116,8 @@ class FakeMihomo(http.server.BaseHTTPRequestHandler):
             if "ghost" in name:
                 return self._send(404, {"message": "resource not found"})
             if "dead" in name:
+                return self._send(504, {"message": "An error occurred in the delay test"})
+            if "expected=200" in self.path and name in BANNED:
                 return self._send(504, {"message": "An error occurred in the delay test"})
             return self._send(200, {"delay": 123})
         self._send(404, {})
@@ -366,6 +371,39 @@ def test_fresh_server_bootstrap():
         assert g.returncode == 0, g.stdout + g.stderr
         mh = yaml.safe_load((tmp / "mihomo_config.yaml").read_text(encoding="utf-8"))
         assert len(mh["listeners"]) == 45
+    finally:
+        srv.shutdown()
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_replace_banned():
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), FakeMihomo)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    tmp = Path(tempfile.mkdtemp(prefix="addslots-"))
+    try:
+        build_fixture(tmp, srv.server_port)
+
+        def links():
+            return {l.split("=", 1)[0].strip(): l.split("=", 1)[1].strip()
+                    for l in (tmp / "vless_accounts.env").read_text(encoding="utf-8").splitlines()
+                    if l.startswith("account_")}
+
+        before = links()
+        old = before["account_12"]
+        BANNED.add(urllib.parse.unquote(old.split("#", 1)[1]))
+        try:
+            r = run(tmp, "--count", "0", "--replace-banned", "--spare", "2", "--seed", "3", "--apply")
+        finally:
+            BANNED.clear()
+        assert r.returncode == 0, r.stdout + r.stderr
+        assert "снимаю ноду у 1: account_12" in r.stdout, r.stdout
+        after = links()
+        assert after["account_12"] != old
+        assert all(after[k] == v for k, v in before.items() if k not in ("account_12", "account_25")), "тронуты чужие слоты"
+        env = (tmp / "vless_accounts.env").read_text(encoding="utf-8")
+        assert "# (снято: Reddit не пускает) account_12" in env
+        # старая забаненная нода не выдана никому
+        assert old.split("#", 1)[0] not in [v.split("#", 1)[0] for v in after.values()]
     finally:
         srv.shutdown()
         shutil.rmtree(tmp, ignore_errors=True)

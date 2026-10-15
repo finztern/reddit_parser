@@ -399,6 +399,10 @@ def main() -> int:
                          "(чистый сервер без логин-аккаунтов)")
     ap.add_argument("--nodes-file", default=None, help="пул нод (по умолчанию rotation.nodes_file из config.yaml)")
     ap.add_argument("--probe-url", default=DEFAULT_PROBE_URL)
+    ap.add_argument("--replace-banned", action="store_true",
+                    help="проверить через Reddit ноды УЖЕ выданных гостевых слотов; у кого Reddit не отдаёт 200 — "
+                         "снять ноду и выдать новую годную (подразумевает --require-reddit; останови "
+                         "rotation-daemon на время запуска)")
     ap.add_argument("--require-reddit", action="store_true",
                     help="брать только ноды, через которые Reddit отдаёт 200 (иначе забаненные "
                          "Reddit'ом, но живые ноды проходят проверку)")
@@ -420,6 +424,34 @@ def main() -> int:
     links = gmc.load_vless_links()
     ident = read_json(IDENT_PATH)
     ropts = load_rotation_cfg()
+
+    if args.replace_banned:
+        args.require_reddit = True
+    replaced: list[str] = []
+    if args.replace_banned:
+        cand = []
+        for slot in sorted(guest, key=acc_num):
+            link = links.get(slot)
+            if not link or slot not in by_name:
+                continue
+            try:
+                pname = gmc.parse_vless(link, slot)["name"]
+            except ValueError:
+                continue
+            cand.append((slot, Free(None, pname, country_of(pname))))
+        try:
+            ok_, bad_, absent_ = probe_nodes([f for _, f in cand], ropts["mihomo_api"], ropts.get("mihomo_secret", ""),
+                                             REDDIT_PROBE_URL, args.probe_timeout_ms, args.probe_workers, "200")
+        except rot.RotationError as e:
+            sys.exit(f"ОШИБКА: {e}\nЗапусти mihomo (docker compose up -d mihomo).")
+        if absent_ and not ok_ and not bad_:
+            sys.exit("ОШИБКА: ноды слотов не загружены в mihomo — generate_mihomo_config.py && docker compose restart mihomo")
+        bad_ids = {id(f) for f in bad_}
+        replaced = [slot for slot, f in cand if id(f) in bad_ids]
+        print(f"Гостевых слотов с нодой: {len(cand)}; Reddit пускает: {len(ok_)}; "
+              f"снимаю ноду у {len(replaced)}: {', '.join(replaced) or '—'}")
+        for slot in replaced:
+            links.pop(slot)
 
     # --- слоты, которым нужна нода ---
     missing_nodes = sorted((n for n in guest if n in by_name and n not in links), key=acc_num)
@@ -554,6 +586,11 @@ def main() -> int:
     # vless_accounts.env
     if plans:
         env_text = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
+        gone = {p.slot for p in plans} & set(replaced)
+        if gone:
+            env_text = "".join(
+                f"# (снято: Reddit не пускает) {ln}" if re.match(rf"\s*({'|'.join(map(re.escape, gone))})\s*=", ln) else ln
+                for ln in env_text.splitlines(keepends=True))
         env_text = env_text.rstrip("\n") + f"\n\n# --- добавлено scripts/add_guest_slots.py {stamp} ---\n"
         env_text += "".join(f"{p.slot} = {p.uri}\n" for p in plans)
         ENV_PATH.write_text(env_text, encoding="utf-8")
@@ -585,6 +622,17 @@ def main() -> int:
     if not_written:
         print("\nВНИМАНИЕ: не смог вписать слоты в rotation.slots (config.yaml нестандартного вида) — "
               f"добавь вручную: {', '.join(not_written)}")
+
+    # демон ротации: у слотов со сменённой нодой сбросить активную идентичность —
+    # ensure_seeds заведёт новую из свежей ссылки (иначе слот остался бы на старой, забаненной)
+    reseed = [p.slot for p in plans if p.slot in set(replaced)]
+    if reseed and IDENT_PATH.exists():
+        st = read_json(IDENT_PATH)
+        for name in reseed:
+            if name in (st.get("slots") or {}):
+                st["slots"][name]["active"] = None
+        IDENT_PATH.write_text(json.dumps(st, ensure_ascii=False, indent=2), encoding="utf-8")
+        print(f"state/identities.json: сброшена активная идентичность у {len(reseed)} слот(ов)")
 
     # самопроверка: файлы читаются и согласованы
     chk = (yaml.safe_load(ACCOUNTS_PATH.read_text(encoding="utf-8")) or {}).get("accounts") or []
