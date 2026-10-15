@@ -67,6 +67,7 @@ import argparse
 import copy
 import os
 import signal
+import socket
 import subprocess
 import sys
 import time
@@ -174,6 +175,85 @@ class AccountResult:
 
 
 # ---------------------------------------------------------------- #
+#  Диагностика: порт, ошибки навигации, 403 на верификации
+# ---------------------------------------------------------------- #
+
+NAV_HINTS = {
+    "browser": "браузер упал или убит (чаще всего нехватка RAM: sudo dmesg -T | grep -i -E 'out of memory|killed process') — к прокси не относится",
+    "proxy_down": "порт не принимает соединения — у слота нет слушателя mihomo (есть ли нода в vless_accounts.env, "
+                  "выполнен ли generate_mihomo_config.py + restart mihomo?)",
+    "node": "порт жив, но нода отвечает плохо или режет соединения (смотри логи mihomo: dial/ошибки)",
+    "other": "причина не распознана — смотри текст ошибки",
+}
+
+
+def check_proxy_port(host: str, port: int, timeout: float = 3.0) -> str | None:
+    """None — порт принимает соединения; иначе текст причины."""
+    try:
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return None
+    except OSError as e:
+        return str(e)
+
+
+def classify_nav_error(msg: str) -> str:
+    """browser / proxy_down / node / other — по тексту ошибки page.goto."""
+    low = (msg or "").lower()
+    if any(k in low for k in ("has been closed", "target closed", "crashed", "browser closed")):
+        return "browser"
+    if any(k in low for k in ("proxy_connection", "connection_refused", "connection refused", "econnrefused",
+                              "could not connect to the server")):
+        return "proxy_down"
+    if any(k in low for k in ("tunnel_connection_failed", "connection_reset", "empty_response", "timed_out",
+                              "ns_error_net", "econnreset", "err_connection", "timed out")):
+        return "node"
+    return "other"
+
+
+_BROWSER_FETCH_JS = """async (u) => {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), 15000);
+  try {
+    const r = await fetch(u + '?limit=5', {credentials: 'include', signal: c.signal});
+    const b = await r.text();
+    return [r.status, b.slice(0, 200)];
+  } catch (e) { return ['ERR', String(e)]; } finally { clearTimeout(t); }
+}"""
+
+
+def browser_fetch_probe(page, url: str) -> tuple[object, str]:
+    """Тот же запрос ИЗ настоящего браузера (его TLS, его cookies, его прокси):
+    отличает «IP/сессия заблокированы» от «не нравится отпечаток curl_cffi»."""
+    try:
+        status, body = page.evaluate(_BROWSER_FETCH_JS, url)
+    except Exception as e:
+        return None, f"проба из браузера не удалась: {str(e)[:100]}"
+    return status, " ".join(str(body).split())[:200]
+
+
+def failure_verdict(browser_status) -> str:
+    if browser_status == 200:
+        return ("браузер получает JSON, а curl_cffi нет — проблема в отпечатке запроса (impersonate/заголовки), "
+                "не в IP и не в cookies")
+    if browser_status in (401, 403, 429):
+        return ("JSON закрыт и для настоящего браузера на этом IP/сессии — нода (IP) заблокирована Reddit'ом "
+                "либо общее изменение на стороне Reddit")
+    return "проба из браузера неоднозначна — смотри тело ответа ниже"
+
+
+def describe_http_failure(resp, browser_status, browser_body: str) -> str:
+    hdr = {str(k).lower(): v for k, v in resp.headers.items()}
+    keep = [f"{k}={hdr[k]}" for k in ("server", "cf-ray", "content-type", "retry-after", "x-ratelimit-remaining")
+            if k in hdr]
+    try:
+        body = " ".join((resp.text or "")[:200].split())
+    except Exception:
+        body = "<нечитаемо>"
+    return (f"curl_cffi: {resp.status_code}, заголовки: {', '.join(keep) or '-'}, тело: {body!r}; "
+            f"из браузера: {browser_status}, тело: {browser_body!r}; ВЫВОД: {failure_verdict(browser_status)}")
+
+
+# ---------------------------------------------------------------- #
 #  Один гостевой слот
 # ---------------------------------------------------------------- #
 
@@ -189,6 +269,12 @@ def process_guest_account(pw, account: dict, cfg: dict, dry_run: bool) -> Accoun
         log.error("[%s] нет proxy_port в accounts.yaml — пропускаю", name)
         return AccountResult(name, False, "нет proxy_port в accounts.yaml")
     proxy_url = f"http://{PROXY_HOST}:{proxy_port}"
+
+    port_err = check_proxy_port(PROXY_HOST, proxy_port)
+    if port_err:
+        # браузер даже не запускаем: экономим RAM и сразу даём точный диагноз
+        return AccountResult(name, False, f"порт {proxy_port} не принимает соединения ({port_err}): "
+                                          f"{NAV_HINTS['proxy_down']}")
 
     # --- accounts.yaml — источник правды для отпечатка запросов ---
     impersonate = account.get("impersonate") or guest_spec.get("impersonate")
@@ -268,6 +354,7 @@ def process_guest_account(pw, account: dict, cfg: dict, dry_run: bool) -> Accoun
             retries = max(1, int(cfg["warmup_retries"]))
 
             last_err = None
+            last_kind = None
             loaded = False
             for attempt in range(1, retries + 1):
                 try:
@@ -280,12 +367,14 @@ def process_guest_account(pw, account: dict, cfg: dict, dry_run: bool) -> Accoun
                                 name, attempt, retries, url, proxy_url, e)
                 except Exception as e:
                     last_err = e
-                    log.warning("[%s] попытка %d/%d: ошибка навигации через %s (mihomo/порт %s живы?): %s",
-                                name, attempt, retries, proxy_url, proxy_port, e)
+                    last_kind = classify_nav_error(str(e))
+                    log.warning("[%s] попытка %d/%d: ошибка навигации через %s: %s — %s",
+                                name, attempt, retries, proxy_url, e, NAV_HINTS[last_kind])
                 if attempt < retries:
                     time.sleep(3)
             if not loaded:
-                return AccountResult(name, False, f"не удалось загрузить {url}: {last_err}")
+                hint = f" — {NAV_HINTS[last_kind]}" if last_kind else ""
+                return AccountResult(name, False, f"не удалось загрузить {url}: {last_err}{hint}")
 
             # page.wait_for_timeout, а не time.sleep: в sync-API Playwright
             # событийный цикл крутится только внутри вызовов Playwright.
@@ -312,10 +401,12 @@ def process_guest_account(pw, account: dict, cfg: dict, dry_run: bool) -> Accoun
                 return AccountResult(name, False, f"верификация ({verify_url}) упала: {e}")
 
             if resp.status_code != 200:
+                b_status, b_body = browser_fetch_probe(page, verify_url)
                 return AccountResult(
                     name, False,
                     f"верификация: {verify_url} вернул {resp.status_code} "
-                    f"(cookies: {', '.join(sorted(cookie_dict))}) — cookies не приняты Reddit'ом",
+                    f"(cookies: {', '.join(sorted(cookie_dict))}) [{engine}/{impersonate}] — "
+                    + describe_http_failure(resp, b_status, b_body),
                 )
 
             if dry_run:

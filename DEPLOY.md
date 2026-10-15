@@ -106,8 +106,12 @@ venv/bin/python3 scripts/add_guest_slots.py --count 20 --apply
 
 ```bash
 watch -n2 free -m                                          # в соседнем терминале
-venv/bin/python3 scripts/refresh_guest_cookies.py --workers 3
+xvfb-run -a venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless --workers 3
 ```
+
+Запуск **с окном под `xvfb-run`**, как в systemd-юните: ручной прогон должен вести себя так же, как
+таймер, иначе проверка ничего не докажет. Без `--no-headless` браузеры идут в headless-режиме
+(`headless: true` в yaml), а Reddit может отвечать таким сессиям отказом.
 
 Если `available` не падает ниже ~1.5 ГБ, дальше запускай без флага — число воркеров
 выберется само (потолок и пороги памяти — в `scripts/refresh_guest_cookies.yaml`,
@@ -119,6 +123,18 @@ venv/bin/python3 scripts/refresh_guest_cookies.py --workers 3
 venv/bin/python3 scripts/refresh_guest_cookies.py --account account_17 --account account_31
 ls cookies/ | wc -l                                         # сколько файлов cookies есть
 ```
+
+Причину отказа слота показывает последняя строка про него (`не удалось: ...`):
+
+- `порт N не принимает соединения` — браузер даже не запускался: у слота нет слушателя mihomo
+  (нет ноды в `vless_accounts.env` либо после `generate_mihomo_config.py` не перезапущен mihomo);
+- `ошибка навигации ... — <подсказка>` — прокси-порт, нода или падение браузера (нехватка RAM), подсказка
+  называет причину;
+- `верификация ... вернул 403 ... ВЫВОД: ...` — страница загрузилась, cookies получены, но JSON не отдан.
+  В строке есть статус и заголовки ответа, начало тела и результат **той же проверки из настоящего
+  браузера**. «Браузер получает JSON, а curl_cffi нет» — проблема в отпечатке запроса (`impersonate`),
+  не в IP и cookies. «JSON закрыт и для браузера» — IP ноды заблокирован Reddit'ом либо изменение на
+  стороне Reddit.
 
 ## 7. Скрапер
 
@@ -177,7 +193,8 @@ docker stats --no-stream                               # память конте
 |---|---|
 | `add_guest_slots.py`: «пул нод не загружен в запущенный mihomo» | `generate_mihomo_config.py` → `docker compose restart mihomo`, повторить |
 | «запас на ротацию мал» | в `all_nodes.txt` мало нод — добавь (слотов + 8 минимум) |
-| харвест: `верификация ... вернул 403` | нода/IP у Reddit в бане, либо cookies не приняты — слот попадёт в ротацию, либо `--account` повторно |
+| харвест: `верификация ... вернул 403` у **всех** слотов | причина общая, а не «сломанные ноды». Сначала убедись, что запуск был с окном (`xvfb-run ... --no-headless`), затем читай `ВЫВОД` в строке ошибки (п. 6): отпечаток curl_cffi, блок IP или изменение на стороне Reddit |
+| харвест: `верификация ... вернул 403` у **части** слотов | нода/IP этих слотов у Reddit в бане — слот попадёт в ротацию, либо повтори `--account` |
 | харвест: `не смог запустить webkit/firefox` | `sudo venv/bin/playwright install-deps` и `venv/bin/playwright install webkit firefox` |
 | харвест: «мало свободной RAM» | уменьши `--workers` или `parallel_browsers`; убедись, что скрапер не разросся (`docker stats`) |
 | воркер: сетевые ошибки по одному слоту | у слота нет ноды/слушателя mihomo — раздай ноды (п. 5) или выключи слот (`enabled: false`) |

@@ -151,7 +151,8 @@ reddit.com через прокси слота, снимает cookies, **вер�
 `comments.json` тем же `impersonate` и только при 200 перезаписывает файл.
 
 ```bash
-venv/bin/python3 scripts/refresh_guest_cookies.py                       # все гостевые, параллельно
+xvfb-run -a venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless   # все гостевые, параллельно (как в systemd)
+venv/bin/python3 scripts/refresh_guest_cookies.py                       # то же в headless (без окна)
 venv/bin/python3 scripts/refresh_guest_cookies.py --account account_12
 venv/bin/python3 scripts/refresh_guest_cookies.py --workers 1           # последовательно, как раньше
 venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless --dry-run
