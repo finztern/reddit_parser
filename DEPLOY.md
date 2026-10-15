@@ -100,6 +100,20 @@ venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mih
 venv/bin/python3 scripts/add_guest_slots.py --count 20 --apply
 ```
 
+### Нода жива, но Reddit её не пускает
+
+Reddit банит целые подсети датацентровых VPN: нода проходит проверку живости, а главная
+`reddit.com` отдаёт 403 «blocked due to a network policy». Отфильтруй пул по реальному ответу Reddit:
+
+```bash
+venv/bin/python3 scripts/filter_nodes.py              # сколько нод Reddit пускает, по странам
+venv/bin/python3 scripts/filter_nodes.py --write      # + all_nodes.reddit_ok.txt
+venv/bin/python3 scripts/add_guest_slots.py --count 0 --require-reddit --apply   # раздать только годные
+```
+
+Нужен mihomo Meta (параметр `expected` в delay-API). Если «годными» оказались все ноды,
+перепроверь вручную: `curl -x http://127.0.0.1:ПОРТ -o /dev/null -w "%{http_code}\n" https://www.reddit.com/`.
+
 ## 6. Cookies гостевых слотов
 
 Параллельный харвест браузерами. В **первый раз** запусти осторожно и смотри память:

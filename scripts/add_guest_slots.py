@@ -79,6 +79,7 @@ ENV_PATH = gmc.VLESS_ENV_PATH
 IDENT_PATH = ROOT / "state" / "identities.json"
 
 DEFAULT_PROBE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
+REDDIT_PROBE_URL = "https://www.reddit.com/"
 FIRST_NEW_PORT = 7916
 
 
@@ -150,13 +151,18 @@ def find_free_nodes(pool_path: Path, assigned: dict[str, str], ident: dict) -> l
 #  Проверка живости через mihomo
 # ---------------------------------------------------------------- #
 
-def probe_nodes(free: list[Free], api: str, secret: str, url: str, timeout_ms: int, workers: int):
-    """-> (живые, мёртвые, отсутствующие в mihomo). Падает на недоступном API."""
+def probe_nodes(free: list[Free], api: str, secret: str, url: str, timeout_ms: int, workers: int,
+                expected: str | None = None):
+    """-> (живые, мёртвые, отсутствующие в mihomo). Падает на недоступном API.
+    expected — ожидаемый HTTP-статус (параметр `expected` delay-API mihomo Meta): нода
+    считается живой, только если URL вернул именно его (для Reddit — "200")."""
     m = rot.Mihomo(api, secret)
     q_url = urllib.parse.quote(url, safe="")
 
     def one(f: Free):
         path = f"/proxies/{urllib.parse.quote(f.mihomo_name, safe='')}/delay?url={q_url}&timeout={timeout_ms}"
+        if expected:
+            path += f"&expected={expected}"
         try:
             r = m._req("GET", path, timeout=timeout_ms / 1000 + 5) or {}
             d = r.get("delay")
@@ -393,6 +399,9 @@ def main() -> int:
                          "(чистый сервер без логин-аккаунтов)")
     ap.add_argument("--nodes-file", default=None, help="пул нод (по умолчанию rotation.nodes_file из config.yaml)")
     ap.add_argument("--probe-url", default=DEFAULT_PROBE_URL)
+    ap.add_argument("--require-reddit", action="store_true",
+                    help="брать только ноды, через которые Reddit отдаёт 200 (иначе забаненные "
+                         "Reddit'ом, но живые ноды проходят проверку)")
     ap.add_argument("--probe-timeout-ms", type=int, default=8000)
     ap.add_argument("--probe-workers", type=int, default=8)
     ap.add_argument("--seed", type=int, default=None)
@@ -434,7 +443,9 @@ def main() -> int:
     else:
         try:
             alive, dead, absent = probe_nodes(free, ropts["mihomo_api"], ropts.get("mihomo_secret", ""),
-                                              args.probe_url, args.probe_timeout_ms, args.probe_workers)
+                                              (REDDIT_PROBE_URL if args.require_reddit else args.probe_url),
+                                              args.probe_timeout_ms, args.probe_workers,
+                                              "200" if args.require_reddit else None)
         except rot.RotationError as e:
             sys.exit(f"ОШИБКА: {e}\nЗапусти mihomo (docker compose up -d mihomo) или используй --no-probe.")
         print(f"Проверка через mihomo: живых {len(alive)}, не отвечают {len(dead)}, "
