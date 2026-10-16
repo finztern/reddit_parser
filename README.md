@@ -293,3 +293,23 @@ venv/bin/python3 scripts/check_nodes.py --account account_5
   иначе воркер не сможет применить новый `impersonate`.
 - `docker-compose.yml` тянет `metacubex/mihomo:latest`; для воспроизводимых
   сборок зафиксируй тег.
+
+## Модуль 04 — «живое» поведение при обслуживании сессии (только чтение)
+
+`scripts/human_session.py`, используется из `refresh_cookies.py` (плановое обновление) и `login_hub.py`
+(короткая сессия после первого входа). Скрапер на `curl_cffi` не затрагивается.
+
+- Лента / `r/popular`, плавный скролл с лог-нормальными паузами 0.8–6 с, иногда возврат вверх, 1–2 поста,
+  небольшие случайные траектории мыши. Длительность — `human.min_session_seconds … human.max_session_seconds` (40–150 с).
+- **Никакой записи**: лайки, подписки, комментарии, сообщения, сохранения не делаются; кроме того,
+  `WriteGuard` блокирует любые POST/PUT/PATCH/DELETE на уровне контекста Playwright (исключение —
+  POST на GraphQL-хосты без маркеров записи в теле).
+- Частота: не чаще раза в `human.min_interval_hours` (24 ч) на аккаунт, со случайной добавкой `interval_jitter`,
+  и только если сессия нуждается в обновлении (нет/устарел `storage_state` или токен истекает в
+  ближайшие `refresh_before_hours`; вход подтверждается через `/api/me.json`). Состояние — `state/human/<account>.json`.
+- Старты аккаунтов разнесены (log-normal jitter, порядок перемешан).
+- Капча / пустая лента / разлогин → статус `needs_attention` (в `refresh_cookies.py` — ненулевой exit code,
+  cookies при живом входе всё равно сохраняются).
+- Конфиг — секция `human:` в `config.yaml` (`enabled`, `profile: calm|normal`, `max_session_seconds`, …);
+  на один прогон выключается `refresh_cookies.py --no-human`.
+- Тесты: `tests/test_human_session.py` (без сети и браузера).

@@ -65,6 +65,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR))
 sys.path.insert(0, str(_SCRIPTS_DIR.parent))
 
+import human_session as hs  # noqa: E402  (модуль 04)
 import login_fleet as lf  # noqa: E402
 import manual_login as ml  # noqa: E402  (is_logged_in, verify_cookies, exit_ip, infer_profile, resolve_geo...)
 from refresh_cookies import atomic_write_json, playwright_to_cookie_editor  # noqa: E402
@@ -607,6 +608,7 @@ class LoginSession:
         self.status, self.message = STARTING, ""
         self.exit_ip: str | None = None
         self.user: str | None = None
+        self.human_note = ""
         self.started = time.time()
         self.desktop: Desktop | None = None
         self.link = link_for(ctx.host, port)
@@ -768,6 +770,7 @@ class LoginSession:
                         last_snapshot = context.storage_state()
                     except Exception:
                         break  # окно закрыли — берём последний снимок
+                self._human_after_login(context, page, base_url, name)
                 try:
                     new_state = context.storage_state()
                 except Exception:
@@ -780,6 +783,26 @@ class LoginSession:
                     browser.close()
                 except Exception:
                     pass
+
+    def _human_after_login(self, context, page, base_url: str, name: str) -> None:
+        """Модуль 04: короткая «читающая» сессия сразу после первого входа (только чтение).
+        Только если человек уже закончил онбординг (post_login_wait прошёл) и окно живо.
+        Любая ошибка/капча не валит вход: сессия всё равно сохраняется, статус — в сообщении."""
+        try:
+            hcfg = hs.load_human_cfg()
+            if not (hcfg.get("enabled") and hcfg.get("on_first_login")):
+                return
+            if self.ctx.cancel.is_set():
+                return
+            hcfg = {**hcfg, "max_session_seconds": min(hcfg["max_session_seconds"], 90.0),
+                    "min_session_seconds": min(hcfg["min_session_seconds"], 40.0)}
+            self.set(WAITING_LOGIN, f"u/{self.user} — «живая» сессия (только чтение), окно не закрывай")
+            res = hs.maintain(name, context, page, hcfg, base_url=base_url, storage_state_path=None,
+                              cookies=[], force=True)
+            if res.status == hs.NEEDS_ATTENTION:
+                self.human_note = f"; human: needs_attention ({res.detail})"
+        except Exception as e:  # noqa: BLE001 — вход важнее имитации
+            self.human_note = f"; human: пропущено ({type(e).__name__})"
 
     def _update_waiting_user(self, page) -> None:
         try:
@@ -824,7 +847,7 @@ class LoginSession:
                 note = "; enabled: true записан (docker compose restart scraper)"
             except OSError as e:
                 note = f"; НЕ смог включить слот в accounts.yaml ({e}) — поставь enabled: true руками"
-        self.set(DONE, f"u/{self.user}, cookies: {len(rows)}{note}")
+        self.set(DONE, f"u/{self.user}, cookies: {len(rows)}{note}{self.human_note}")
 
 
 # ---------------------------------------------------------------- #

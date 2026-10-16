@@ -239,3 +239,18 @@ login_hub:
   public_host: null
   # экран Xvfb, если в профиле аккаунта (модуль 03) нет разрешения
   screen: [1400, 900]
+
+# --- «живое» поведение при обслуживании сессии (модуль 04, scripts/human_session.py) ---
+# Только ЧТЕНИЕ: лента, скролл, 1–2 поста. Никаких лайков/подписок/комментариев/сообщений/сохранений
+# (POST/PUT/PATCH/DELETE на запись блокируются на уровне Playwright). Касается только
+# refresh_cookies.py и login_hub.py; скрапер на curl_cffi не затрагивается.
+human:
+  enabled: true
+  profile: normal               # calm | normal
+  min_interval_hours: 24        # не чаще раза в N часов на аккаунт (реже = безопаснее)
+  interval_jitter: 0.25         # следующий срок = interval * (1 + U(0..0.25)) — аккаунты расходятся
+  refresh_before_hours: 12      # «нуждается в обновлении»: токен истекает раньше этого
+  min_session_seconds: 40
+  max_session_seconds: 150      # жёсткий потолок
+  on_first_login: true          # короткая сессия после первого входа через login_hub
+  start_gap_seconds: 45

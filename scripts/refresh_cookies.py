@@ -35,7 +35,11 @@ refresh_cookies.yaml):
      cookies домена reddit.com) в формате, который понимает
      scraper.config.load_cookies();
   7. сверяет фактический navigator.userAgent с accounts.yaml:user_agent —
-     при расхождении WARNING (accounts.yaml не трогается).
+     при расхождении WARNING (accounts.yaml не трогается);
+  8. (модуль 04) если сессия действительно нуждается в обновлении и прошло
+     human.min_interval_hours — ведёт себя как читающий человек (scripts/human_session.py,
+     только чтение, POST на запись блокируются). Капча/пустая лента/разлогин ->
+     статус needs_attention (cookies при этом сохраняются, если вход жив).
 
 Установка (отдельный venv, не requirements.txt основного скрапера):
 
@@ -58,6 +62,7 @@ import argparse
 import copy
 import json
 import os
+import random
 import sys
 import time
 from dataclasses import dataclass
@@ -90,6 +95,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scraper.config import load_accounts  # noqa: E402
 from scraper.constants import BASE_DIR, PROXY_HOST, log  # noqa: E402
 from scraper import profile_gen  # noqa: E402
+import human_session as hs  # noqa: E402  (модуль 04)
 
 
 # ---------------------------------------------------------------- #
@@ -312,9 +318,10 @@ class AccountResult:
     name: str
     ok: bool
     detail: str
+    status: str = "ok"   # ok | needs_attention (модуль 04)
 
 
-def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResult:
+def process_account(pw, account: dict, cfg: dict, dry_run: bool, human_cfg: dict | None = None) -> AccountResult:
     name = account["name"]
     cookie_file = BASE_DIR / account["cookie_file"]
     proxy_port = account.get("proxy_port")
@@ -444,6 +451,21 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
                     "accounts.yaml=%r, фактический=%r", name, configured_ua, actual_ua,
                 )
 
+            # --- модуль 04: «живая» сессия (только чтение), если пора и это нужно ---
+            human_res = None
+            if human_cfg and human_cfg.get("enabled"):
+                if dry_run:
+                    ok_h, why_h = hs.should_run(name, human_cfg, storage_state_path,
+                                                only_reddit_cookies(context.storage_state().get("cookies", [])))
+                    log.info("[%s] dry-run: human-сессия %s (%s)", name, "была бы запущена" if ok_h else "пропущена", why_h)
+                else:
+                    human_res = hs.maintain(
+                        name, context, page, human_cfg, base_url=base_url, storage_state_path=storage_state_path,
+                        cookies=only_reddit_cookies(context.storage_state().get("cookies", [])), log=log,
+                    )
+                    if human_res.status == hs.SKIPPED:
+                        log.info("[%s] human-сессия пропущена: %s", name, human_res.detail)
+
             new_storage_state = context.storage_state()
             new_cookies = only_reddit_cookies(new_storage_state.get("cookies", []))
 
@@ -466,6 +488,8 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
                 except OSError:
                     pass
 
+            if human_res is not None and human_res.status == hs.NEEDS_ATTENTION:
+                return AccountResult(name, False, f"needs_attention: {human_res.detail}", status=hs.NEEDS_ATTENTION)
             return AccountResult(name, True, detail)
         finally:
             context.close()
@@ -516,6 +540,7 @@ def main() -> int:
     parser.add_argument("--headless", dest="headless", action="store_true", default=None)
     parser.add_argument("--no-headless", dest="headless", action="store_false")
     parser.add_argument("--dry-run", action="store_true", help="Ничего не записывать в cookies/storage_state.")
+    parser.add_argument("--no-human", action="store_true", help="Не запускать «живую» сессию (human.enabled=false на этот прогон).")
     parser.add_argument(
         "--config", default=None,
         help="Путь к refresh_cookies.yaml (по умолчанию: scripts/refresh_cookies.yaml, "
@@ -544,13 +569,26 @@ def main() -> int:
         " [DRY-RUN]" if args.dry_run else "",
     )
 
+    human_cfg = hs.load_human_cfg()
+    if args.no_human:
+        human_cfg["enabled"] = False
+    offsets: dict[str, float] = {}
+    if human_cfg["enabled"] and len(accounts) > 1 and cfg["stagger_seconds"] > 0:
+        # старты аккаунтов разнесены лог-нормальным jitter, порядок перемешан — не «все сразу и по номерам»
+        offsets = hs.plan_start_offsets([a["name"] for a in accounts], random.Random(),
+                                        mean_gap=float(cfg["stagger_seconds"]))
+        accounts.sort(key=lambda a: offsets[a["name"]])
+
     results: list[AccountResult] = []
+    t_start = time.monotonic()
     with sync_playwright() as pw:
         for i, account in enumerate(accounts):
-            if i > 0 and cfg["stagger_seconds"] > 0:
+            if offsets:
+                time.sleep(max(0.0, offsets[account["name"]] - (time.monotonic() - t_start)))
+            elif i > 0 and cfg["stagger_seconds"] > 0:
                 time.sleep(cfg["stagger_seconds"])
             try:
-                result = process_account(pw, account, cfg, args.dry_run)
+                result = process_account(pw, account, cfg, args.dry_run, human_cfg)
             except Exception as e:
                 log.exception("[%s] неожиданная ошибка обработки аккаунта", account["name"])
                 result = AccountResult(account["name"], False, f"необработанное исключение: {e}")
