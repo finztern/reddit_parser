@@ -1,5 +1,4 @@
 import asyncio
-import random
 import time
 
 import aiohttp
@@ -7,6 +6,7 @@ import aiohttp
 from . import identity
 from .config import ConfigStore, CookieFileWatcher
 from .constants import BASE_DIR, DEFAULT_CONNECT_TIMEOUT_SECONDS, PROXY_HOST, log
+from .fleet_polling import AUTH_FAILED
 from .geo import build_accept_language, pick_locale
 from .profile_gen import load_profile as load_device_profile, refresh_geo as refresh_profile_geo
 from .health import ExecutorHandle, ExecutorHealth
@@ -20,11 +20,9 @@ from .state import BackoffState, SeenCache
 # (гостевой слот ещё не харвестился) или он не читается.
 COOKIE_WAIT_SECONDS = 60
 
-# Кулдаун при пустом листинге (200 + пустой Listing на первой странице):
-# EMPTY_BASE * 2^(streak-1), не больше EMPTY_MAX. После EMPTY_SWAP_AFTER
+# Кулдаун при пустом листинге (200 + пустой Listing на первой странице) считает
+# AccountHealth.on_empty (fleet_polling.empty_cooldown_*). После EMPTY_SWAP_AFTER
 # пустых подряд пересоздаём curl-сессию (свежее соединение).
-EMPTY_BASE_COOLDOWN = 3.0
-EMPTY_MAX_COOLDOWN = 60.0
 EMPTY_SWAP_AFTER = 3
 
 # Пока идёт ротация (заявка pending/working) воркер не опрашивает Reddit
@@ -131,13 +129,14 @@ async def account_worker(
     backoff = BackoffState(
         base_seconds=config.get("base_backoff_seconds", 5),
         max_seconds=config.get("max_backoff_seconds", 300),
-        max_auth_errors=config.get("max_consecutive_auth_errors", 5),
+        max_auth_errors=scheduler.cfg().auth_failed_after,  # модуль 05: fleet_polling.auth_failed_after
     )
     auth_dead = False  # cookies отвергнуты — ждём обновления файла
     empty_streak = 0   # подряд пустых листингов (200, children=[]) на 1-й странице
     next_request_at = 0.0  # не просить ротацию раньше (wall clock)
 
     slot = scheduler.register(name)
+    health = slot.health  # состояние аккаунта (модуль 05): active/cooldown/degraded/auth_failed/...
     log.info("[%s] Старт (прокси %s, impersonate=%s, Accept-Language=%s) — жду слоты планировщика",
              name, proxy_url, impersonate, curl_session.accept_language)
 
@@ -149,7 +148,10 @@ async def account_worker(
                 outcome: PollOutcome | None = None
                 cooldown = 0.0
                 sent = 0
+                kind: str | None = None  # итог цикла для счётчиков планировщика
                 try:
+                    fp = scheduler.cfg()          # fleet_polling (читается на лету)
+                    now_m = scheduler.now()
                     # ---- ротация идентичности (демон на хосте) ----
                     rot = config.get("rotation", {}) or {}
                     fleet = config.get("fleet", {}) or {}
@@ -166,6 +168,7 @@ async def account_worker(
                             age = time.time() - float(req.get("ts") or 0)
                             if st in ("pending", "working") and age < float(rot.get("request_timeout_seconds", 1800)):
                                 cooldown = ROTATION_POLL_SECONDS
+                                kind = "skipped"
                                 continue  # ждём демона, Reddit не трогаем
                             identity.clear_request(name)
                             if st in ("done", "rejected"):
@@ -176,6 +179,7 @@ async def account_worker(
                                     backoff.register_success()
                                     auth_dead = False
                                     force_profile = True
+                                    health.reset(now_m, "rotation_done")
                                     log.info("[%s] ротация выполнена — возобновляю опрос с новой идентичностью", name)
                                 else:
                                     wait = max(0.0, retry_after - time.time())
@@ -190,7 +194,7 @@ async def account_worker(
                     max_pages = config.get("pagination_max_pages", 5)
                     pg_min = config.get("pagination_delay_min_seconds", 0.1)
                     pg_max = config.get("pagination_delay_max_seconds", 0.4)
-                    margin = config.get("ratelimit_safety_margin", 0.85)
+                    respect_rl = bool(config.get("respect_ratelimit_headers", True))
                     rl_max = config.get("ratelimit_max_interval_seconds", 900)
                     timeout = config.get("request_timeout_seconds", 10)
                     connect_timeout = config.get("connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS)
@@ -236,6 +240,7 @@ async def account_worker(
                             empty_streak = 0
                             backoff.register_success()
                             auth_dead = False
+                            health.reset(now_m, "profile_changed")
                         except Exception as e:
                             log.error("[%s] не смог применить impersonate=%s (версия curl_cffi в "
                                       "контейнере старее хоста?): %s", name, new_prof["impersonate"], e)
@@ -249,6 +254,8 @@ async def account_worker(
                         # чтобы старые значения не конфликтовали со свежими.
                         curl_session.swap()
                         log.info("[%s] cookies обновлены из %s (%d шт.)", name, cookie_file, len(new_cookies))
+                        if health.state == AUTH_FAILED:
+                            health.reset(now_m, "new_cookies")
                         if auth_dead or backoff.consecutive_auth_errors:
                             backoff.consecutive_auth_errors = 0
                             auth_dead = False
@@ -278,15 +285,19 @@ async def account_worker(
                     # ---- ошибки: бэкофф только у этого аккаунта (cooldown),
                     #      остальные продолжают получать слоты ----
                     if result.error_kind == "rate_or_server":
-                        cooldown = backoff.register_rate_or_server_error()
-                        if result.retry_after:
-                            cooldown = max(cooldown, result.retry_after)
-                        log.warning("[%s] %s — аккаунт отдыхает %.1fs (подряд: %d)",
-                                    name, result.status, cooldown, backoff.consecutive_errors)
+                        # аварийный тормоз: экспоненциальный cooldown аккаунта, остальные
+                        # подхватывают его долю (слоты парка глобальные)
+                        kind = "rate_or_server"
+                        cooldown = health.on_rate_limited(now_m, fp, result.retry_after)
+                        log.warning("[%s] %s — аккаунт в cooldown %.1fs (подряд: %d)",
+                                    name, result.status, cooldown, health.rate_streak)
                         continue
 
                     if result.error_kind == "auth":
-                        cooldown, should_stop = backoff.register_auth_error()
+                        kind = "auth"
+                        cooldown, _ = backoff.register_auth_error()
+                        # auth_failed после fleet_polling.auth_failed_after (по умолчанию 3) подряд 401/403
+                        should_stop = health.on_auth_error(now_m, fp, result.status) == AUTH_FAILED
                         if should_stop:
                             # Пауза с редкими пробами; новые cookies
                             # (hot-reload выше) сами возобновляют работу.
@@ -303,6 +314,7 @@ async def account_worker(
                                     and time.time() >= next_request_at):
                                 try:
                                     identity.write_request(name, "blocked_403", backoff.consecutive_auth_errors)
+                                    health.mark_blocked_node(now_m)  # до замены ноды не опрашиваем
                                     next_request_at = time.time() + float(rot.get("request_cooldown_seconds", 600))
                                     cooldown = ROTATION_POLL_SECONDS
                                     log.warning("[%s] 403 подряд %d раз — заявка демону на замену ноды "
@@ -312,23 +324,24 @@ async def account_worker(
                                     log.error("[%s] не смог записать заявку на замену ноды: %s", name, e)
                         else:
                             log.warning("[%s] %s — отдых %.1fs (auth-ошибок %d/%d)", name, result.status,
-                                        cooldown, backoff.consecutive_auth_errors, backoff.max_auth_errors)
+                                        cooldown, health.auth_streak, fp.auth_failed_after)
                         continue
 
                     if result.error_kind == "empty":
                         # 200 + пустой Listing на первой странице: мягкий
                         # троттлинг/пустой ответ edge. Это НЕ успех — аккаунт
                         # отдыхает с нарастающим кулдауном, чтобы не жечь слоты.
+                        kind = "empty"
                         empty_streak += 1
-                        cooldown = min(EMPTY_MAX_COOLDOWN,
-                                       EMPTY_BASE_COOLDOWN * (2 ** (empty_streak - 1)))
-                        cooldown *= random.uniform(0.8, 1.3)
-                        # если Reddit прислал X-Ratelimit-* — уважаем и его
-                        cooldown = max(cooldown, rl_cooldown(result.ratelimit, margin, rl_max))
+                        cooldown = health.on_empty(now_m, fp)  # degraded после degraded_after_empty подряд
+                        # если Reddit прислал аномальные X-Ratelimit-* — уважаем и их (аварийный тормоз)
+                        if respect_rl:
+                            cooldown = max(cooldown, health.on_emergency_ratelimit(
+                                now_m, fp, result.ratelimit, rl_max))
                         if empty_streak >= EMPTY_SWAP_AFTER:
                             curl_session.swap()  # свежее соединение/keep-alive
-                        log.warning("[%s] пустой листинг подряд %d — отдых %.1fs",
-                                    name, empty_streak, cooldown)
+                        log.warning("[%s] пустой листинг подряд %d — отдых %.1fs (состояние: %s)",
+                                    name, empty_streak, cooldown, health.state)
 
                         # Долго пусто -> просим демона сменить идентичность
                         # (нода + отпечаток + cookies). Сами ничего не меняем.
@@ -346,11 +359,15 @@ async def account_worker(
                         continue
 
                     if result.error_kind == "network":
+                        kind = "network"
+                        health.on_network_error(now_m)
                         cooldown = min(backoff.register_rate_or_server_error(), 30.0)
                         continue
 
                     # ---- успех ----
+                    kind = "ok"
                     backoff.register_success()
+                    health.on_ok(now_m, fp)
                     auth_dead = False
                     empty_streak = 0
                     comments = result.comments
@@ -379,7 +396,10 @@ async def account_worker(
                         page_len=stats["first_len"], dupes=stats["first_dupes"],
                         pages=result.pages_fetched, overlap_found=stats["overlap"],
                     )
-                    cooldown = rl_cooldown(result.ratelimit, margin, rl_max)
+                    # Лимиты — только аварийный тормоз: обычные X-Ratelimit-* темп не меняют
+                    # (темп парка диктует поток), реагируем лишь на почти исчерпанный остаток.
+                    cooldown = (health.on_emergency_ratelimit(now_m, fp, result.ratelimit, rl_max)
+                                if respect_rl else 0.0)
 
                     log.info(
                         "[%s] r/%s стр=%d получено=%d дубли_стр1=%d/%d в_буфер=%d "
@@ -389,7 +409,7 @@ async def account_worker(
                         dropped_dup, sender.backlog, stats["overlap"], cooldown,
                     )
                 finally:
-                    scheduler.release(slot, outcome, cooldown, sent)
+                    scheduler.release(slot, outcome, cooldown, sent, kind)
     finally:
         scheduler.unregister(slot)
 

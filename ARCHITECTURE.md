@@ -10,7 +10,7 @@
                     │ ConfigStore (hot-reload)                │
                     │ Sender       — буфер + отправка по /queue│
                     │ SeenCache    — дедуп                    │
-                    │ PollScheduler— слоты опроса по спросу   │
+                    │ PollScheduler— темп парка, round-robin  │
                     │ ExecutorHandle/Health — пул curl_cffi   │
                     │ aiohttp.ClientSession (store_items)     │
                     └───────────────┬────────────────────────┘
@@ -20,7 +20,7 @@
   (account_1)      (account_2)         (account_N)
   свой proxy_port, cookies, impersonate, BackoffState, CookieFileWatcher,
   SlotProfileWatcher
-        ▲ слот выдаёт PollScheduler (самому давно не опрашивавшемуся, по спросу Sender)
+        ▲ слот выдаёт PollScheduler (по кругу, самому давно не опрашивавшемуся; пауза 3–7 с на аккаунт; по спросу Sender)
         │
         └──► GET /r/all/comments.json ─► фильтр max_age ─► SeenCache
              ─► буфер Sender ─► POST /store_items (батч, самые свежие первыми, по /queue)
@@ -96,14 +96,14 @@ inflight_target` (реплики загружены), очередь всегд�
 4. `fetch_comments(..., stop_when=…)`: страницы листаются, пока не встретится
    уже виденный комментарий, страница не станет старше `max_age`, не кончится
    `after` или не будет достигнут лимит страниц.
-5. Ошибки: `rate_or_server` (429/5xx) → экспоненциальный кулдаун; `network`
+5. Ошибки: `rate_or_server` (429/5xx) → `cooldown` (`cooldown_base · 2^(n-1)`, `Retry-After` главнее); `network`
    → мягкий кулдаун ≤30 с; `auth` (401/403) → кулдаун, после
-   `max_consecutive_auth_errors` подряд — пауза с редкими пробами;
-   `empty` (пустой листинг) → растущий кулдаун, а при
+   `fleet_polling.auth_failed_after` подряд — `auth_failed`: вне карусели, редкие пробы;
+   `empty` (пустой листинг) → растущий кулдаун (`degraded` после `degraded_after_empty` подряд), а при
    `rotation.empty_streak_trigger` подряд — заявка на ротацию.
 6. Успех: `build_payload` → фильтр `max_age` → `SeenCache.try_claim` →
    `Sender.put_many` (буфер) → батч в `/store_items` по очереди bpipe → `confirm()`/`release()` (в Sender).
-7. `cooldown` аккаунта = `reset / (remaining * ratelimit_safety_margin)`.
+7. Лимиты `X-Ratelimit-*` — только аварийный тормоз: если `remaining` ≤ `fleet_polling.ratelimit_emergency_remaining`, аккаунт в `cooldown` до `reset`.
 
 `supervised()` перезапускает воркер при исключениях (экспоненциальная
 задержка до 60 с); штатный `return` не перезапускает.

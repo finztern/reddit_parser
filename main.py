@@ -37,6 +37,7 @@ from scraper.constants import (
     QUEUE_CONTROL_URL_OVERRIDE,
     log,
 )
+from scraper.identity import STATE_DIR
 from scraper.health import ExecutorHandle, ExecutorHealth, health_report_loop
 from scraper.scheduler import PollScheduler
 from scraper.sender import Sender
@@ -125,7 +126,10 @@ async def main():
                     name="health_report_loop",
                 ),
                 asyncio.create_task(scheduler.run(), name="poll_scheduler"),
-                asyncio.create_task(scheduler.stats_loop(log), name="stream_stats"),
+                asyncio.create_task(
+                    scheduler.stats_loop(log, snapshot_path=STATE_DIR / "fleet_polling.json"),
+                    name="stream_stats",
+                ),
             ]
 
             worker_tasks = []

@@ -47,7 +47,8 @@
 │   ├── http_client.py          # запросы к Reddit (curl_cffi) + пагинация
 │   ├── pipeline.py             # payload комментария + батч-отправка в /store_items
 │   ├── state.py                # SeenCache, BackoffState
-│   ├── scheduler.py            # PollScheduler: слоты опроса по спросу, самый давний аккаунт первым
+│   ├── scheduler.py            # PollScheduler: общий темп парка, round-robin, пауза 3–7 с на аккаунт
+│   ├── fleet_polling.py        # fleet_polling-конфиг и состояния аккаунта (active/cooldown/degraded/auth_failed/...)
 │   ├── sender.py               # Sender: буфер + отправка батчей по очереди bpipe, свежие первыми
 │   ├── health.py               # мониторинг/своп http_executor
 │   ├── identity.py             # state/: заявки на ротацию, активные профили слотов
@@ -192,9 +193,11 @@ venv/bin/python3 scripts/add_guest_slots.py --count 20 --apply    # + 20 нов�
 
 ### Что происходит, когда cookies протухли
 
-После `max_consecutive_auth_errors` подряд 401/403 воркер **не завершается**:
-он уходит в паузу, раз в `auth_dead_cooldown_seconds` пробует запрос, а когда
-refresh-джоб кладёт новый файл — подхватывает его и продолжает.
+После `fleet_polling.auth_failed_after` (по умолчанию 3) подряд 401/403 аккаунт
+получает состояние `auth_failed` и выходит из карусели опроса — остальные
+подхватывают его долю. Воркер **не завершается**: раз в `fleet_polling.recovery_probe_seconds`
+(120 с) он делает одну пробу, а когда refresh-джоб кладёт новый файл cookies —
+подхватывает его, и аккаунт возвращается в `active`.
 
 ### systemd
 
@@ -256,9 +259,9 @@ docker compose restart scraper
   батч, `buffer_target_factor`/`buffer_max_factor` — размер буфера.
   `target_rate_per_second` — fallback, если `/queue` недоступна.
 - `batch_max_items`, `seen_cache_size`.
-- `ratelimit_safety_margin`, `ratelimit_max_interval_seconds`.
-- `base_backoff_seconds`, `max_backoff_seconds`, `max_consecutive_auth_errors`,
-  `auth_dead_cooldown_seconds`.
+- `fleet_polling.*` — планировщик опроса парка (модуль 05, раздел ниже).
+- `respect_ratelimit_headers`, `ratelimit_max_interval_seconds` — аварийный тормоз по `X-Ratelimit-*`.
+- `base_backoff_seconds`, `max_backoff_seconds` (сеть), `auth_dead_cooldown_seconds`.
 - `cookie_reload_check_interval_seconds`.
 - `rotation.*` — ротация идентичностей (см. выше).
 
@@ -313,3 +316,41 @@ venv/bin/python3 scripts/check_nodes.py --account account_5
 - Конфиг — секция `human:` в `config.yaml` (`enabled`, `profile: calm|normal`, `max_session_seconds`, …);
   на один прогон выключается `refresh_cookies.py --no-human`.
 - Тесты: `tests/test_human_session.py` (без сети и браузера).
+
+## Модуль 05 — планировщик опроса парка
+
+Темп опроса диктует **поток**, а не аккаунты. Общий темп парка `T_fleet` (запросов/с)
+один: при `target_fleet_rate: auto` он подстраивается по перекрытию страниц
+(`overlap_target_low/high`, `stream_min/max_interval_seconds`), числом — задаётся жёстко.
+Запросы раздаются по кругу между здоровыми аккаунтами, поэтому средний интервал на аккаунт
+`interval_acc = N_здоровых / T_fleet` (±`jitter_ratio`). Например, N=64 и T_fleet=2 —
+каждый аккаунт делает запрос в среднем раз в ~32 с.
+
+**Нижняя граница паузы**: после каждого запроса аккаунт отдыхает не меньше случайных
+`pause_min_seconds..pause_max_seconds` (3–7 с). Если `interval_acc` меньше средней паузы,
+парк слишком мал для темпа: в логе и в `state/fleet_polling.json` (поле `warning`) появляется
+`not_enough_accounts` — «не хватает аккаунтов для целевой скорости».
+
+**Лимиты — только аварийный тормоз.** 429, `Retry-After` и почти исчерпанный
+`X-Ratelimit-Remaining` (≤ `ratelimit_emergency_remaining`) переводят аккаунт в `cooldown`:
+`cooldown_base_seconds · 2^(n-1)`, но не больше `cooldown_max_seconds`; `Retry-After` главнее.
+Обычные значения заголовков темп не меняют.
+
+Состояния аккаунта (`scraper/fleet_polling.py`):
+
+| Состояние | Когда | В карусели |
+|---|---|---|
+| `active` | норма | да |
+| `cooldown` | 429/5xx/Retry-After/аномальный лимит | нет, пока не истечёт пауза |
+| `degraded` | `degraded_after_empty` пустых листингов подряд | по своему растущему кулдауну; назад — после `degraded_recover_ok` успехов |
+| `auth_failed` | `auth_failed_after` подряд 401/403 | нет, одна проба раз в `recovery_probe_seconds` |
+| `blocked_node` | заявка на замену ноды (403 у логин-слота) | нет, проба в 4 раза чаще |
+| `disabled` | имя в `fleet_polling.disabled_accounts` | нет |
+
+`state/fleet_polling.json` (обновляется раз в 10 с, схема `schema: 1`) — срез для панели и метрик
+модуля 06: темп парка, `interval_per_account`, число аккаунтов по состояниям, `warning`, накопительные
+счётчики (`polls`, `ok`, `empty`, `rate_or_server`, `auth`, `network`, `unique`) и список аккаунтов.
+«Опрашивать реже» при `panic`/`slow` коллектора по-прежнему делает `queue_control`: пока буфер полон,
+слоты не выдаются, а распределение по аккаунтам сохраняется.
+
+Тесты — `tests/test_fleet_polling.py` (симулятор времени, заглушка Reddit, без сети).
