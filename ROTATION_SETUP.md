@@ -77,3 +77,33 @@ journalctl -u rotation-daemon -f
 venv/bin/python3 scripts/rotation_daemon.py --status
 docker compose up -d --build scraper
 ```
+
+
+## 7. Логин-only парк (модуль 01)
+
+Все слоты — логин-аккаунты; число слотов = число **годных** нод (Reddit отдаёт 200) минус запас
+(`fleet.reserve_nodes: 6`). Гостевой харвест и гостевая ротация выключены (`fleet.guest_enabled: false`),
+код остаётся.
+
+Миграция (из корня проекта, на сервере; каждый шаг сначала печатает план, запись — с `--apply`):
+
+```bash
+venv/bin/python3 scripts/filter_nodes.py --write              # годные ноды -> all_nodes.reddit_ok.txt, отчёт state/node_report.json
+venv/bin/python3 scripts/convert_to_login.py --all --apply    # гостевые слоты -> логин (enabled: false до входа); или --accounts 11-55
+venv/bin/python3 scripts/add_login_slots.py --apply           # добор слотов до (годные - запас); порты с 7946
+venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo
+sudo scripts/install_systemd.sh --enable                      # гостевой таймер отключается; включается filter-nodes.timer (раз в сутки)
+venv/bin/python3 scripts/manual_login.py --list               # колонка «вход»: нужен вход / нужна нода / проверить вход
+venv/bin/python3 scripts/manual_login.py account_N            # вход; после него слот сам получает enabled: true
+docker compose up -d --build scraper
+```
+
+Замена сгоревшей ноды (`fleet.node_replace_only: true`): воркер логин-слота после серии 403 (или пустых листингов)
+кладёт заявку, демон переводит слот в `needs_node`, берёт свободную годную ноду из запаса и переключает её в mihomo.
+Отпечаток (профиль), сессия и cookies **не меняются**, браузер не запускается; слот помечается «проверить вход»
+(флаг `state/check_login/account_N`, снимается после `manual_login.py` / успешного `refresh_cookies.py`).
+Если запаса нет, слот остаётся `needs_node`, демон повторяет попытку, когда `filter_nodes.py` пополнит пул.
+Состояние парка: `venv/bin/python3 scripts/rotation_daemon.py --status`.
+
+Откат: файлы `*.bak-login-*` / `*.bak-addlogin-*` (их оставляют скрипты) возвращаются на место, либо `git revert`;
+гостевой режим — `fleet.guest_enabled: true` и `sudo scripts/install_systemd.sh --with-guest --enable`.

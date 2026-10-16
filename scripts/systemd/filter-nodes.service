@@ -1,0 +1,29 @@
+# Шаблон юнита: перепроверка пула нод через Reddit (scripts/filter_nodes.py --write).
+# Годные ноды -> all_nodes.reddit_ok.txt (из него берут add_login_slots.py и демон ротации
+# при замене сгоревшей ноды логин-слота), отчёт -> state/node_report.json
+# (rotation_daemon.py --status). Запускается filter-nodes.timer раз в
+# fleet.node_check_interval_hours (config.yaml, по умолчанию 24 ч).
+#
+# НЕ копируй руками: @USER@, @GROUP@ и @ROOT@ подставляет установщик
+#     scripts/install_systemd.sh     (см. README, раздел "systemd")
+#
+# Браузер не нужен (проверка идёт через delay-API mihomo), поэтому ни xvfb, ни flock.
+# Нужен запущенный mihomo с загруженным пулом (generate_mihomo_config.py + restart).
+
+[Unit]
+Description=Reddit scraper - суточная перепроверка пула нод (годные для логин-слотов)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+Environment=PYTHONUNBUFFERED=1
+Nice=10
+ExecStart=@ROOT@/venv/bin/python3 scripts/filter_nodes.py --write
+TimeoutStartSec=1800
+
+[Install]
+WantedBy=multi-user.target

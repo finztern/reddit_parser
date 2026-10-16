@@ -61,7 +61,12 @@ async def main():
     config = ConfigStore(CONFIG_PATH, CONFIG_RELOAD_SECONDS)
     config.load_once()
 
-    accounts = [a for a in load_accounts() if a.get("enabled")]
+    all_accounts = load_accounts()
+    accounts = [a for a in all_accounts if a.get("enabled")]
+    waiting = [a["name"] for a in all_accounts if a.get("login") and not a.get("enabled")]
+    if waiting:
+        log.warning("Нужен вход (login: true, enabled: false — не запускаются, пока не войдёшь через "
+                    "scripts/manual_login.py): %d — %s", len(waiting), ", ".join(waiting))
     if not accounts:
         log.error("Нет ни одного enabled:true аккаунта в accounts.yaml — нечего запускать")
         return

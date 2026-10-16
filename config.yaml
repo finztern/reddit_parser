@@ -209,3 +209,18 @@ rotation:
   poll_seconds: 5
   reconcile_seconds: 30
   lock_timeout_seconds: 1500
+
+# --- парк логин-аккаунтов (модуль 01) ---
+fleet:
+  # годных нод (Reddit отдаёт 200), которые НЕ раздаются слотам — запас на замену сгоревших
+  reserve_nodes: 6
+  # меньше годных нод — предупреждение в отчёте filter_nodes.py и в rotation_daemon.py --status
+  min_good_nodes_warn: 10
+  # как часто filter_nodes.py перепроверяет пул (systemd-таймер filter-nodes.timer)
+  node_check_interval_hours: 24
+  # сгоревшая нода логин-слота: только ЗАМЕНА НОДЫ (профиль и сессия остаются)
+  node_replace_only: true
+  # гостевой харвест и ротация: код остаётся, но выключен
+  guest_enabled: false
+  # кандидатов на замену брать только из all_nodes.reddit_ok.txt (результат filter_nodes.py --write)
+  use_reddit_ok_file: true

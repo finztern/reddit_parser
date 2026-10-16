@@ -5,20 +5,58 @@ scripts/filter_nodes.py — какие ноды пула Reddit ещё пуск�
     venv/bin/python3 scripts/filter_nodes.py                 # отчёт по всему all_nodes.txt
     venv/bin/python3 scripts/filter_nodes.py --write         # + all_nodes.reddit_ok.txt (только годные)
 
+Раз в сутки запускается таймером filter-nodes.timer (fleet.node_check_interval_hours): годные ноды
+обновляют all_nodes.reddit_ok.txt — из него берут ноды add_login_slots.py и демон ротации (замена
+сгоревшей ноды логин-слота), — а отчёт пишется в state/node_report.json (виден в
+`rotation_daemon.py --status`). Пустой результат (mihomo лёг / Reddit не пускает никого) файл годных
+нод НЕ затирает.
+
 Проверка идёт через delay-API mihomo с expected=200 на https://www.reddit.com/ — через
 каждую ноду, без отдельных браузеров. Ноды должны быть загружены в mihomo
 (generate_mihomo_config.py + restart). Нода «жива, но Reddit отвечает 403» считается негодной.
 """
 import argparse
 import collections
+import json
+import os
 import sys
+import time
 from pathlib import Path
 
 SCRIPTS = Path(__file__).resolve().parent
 sys.path.insert(0, str(SCRIPTS))
 
 import add_guest_slots as ags  # noqa: E402
+import login_fleet as lf  # noqa: E402
 import rotation as rot  # noqa: E402
+
+
+def build_report(total: int, good: int, bad: int, absent: int, by_country: dict, fleet: dict) -> dict:
+    """Отчёт «в панель»: сколько нод годных, хватает ли на слоты с запасом."""
+    return {
+        "ts": time.time(),
+        "total": total, "good": good, "bad": bad, "absent": absent,
+        "by_country": by_country,                      # {cc: [годных, всего]}
+        "reserve_nodes": fleet["reserve_nodes"],
+        "slots_target": max(0, good - fleet["reserve_nodes"]),
+        "min_good_nodes_warn": fleet["min_good_nodes_warn"],
+        "warn": good < fleet["min_good_nodes_warn"],
+    }
+
+
+def write_report(path: Path, report: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(path.parent, 0o777)
+    except OSError:
+        pass
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+    tmp.write_text(json.dumps(report, ensure_ascii=False, indent=1), encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o666)
+    except OSError:
+        pass
+    os.replace(tmp, path)
 
 
 def main():
@@ -55,7 +93,19 @@ def main():
     if len(ok) == len(nodes) and nodes:
         print("\nВНИМАНИЕ: прошли ВСЕ ноды — возможно, твой mihomo не поддерживает параметр expected "
               "(нужен mihomo Meta); проверь вручную: curl -x http://127.0.0.1:ПОРТ https://www.reddit.com/")
+    fleet = lf.load_fleet_cfg(ags.CONFIG_PATH)
+    report = build_report(len(nodes), len(ok), len(bad), len(absent),
+                          {cc: [by.get(cc, 0), n] for cc, n in tot.items()}, fleet)
+    write_report(ags.ROOT / "state" / "node_report.json", report)
+    print(f"\nОтчёт: state/node_report.json — годных {report['good']}, слотов можно держать "
+          f"{report['slots_target']} (запас {report['reserve_nodes']})")
+    if report["warn"]:
+        print(f"ВНИМАНИЕ: годных нод {report['good']} < fleet.min_good_nodes_warn={report['min_good_nodes_warn']} — "
+              "пополни all_nodes.txt")
+
     if args.write:
+        if not ok:
+            sys.exit("Ни одной годной ноды — all_nodes.reddit_ok.txt НЕ перезаписываю (проверь mihomo/Reddit).")
         out = nf.with_name(nf.stem + ".reddit_ok.txt")
         out.write_text("\n".join(f.node.uri for f in ok) + "\n", encoding="utf-8")
         print(f"\nЗаписано {len(ok)} нод -> {out}")

@@ -137,7 +137,12 @@ async def account_worker(
                 try:
                     # ---- ротация идентичности (демон на хосте) ----
                     rot = config.get("rotation", {}) or {}
-                    rot_on = bool(rot.get("enabled", False)) and name in (rot.get("slots") or [])
+                    fleet = config.get("fleet", {}) or {}
+                    # логин-слот (login: true) при node_replace_only: сгоревшая нода -> заявка демону на
+                    # ЗАМЕНУ НОДЫ (профиль и сессия остаются). Гостевая ротация — только для rotation.slots.
+                    login_replace = bool(account.get("login")) and bool(fleet.get("node_replace_only", True))
+                    rot_on = bool(rot.get("enabled", False)) and (
+                        name in (rot.get("slots") or []) or login_replace)
                     force_profile = False
                     if rot_on:
                         req = identity.read_request(name)
@@ -261,6 +266,18 @@ async def account_worker(
                                     "жду обновления %s (проба раз в ~%.0fs)",
                                     name, result.status, backoff.consecutive_auth_errors, cookie_file, cooldown,
                                 )
+                            # логин-слот и 403 подряд: нода сгорела (401 — это сессия, ноде не поможет)
+                            if (login_replace and rot_on and result.status == 403
+                                    and time.time() >= next_request_at):
+                                try:
+                                    identity.write_request(name, "blocked_403", backoff.consecutive_auth_errors)
+                                    next_request_at = time.time() + float(rot.get("request_cooldown_seconds", 600))
+                                    cooldown = ROTATION_POLL_SECONDS
+                                    log.warning("[%s] 403 подряд %d раз — заявка демону на замену ноды "
+                                                "(state/requests), опрос на паузе",
+                                                name, backoff.consecutive_auth_errors)
+                                except OSError as e:
+                                    log.error("[%s] не смог записать заявку на замену ноды: %s", name, e)
                         else:
                             log.warning("[%s] %s — отдых %.1fs (auth-ошибок %d/%d)", name, result.status,
                                         cooldown, backoff.consecutive_auth_errors, backoff.max_auth_errors)

@@ -441,6 +441,14 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
                 atomic_write_json(cookie_file, playwright_to_cookie_editor(new_cookies))
                 log.info("[%s] cookies обновлены: %s (%d шт.), storage_state: %s",
                          name, cookie_file, len(new_cookies), storage_state_path)
+                try:   # сессия подтверждена — снять «проверить вход» (ставит демон после замены ноды)
+                    from scraper.identity import STATE_DIR
+                    flag = STATE_DIR / "check_login" / name
+                    if flag.exists():
+                        flag.unlink()
+                        log.info("[%s] флаг «проверить вход» снят — сессия жива", name)
+                except OSError:
+                    pass
 
             return AccountResult(name, True, detail)
         finally:
@@ -464,6 +472,13 @@ def select_accounts(cfg: dict, only: list[str] | None) -> list[dict]:
             log.warning("login_accounts: нет в accounts.yaml: %s", ", ".join(unknown))
         accounts = [by_name[n] for n in login_accounts if n in by_name]
         source = "login_accounts"
+        # слот ждёт первого входа (enabled: false, storage_state ещё нет) — логиниться нечем, не трогаем
+        ss_dir = BASE_DIR / (cfg.get("storage_state_dir") or "storage_state")
+        waiting = [a["name"] for a in accounts
+                   if a.get("login") and not a.get("enabled") and not (ss_dir / f"{a['name']}.json").exists()]
+        if waiting and not only:
+            log.info("ждут первого входа (manual_login.py), пропускаю: %d (%s...)", len(waiting), ", ".join(waiting[:5]))
+            accounts = [a for a in accounts if a["name"] not in waiting]
     else:
         accounts = [a for a in all_accounts if a.get("enabled")]
         source = "enabled: true в accounts.yaml"

@@ -64,8 +64,10 @@ from refresh_cookies import (  # noqa: E402
     cookie_editor_to_playwright,
     playwright_to_cookie_editor,
 )
-from scraper.config import load_accounts  # noqa: E402
+import login_fleet as lf  # noqa: E402
+from scraper.config import ACCOUNTS_PATH, load_accounts  # noqa: E402
 from scraper.constants import BASE_DIR, PROXY_HOST, log  # noqa: E402
+from scraper.identity import STATE_DIR  # noqa: E402
 
 GUEST_CFG_PATH = _SCRIPTS_DIR / "refresh_guest_cookies.yaml"
 LOGIN_CFG_PATH = _SCRIPTS_DIR / "refresh_cookies.yaml"
@@ -245,10 +247,20 @@ def main() -> int:
     guests = guest_cfg.get("guest_accounts") or {}
 
     if args.list:
-        print(f"{'аккаунт':<11} {'порт':<6} {'enabled':<8} {'тип':<6} impersonate")
+        # вход: «нужен вход» — слот выключен до первого входа; «нужна нода» — нода сгорела, замены нет;
+        # «проверить вход» — ноду заменили (IP сменился при той же сессии): зайди и убедись, что сессия жива
+        print(f"{'аккаунт':<11} {'порт':<6} {'enabled':<8} {'тип':<6} {'вход':<15} impersonate")
+        need = 0
         for n, a in accounts.items():
+            status = lf.login_status({**a, "login": a.get("login") or n not in guests},
+                                     lf.slot_flags(STATE_DIR, n))
+            if status in (lf.NEED_LOGIN, lf.NEED_NODE, lf.CHECK_LOGIN):
+                need += 1
             print(f"{n:<11} {a.get('proxy_port'):<6} {str(a.get('enabled')):<8} "
-                  f"{'guest' if n in guests else 'login':<6} {a.get('impersonate')}")
+                  f"{'guest' if n in guests else 'login':<6} {status if status != lf.LOGIN_OK else '':<15} "
+                  f"{a.get('impersonate')}")
+        if need:
+            print(f"\nТребуют внимания: {need} (нужен вход / нужна нода / проверить вход)")
         return 0
 
     if not args.account or args.account not in accounts:
@@ -427,7 +439,20 @@ def main() -> int:
     atomic_write_json(state_path, new_state)
     atomic_write_json(cookie_file, rows)
     print(f"[{name}] записано: {cookie_file} ({len(rows)} cookies), {state_path}")
-    if not acc.get("enabled"):
+    lf.clear_check_login(STATE_DIR, name)
+    if not acc.get("enabled") and acc.get("login") and name not in guests:
+        # логин-слот выключен «до первого входа» — вход подтверждён, включаем
+        try:
+            text = ACCOUNTS_PATH.read_text(encoding="utf-8")
+            with open(ACCOUNTS_PATH, "r+", encoding="utf-8") as f:   # тот же inode (файл смонтирован в контейнер)
+                f.seek(0)
+                f.write(lf.set_account_key(text, name, "enabled", "true"))
+                f.truncate()
+            print(f"[{name}] вход подтверждён — enabled: true записан в accounts.yaml. "
+                  "Применить: `docker compose restart scraper`.")
+        except OSError as e:
+            print(f"[!] {name}: не смог включить слот в accounts.yaml ({e}) — поставь enabled: true руками.")
+    elif not acc.get("enabled"):
         print(f"[!] {name}: enabled: false в accounts.yaml — включи и `docker compose restart scraper`.")
     else:
         print("Воркер подхватит cookies сам (hot-reload, до ~30с). Если он уже остановился из-за "
