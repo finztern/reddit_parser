@@ -164,6 +164,7 @@ Env: `CONFIG_PATH`, `ACCOUNTS_PATH`, `PROXY_HOST`, `STORE_ENDPOINT`,
   запись только при 200. Слоты в ротации пропускает, активный профиль после
   ротации перекрывает `accounts.yaml`.
 - **`manual_login.py`** — первичный логин через Xvfb + x11vnc + noVNC.
+- **`login_hub.py`** — хаб параллельного входа (модуль 02): по сессии на аккаунт (свой Xvfb/VNC/noVNC-порт `6001+`, браузер, нода), CIDR-фильтр + пароль VNC, очередь «нужен вход», статусы в `state/login_hub/status.json`.
 - Один браузер за раз: общий `flock` (`/tmp/reddit_scraper_browser.lock`).
 
 Прокси-порт у джобов и скрапера **один и тот же** (`proxy_port`).

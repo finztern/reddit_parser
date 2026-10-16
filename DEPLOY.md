@@ -201,6 +201,20 @@ venv/bin/python3 scripts/manual_login.py account_1      # нужны xvfb x11vnc
 `enabled: true` в `accounts.yaml`, пересобрать конфиг mihomo (п. 5) и
 `docker compose restart scraper`.
 
+Несколько аккаунтов сразу (модуль 02): `login_hub.py` поднимает по сессии на аккаунт —
+свой Xvfb/VNC/noVNC на портах `login_hub.port_base` + индекс (6001..6004), свой браузер и
+свою ноду. noVNC слушает только `login_hub.bind` и пускает только `login_hub.allowed_cidr`;
+пароль VNC генерируется и печатается при запуске.
+
+```bash
+venv/bin/python3 scripts/login_hub.py --list-queue                         # кто ждёт входа
+venv/bin/python3 scripts/login_hub.py --accounts account_11 account_12 account_13 account_14
+venv/bin/python3 scripts/login_hub.py --next 4 --queue                     # 4 из очереди + добор по мере освобождения
+```
+
+Статусы сессий (в т.ч. `waiting_user` — капча/письмо) — `state/login_hub/status.json`.
+Ctrl+C гасит все сессии без «осиротевших» Xvfb/x11vnc/websockify/chromium.
+
 ## Проверка после запуска
 
 ```bash

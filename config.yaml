@@ -224,3 +224,18 @@ fleet:
   guest_enabled: false
   # кандидатов на замену брать только из all_nodes.reddit_ok.txt (результат filter_nodes.py --write)
   use_reddit_ok_file: true
+
+# --- параллельный ручной вход (модуль 02, scripts/login_hub.py) ---
+login_hub:
+  # порты noVNC: port_base + индекс сессии (6001, 6002, ...)
+  port_base: 6001
+  # одновременных сессий входа; реальный лимит = min(max_parallel, свободная RAM // ram_per_session_mb)
+  max_parallel: 4
+  ram_per_session_mb: 700
+  # noVNC слушает ТОЛЬКО этот LAN-адрес сервера и пускает только клиентов из allowed_cidr
+  bind: "192.168.0.101"
+  allowed_cidr: "192.168.0.0/16"
+  # адрес в ссылках (null = bind)
+  public_host: null
+  # экран Xvfb, если в профиле аккаунта (модуль 03) нет разрешения
+  screen: [1400, 900]

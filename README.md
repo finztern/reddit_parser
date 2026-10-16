@@ -57,6 +57,7 @@
 │   ├── refresh_guest_cookies.py / .yaml    # гостевые слоты 11..25
 │   ├── rotation_daemon.py      # демон ротации идентичностей (хост)
 │   ├── manual_login.py         # первый ручной логин (Xvfb + noVNC)
+│   ├── login_hub.py            # параллельный ручной вход в N аккаунтов (порты 6001+)
 │   ├── generate_mihomo_config.py           # mihomo_config.yaml из vless_accounts.env
 │   ├── rotate_fingerprints.py  # смена impersonate+UA (правит accounts.yaml + guest yaml)
 │   ├── rotation.py             # библиотека: пул нод, mihomo API, precheck
