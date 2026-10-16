@@ -1,0 +1,214 @@
+# ============================================================
+#  Пресеты устройств для scraper/profile_gen.py (модуль 03).
+#
+#  Это ТАБЛИЦА, а не код: правишь веса/модели здесь, генератор не трогаешь.
+#  Профиль строится так: платформа -> семейство браузера -> impersonate-цель
+#  -> устройство/экран/GPU/ядра/ОЗУ из ОДНОГО пресета платформы, поэтому
+#  всё между собой согласовано (Windows-UA <-> Windows-GPU, мобильный UA <-> мобильный экран).
+#
+#  w — относительный вес (не проценты). Экзотики нет: только то, что реально массово встречается.
+#
+#  Факты, которые нельзя нарушать (их проверяет validate_profile):
+#    * navigator.deviceMemory есть только у Chromium и не бывает больше 8;
+#      у Firefox/Safari его нет вообще -> device_memory_gb = null.
+#    * sec-ch-ua* шлёт только Chromium (chrome/edge); Firefox и Safari — нет.
+#    * Chrome на Android с версии 110 отдаёт «урезанный» UA: "Android 10; K" без модели.
+# ============================================================
+version: 1
+
+# --- Распределение парка при генерации «с нуля» -----------------------------
+platform_weights: {windows: 58, macos: 20, android: 12, ios: 7, linux: 3}
+
+# семейство TLS-отпечатка (curl_cffi impersonate) внутри платформы
+browser_weights:
+  windows: {chrome: 75, firefox: 25}
+  macos:   {chrome: 45, safari: 45, firefox: 10}
+  linux:   {chrome: 60, firefox: 40}
+  android: {chrome: 100}
+  ios:     {safari: 100}
+
+# impersonate-цели curl_cffi по семействам; «новее» = тяжелее.
+# Если установленный curl_cffi чего-то не знает, цель отбрасывается
+# (profile_gen.available_targets()).
+targets:
+  chrome:
+    - {id: chrome150, wt: 14}
+    - {id: chrome146, wt: 10}
+    - {id: chrome145, wt: 12}
+    - {id: chrome142, wt: 10}
+    - {id: chrome136, wt: 9}
+    - {id: chrome133a, wt: 6}
+    - {id: chrome131, wt: 8}
+    - {id: chrome124, wt: 5}
+    - {id: chrome123, wt: 4}
+    - {id: chrome120, wt: 3}
+  firefox:
+    - {id: firefox147, wt: 10}
+    - {id: firefox144, wt: 8}
+    - {id: firefox135, wt: 4}
+    - {id: firefox133, wt: 3}
+  safari:
+    - {id: safari2601, wt: 8}
+    - {id: safari260, wt: 8}
+    - {id: safari184, wt: 6}
+    - {id: safari180, wt: 6}
+    - {id: safari170, wt: 3}
+  chrome_android:
+    - {id: chrome131_android, wt: 1}
+  safari_ios:
+    - {id: safari260_ios, wt: 8}
+    - {id: safari184_ios, wt: 6}
+    - {id: safari180_ios, wt: 5}
+
+# Версия iOS/Safari по impersonate-цели: (строка в UA «CPU iPhone OS ...», Version/...)
+ios_versions:
+  safari260_ios: ["18_6", "26.0"]
+  safari184_ios: ["18_4", "18.4"]
+  safari180_ios: ["18_0", "18.0"]
+  safari172_ios: ["17_2", "17.2"]
+
+# Версия Safari (desktop) по impersonate-цели
+safari_versions:
+  safari2601: "26.0.1"
+  safari260: "26.0"
+  safari184: "18.4"
+  safari180: "18.0"
+  safari170: "17.0"
+  safari172: "17.2"
+
+# Подстановка кэшируемых групп «ядра/ОЗУ» по классу железа (tier)
+tiers:
+  low:  {cores: [4, 4, 6],       ram: [4, 8, 8]}
+  mid:  {cores: [6, 8, 8, 12],   ram: [8, 16, 16]}
+  high: {cores: [8, 12, 16],     ram: [16, 32]}
+
+# Что показывает WebGL (UNMASKED_VENDOR/RENDERER) по платформе и семейству браузера.
+# Плейсхолдеры: {vendor_name} {name} {chip}
+webgl:
+  windows:
+    chrome:  {vendor: "Google Inc. ({vendor_name})", renderer: "ANGLE ({vendor_name}, {name} Direct3D11 vs_5_0 ps_5_0, D3D11)"}
+    firefox: {vendor: "Google Inc. ({vendor_name})", renderer: "ANGLE ({vendor_name}, {name} Direct3D11 vs_5_0 ps_5_0, D3D11)"}
+  macos:
+    chrome:  {vendor: "Google Inc. (Apple)", renderer: "ANGLE (Apple, ANGLE Metal Renderer: {chip}, Unspecified Version)"}
+    firefox: {vendor: "Apple", renderer: "{chip}"}
+    safari:  {vendor: "Apple Inc.", renderer: "Apple GPU"}
+  linux:
+    chrome:  {vendor: "Google Inc. ({vendor_name})", renderer: "ANGLE ({vendor_name}, {name}, OpenGL 4.6)"}
+    firefox: {vendor: "{vendor_name}", renderer: "{name}"}
+  android:
+    chrome:  {vendor: "{vendor_name}", renderer: "{name}"}
+  ios:
+    safari:  {vendor: "Apple Inc.", renderer: "Apple GPU"}
+
+# --- Платформы ---------------------------------------------------------------
+platforms:
+
+  windows:
+    ua_token: "Windows NT 10.0; Win64; x64"          # Windows 10 и 11 в UA неотличимы
+    navigator_platform: "Win32"
+    sec_ch_platform: "Windows"
+    fonts_preset: "win-default"
+    ui_height: 125            # taskbar + панель браузера: viewport.h = screen.h - ui_height
+    color_depth: 24
+    screens:
+      - {w: 1920, h: 1080, dpr: 1,    wt: 38}
+      - {w: 1536, h: 864,  dpr: 1.25, wt: 18}    # 1920x1080 при масштабе 125%
+      - {w: 1366, h: 768,  dpr: 1,    wt: 16}
+      - {w: 1440, h: 900,  dpr: 1,    wt: 6}
+      - {w: 2560, h: 1440, dpr: 1,    wt: 10}
+      - {w: 1600, h: 900,  dpr: 1,    wt: 6}
+      - {w: 1920, h: 1200, dpr: 1,    wt: 3}
+      - {w: 1280, h: 720,  dpr: 1.5,  wt: 3}     # 1920x1080 при масштабе 150%
+    gpus:
+      - {vendor_name: "NVIDIA", name: "NVIDIA GeForce GTX 1650 (0x00001F82)",       tier: low, wt: 8}
+      - {vendor_name: "NVIDIA", name: "NVIDIA GeForce GTX 1660 SUPER (0x000021C4)", tier: mid, wt: 8}
+      - {vendor_name: "NVIDIA", name: "NVIDIA GeForce RTX 2060 (0x00001F08)",       tier: mid, wt: 6}
+      - {vendor_name: "NVIDIA", name: "NVIDIA GeForce RTX 3060 (0x00002503)",       tier: mid, wt: 10}
+      - {vendor_name: "NVIDIA", name: "NVIDIA GeForce RTX 4060 (0x00002882)",       tier: high, wt: 6}
+      - {vendor_name: "Intel",  name: "Intel(R) UHD Graphics 620 (0x00005917)",     tier: low, wt: 12}
+      - {vendor_name: "Intel",  name: "Intel(R) UHD Graphics 630 (0x00003E92)",     tier: low, wt: 12}
+      - {vendor_name: "Intel",  name: "Intel(R) Iris(R) Xe Graphics (0x00009A49)",  tier: mid, wt: 14}
+      - {vendor_name: "AMD",    name: "AMD Radeon RX 580 Series (0x000067DF)",      tier: mid, wt: 4}
+      - {vendor_name: "AMD",    name: "AMD Radeon RX 6600 (0x000073FF)",            tier: mid, wt: 4}
+      - {vendor_name: "AMD",    name: "AMD Radeon(TM) Graphics (0x00001638)",       tier: low, wt: 6}
+
+  macos:
+    ua_token: "Macintosh; Intel Mac OS X 10_15_7"      # так отдают и Apple Silicon (Chrome/Safari заморожены)
+    ua_token_firefox: "Macintosh; Intel Mac OS X 10.15"
+    navigator_platform: "MacIntel"
+    sec_ch_platform: "macOS"
+    fonts_preset: "mac-default"
+    ui_height: 120
+    color_depth: 30
+    screens:
+      - {w: 1440, h: 900,  dpr: 2, wt: 26}       # MacBook Air 13"
+      - {w: 1470, h: 956,  dpr: 2, wt: 18}
+      - {w: 1512, h: 982,  dpr: 2, wt: 22}       # MacBook Pro 14"
+      - {w: 1728, h: 1117, dpr: 2, wt: 12}       # MacBook Pro 16"
+      - {w: 1920, h: 1080, dpr: 2, wt: 12}       # внешний 4K с масштабом
+      - {w: 2560, h: 1440, dpr: 2, wt: 10}
+    gpus:
+      - {chip: "Apple M1",     tier: mid,  cores: 8,  ram: [8, 16], wt: 30}
+      - {chip: "Apple M1 Pro", tier: high, cores: 10, ram: [16, 32], wt: 8}
+      - {chip: "Apple M2",     tier: mid,  cores: 8,  ram: [8, 16], wt: 24}
+      - {chip: "Apple M3",     tier: mid,  cores: 8,  ram: [8, 16], wt: 22}
+      - {chip: "Apple M3 Pro", tier: high, cores: 12, ram: [18, 36], wt: 6}
+
+  linux:                      # доля мала; нужен в основном для миграции account_1..10
+    ua_token: "X11; Linux x86_64"
+    navigator_platform: "Linux x86_64"
+    sec_ch_platform: "Linux"
+    fonts_preset: "linux-default"
+    ui_height: 110
+    color_depth: 24
+    screens:
+      - {w: 1920, h: 1080, dpr: 1, wt: 50}
+      - {w: 2560, h: 1440, dpr: 1, wt: 14}
+      - {w: 1366, h: 768,  dpr: 1, wt: 14}
+      - {w: 1600, h: 900,  dpr: 1, wt: 10}
+      - {w: 1920, h: 1200, dpr: 1, wt: 6}
+    gpus:
+      - {vendor_name: "Intel",           name: "Mesa Intel(R) UHD Graphics 630 (CFL GT2)", tier: low, wt: 14}
+      - {vendor_name: "Intel",           name: "Mesa Intel(R) Xe Graphics (TGL GT2)",      tier: mid, wt: 10}
+      - {vendor_name: "NVIDIA Corporation", name: "NVIDIA GeForce GTX 1660/PCIe/SSE2",     tier: mid, wt: 8}
+      - {vendor_name: "NVIDIA Corporation", name: "NVIDIA GeForce RTX 3060/PCIe/SSE2",     tier: mid, wt: 8}
+      - {vendor_name: "AMD",             name: "AMD Radeon RX 580 Series (polaris10, LLVM 15.0.7, DRM 3.49)", tier: mid, wt: 4}
+
+  android:
+    ua_token: "Linux; Android 10; K"                   # урезанный UA Chrome >= 110 (модель не светится)
+    navigator_platform: "Linux armv81"
+    sec_ch_platform: "Android"
+    fonts_preset: "android-default"
+    ui_height: 76
+    color_depth: 24
+    mobile: true
+    # устройство целиком: экран, GPU, ядра, ОЗУ едут вместе
+    devices:
+      - {model: "Pixel 7",       android: 14, w: 412, h: 915, dpr: 2.625, vendor_name: "ARM",      name: "Mali-G710",     cores: 8, ram: 8,  wt: 22}
+      - {model: "Pixel 6",       android: 13, w: 412, h: 915, dpr: 2.625, vendor_name: "ARM",      name: "Mali-G78",      cores: 8, ram: 8,  wt: 14}
+      - {model: "Pixel 5",       android: 13, w: 393, h: 851, dpr: 2.75,  vendor_name: "Qualcomm", name: "Adreno (TM) 620", cores: 8, ram: 8, wt: 8}
+      - {model: "SM-S918B",      android: 14, w: 360, h: 780, dpr: 3,     vendor_name: "Qualcomm", name: "Adreno (TM) 740", cores: 8, ram: 8, wt: 18}
+      - {model: "SM-G991B",      android: 13, w: 360, h: 800, dpr: 3,     vendor_name: "ARM",      name: "Mali-G78",      cores: 8, ram: 8,  wt: 14}
+      - {model: "SM-A546B",      android: 14, w: 360, h: 800, dpr: 3,     vendor_name: "ARM",      name: "Mali-G68",      cores: 8, ram: 6,  wt: 16}
+      - {model: "SM-A336B",      android: 13, w: 360, h: 800, dpr: 3,     vendor_name: "ARM",      name: "Mali-G68",      cores: 8, ram: 4,  wt: 8}
+
+  ios:
+    ua_token: "iPhone"
+    navigator_platform: "iPhone"
+    sec_ch_platform: null
+    fonts_preset: "ios-default"
+    ui_height: 150
+    color_depth: 24
+    mobile: true
+    devices:
+      - {model: "iPhone 15",         w: 393, h: 852, dpr: 3, cores: 6, wt: 22}
+      - {model: "iPhone 14",         w: 390, h: 844, dpr: 3, cores: 6, wt: 24}
+      - {model: "iPhone 13",         w: 390, h: 844, dpr: 3, cores: 6, wt: 22}
+      - {model: "iPhone 14 Pro Max", w: 430, h: 932, dpr: 3, cores: 6, wt: 12}
+      - {model: "iPhone 15 Pro",     w: 393, h: 852, dpr: 3, cores: 6, wt: 12}
+      - {model: "iPhone SE",         w: 375, h: 667, dpr: 2, cores: 6, wt: 8}
+
+# Ближайший пресет Playwright для мобильных (нужен только для isMobile/hasTouch в login_hub)
+playwright_devices:
+  android: "Pixel 7"
+  ios: "iPhone 14"

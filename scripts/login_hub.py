@@ -498,7 +498,8 @@ def resolve_profile(name: str, acc: dict, guests: dict, login_cfg: dict, guest_c
         "timezone_id": geo["timezone_id"],
         "screen": {"w": default_screen[0], "h": default_screen[1]},
         "device_pixel_ratio": None, "hardware_concurrency": None, "device_memory_gb": None,
-        "webgl_vendor": None, "webgl_renderer": None,
+        "webgl_vendor": None, "webgl_renderer": None, "languages": None, "accept_language": None,
+        "mobile": False, "viewport": None,
         "source": "accounts.yaml",
     }
     try:
@@ -508,9 +509,11 @@ def resolve_profile(name: str, acc: dict, guests: dict, login_cfg: dict, guest_c
     if isinstance(pf, dict):
         for k in ("engine", "channel", "user_agent", "impersonate", "locale", "timezone_id",
                   "device_pixel_ratio", "hardware_concurrency", "device_memory_gb",
-                  "webgl_vendor", "webgl_renderer"):
+                  "webgl_vendor", "webgl_renderer", "languages", "accept_language", "mobile", "viewport"):
             if pf.get(k) is not None:
                 prof[k] = pf[k]
+        if "device" in pf:                      # None у десктопа: не подставлять мобильный пресет
+            prof["device"] = pf["device"]
         scr = pf.get("screen")
         if isinstance(scr, dict) and scr.get("w") and scr.get("h"):
             prof["screen"] = {"w": scr["w"], "h": scr["h"]}
@@ -533,6 +536,8 @@ def hardware_init_script(prof: dict) -> str | None:
             "const g = C.prototype.getParameter;"
             f"C.prototype.getParameter = function(p) {{ if (p === 37445) return {v}; if (p === 37446) return {r}; "
             "return g.call(this, p); }; }")
+    if prof.get("languages"):
+        parts.append(f"Object.defineProperty(navigator,'languages',{{get:()=>Object.freeze({json.dumps(prof['languages'])})}});")
     return "\n".join(parts) or None
 
 
@@ -700,6 +705,15 @@ class LoginSession:
             else:
                 ctx_kwargs["no_viewport"] = True
             ctx_kwargs["user_agent"] = prof["user_agent"]
+            if prof["source"].startswith("state/profiles"):
+                # профиль устройства (модуль 03): мобильные размеры/DPR и Accept-Language как у скрапера
+                vp = prof.get("viewport")
+                if prof["device"] and vp and prof.get("device_pixel_ratio"):
+                    ctx_kwargs.update(viewport={"width": vp["w"], "height": vp["h"]},
+                                      screen={"width": screen["w"], "height": screen["h"]},
+                                      device_scale_factor=float(prof["device_pixel_ratio"]))
+                if prof.get("accept_language"):
+                    ctx_kwargs["extra_http_headers"] = {"Accept-Language": prof["accept_language"]}
 
             # DISPLAY — только в env ЭТОГО браузера (os.environ общий для всех потоков хаба)
             launch_kwargs: dict = {"headless": False, "env": {**os.environ, "DISPLAY": self.desktop.display}}

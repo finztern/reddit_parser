@@ -8,6 +8,7 @@ from . import identity
 from .config import ConfigStore, CookieFileWatcher
 from .constants import BASE_DIR, DEFAULT_CONNECT_TIMEOUT_SECONDS, PROXY_HOST, log
 from .geo import build_accept_language, pick_locale
+from .profile_gen import load_profile as load_device_profile, refresh_geo as refresh_profile_geo
 from .health import ExecutorHandle, ExecutorHealth
 from .http_client import CurlSessionHandle, fetch_comments
 from .pipeline import build_payload
@@ -97,13 +98,26 @@ async def account_worker(
         log.info("[%s] профиль из state/slots: impersonate=%s нода=%s (перекрывает accounts.yaml)",
                  name, impersonate, prof.get("node"))
 
+    # Постоянный профиль устройства (модуль 03, state/profiles/account_N.json) главнее и
+    # accounts.yaml, и слота: отпечаток аккаунта не меняется, меняется только гео (смена ноды).
+    ident = load_device_profile(name)
+    known_node = (prof or {}).get("node")
+    if ident:
+        impersonate = ident["impersonate"]
+        user_agent = ident["user_agent"]
+        log.info("[%s] профиль устройства: %s %s locale=%s tz=%s", name, ident["os"], impersonate,
+                 ident["locale"], ident["timezone_id"])
+    else:
+        log.warning("[%s] нет state/profiles/%s.json — беру отпечаток из accounts.yaml "
+                    "(создай: scripts/profile.py --migrate / --create)", name, name)
+
     # NB: реальные запросы к Reddit идут через curl_cffi с impersonate (он
     # сам ставит UA/заголовки, соответствующие TLS-отпечатку). Эти headers
     # живут только в aiohttp-сессии (хранилище cookie_jar).
     # Локаль = гео ноды слота: профиль после ротации (state/slots) ->
     # accounts.yaml:locale -> en-US. Из неё строится Accept-Language для
     # curl-запросов (формат зависит от семейства браузера по impersonate).
-    locale = pick_locale(prof, account)
+    locale = ident["locale"] if ident else pick_locale(prof, account)
     headers = {
         "User-Agent": user_agent,
         "Accept": "application/json, text/plain, */*",
@@ -113,6 +127,7 @@ async def account_worker(
         impersonate=impersonate, proxies={"http": proxy_url, "https": proxy_url},
         locale=locale,
     )
+    curl_session.set_profile_headers(ident)
     backoff = BackoffState(
         base_seconds=config.get("base_backoff_seconds", 5),
         max_seconds=config.get("max_backoff_seconds", 300),
@@ -187,6 +202,23 @@ async def account_worker(
                     # state/slots/* ДО замены cookies-файла.
                     new_prof = profile_watcher.load_if_changed(force=force_profile)
                     profile_changed = False
+                    if ident is not None and new_prof is not None:
+                        # Профиль устройства постоянен: слот-профиль лишь сообщает о смене ноды ->
+                        # перепроверяем ГЕО (locale/timezone/язык), отпечаток не трогаем.
+                        if new_prof.get("node") != known_node:
+                            known_node = new_prof.get("node")
+                            try:
+                                upd = await asyncio.to_thread(refresh_profile_geo, name, proxy_url)
+                            except Exception as e:
+                                log.warning("[%s] гео после смены ноды не определено: %s", name, e)
+                                upd = None
+                            if upd is not None:
+                                ident = upd
+                                if ident["locale"] != locale:
+                                    log.info("[%s] локаль %s -> %s (новый выходной IP)", name, locale, ident["locale"])
+                                    locale = ident["locale"]
+                                    curl_session.set_locale(locale)
+                        new_prof = None
                     if new_prof is not None:
                         # гео ноды могло смениться вместе с профилем
                         new_locale = pick_locale(new_prof, account)

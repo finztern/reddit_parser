@@ -68,6 +68,7 @@ import login_fleet as lf  # noqa: E402
 from scraper.config import ACCOUNTS_PATH, load_accounts  # noqa: E402
 from scraper.constants import BASE_DIR, PROXY_HOST, log  # noqa: E402
 from scraper.identity import STATE_DIR  # noqa: E402
+from scraper import profile_gen  # noqa: E402
 
 GUEST_CFG_PATH = _SCRIPTS_DIR / "refresh_guest_cookies.yaml"
 LOGIN_CFG_PATH = _SCRIPTS_DIR / "refresh_cookies.yaml"
@@ -282,6 +283,13 @@ def main() -> int:
     channel = g["channel"] if "channel" in g else prof["channel"]
     device = g.get("device") or prof["device"]
     geo = resolve_geo(name, guest_cfg, login_cfg)
+    ident = profile_gen.load_profile(name)       # постоянный профиль устройства (модуль 03)
+    if ident:
+        engine, channel, device = ident["engine"], ident.get("channel"), None
+        user_agent, geo = ident["user_agent"], {"locale": ident["locale"], "timezone_id": ident["timezone_id"]}
+    else:
+        print(f"[{name}] ВНИМАНИЕ: нет state/profiles/{name}.json — отпечаток из accounts.yaml "
+              f"(scripts/profile.py --migrate)")
     base_url = login_cfg.get("reddit_base_url") or guest_cfg.get("reddit_base_url") or "https://www.reddit.com"
 
     proxy_url = f"http://{PROXY_HOST}:{port}"
@@ -334,6 +342,10 @@ def main() -> int:
             else:
                 ctx_kwargs["no_viewport"] = True
             ctx_kwargs["user_agent"] = user_agent
+            if ident:
+                ctx_kwargs = profile_gen.playwright_context_kwargs(ident)
+                ctx_kwargs.pop("locale"); ctx_kwargs.pop("timezone_id")
+                ctx_kwargs.pop("viewport"); ctx_kwargs["no_viewport"] = True   # окно = экран VNC
 
             launch_kwargs: dict = {"headless": False}
             if channel:
@@ -354,6 +366,8 @@ def main() -> int:
                     storage_state=storage_state, proxy={"server": proxy_url},
                     locale=geo["locale"], timezone_id=geo["timezone_id"], **ctx_kwargs,
                 )
+                if ident and profile_gen.init_script(ident):
+                    context.add_init_script(profile_gen.init_script(ident))
                 page = context.new_page()
                 try:
                     page.goto(base_url.rstrip("/") + "/login", timeout=45000, wait_until="domcontentloaded")

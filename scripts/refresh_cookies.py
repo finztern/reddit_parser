@@ -89,6 +89,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from scraper.config import load_accounts  # noqa: E402
 from scraper.constants import BASE_DIR, PROXY_HOST, log  # noqa: E402
+from scraper import profile_gen  # noqa: E402
 
 
 # ---------------------------------------------------------------- #
@@ -324,7 +325,13 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
         return AccountResult(name, False, "нет proxy_port в accounts.yaml")
     proxy_url = f"http://{PROXY_HOST}:{proxy_port}"
 
+    # Постоянный профиль устройства (модуль 03) главнее accounts.yaml / refresh_cookies.yaml
+    ident = profile_gen.load_profile(name)
+    if ident:
+        configured_ua = ident["user_agent"]
     profile = {**infer_profile(account.get("impersonate")), **(cfg.get("account_profiles", {}).get(name) or {})}
+    if ident:
+        profile.update(engine=ident["engine"], channel=ident.get("channel"), device=None)
     engine = profile.get("engine") or "chromium"
     channel = profile.get("channel")
     device_name = profile.get("device")
@@ -368,6 +375,11 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
         context_kwargs["viewport"] = geo.get("viewport") or cfg["geo_defaults"]["viewport"]
     if configured_ua:
         context_kwargs["user_agent"] = configured_ua
+    if ident:
+        # viewport/screen/locale/timezone/user_agent/Accept-Language — из профиля
+        context_kwargs = profile_gen.playwright_context_kwargs(ident)
+        geo = {"locale": ident["locale"], "timezone_id": ident["timezone_id"]}
+        context_kwargs.pop("locale"); context_kwargs.pop("timezone_id")
 
     launch_kwargs: dict = {"headless": cfg["headless"]}
     if channel:
@@ -392,6 +404,10 @@ def process_account(pw, account: dict, cfg: dict, dry_run: bool) -> AccountResul
             **context_kwargs,
         )
         try:
+            if ident:
+                init = profile_gen.init_script(ident)
+                if init:
+                    context.add_init_script(init)
             page = context.new_page()
             _apply_stealth(page, engine)
 
