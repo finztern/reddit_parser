@@ -248,11 +248,12 @@ def test_curl_session_handle_updates_headers_swaps_and_preserves_on_invalid_targ
     created = []
 
     class Session:
-        def __init__(self, *, impersonate, proxies):
+        def __init__(self, *, impersonate, proxies, use_thread_local_curl):
             if impersonate == "unsupported":
                 raise ValueError("unsupported")
             self.impersonate = impersonate
             self.proxies = proxies
+            self.use_thread_local_curl = use_thread_local_curl
             created.append(self)
 
     monkeypatch.setattr(http_client.cffi_requests, "Session", Session)
@@ -269,6 +270,7 @@ def test_curl_session_handle_updates_headers_swaps_and_preserves_on_invalid_targ
     assert handle.current is created[-1]
     assert handle.current is not initial
     assert handle.current.impersonate == "firefox147"
+    assert all(not session.use_thread_local_curl for session in created)
     assert handle.swaps == 1
 
     active = handle.current
@@ -285,8 +287,9 @@ def test_curl_session_handle_closes_replaced_sessions_after_requests_finish(monk
     created = []
 
     class Session:
-        def __init__(self, *, impersonate, proxies):
+        def __init__(self, *, impersonate, proxies, use_thread_local_curl):
             self.closed = False
+            self.use_thread_local_curl = use_thread_local_curl
             created.append(self)
 
         def close(self):
@@ -294,9 +297,11 @@ def test_curl_session_handle_closes_replaced_sessions_after_requests_finish(monk
 
     monkeypatch.setattr(http_client.cffi_requests, "Session", Session)
     handle = CurlSessionHandle("chrome131", {"http": "http://proxy"})
+    assert not handle.current.use_thread_local_curl
     in_flight = handle.acquire()
 
     handle.swap()
+    assert all(not session.use_thread_local_curl for session in created)
     assert not in_flight.closed
     handle.release(in_flight)
     assert in_flight.closed

@@ -108,7 +108,11 @@ class CurlSessionHandle:
         self.accept_language = build_accept_language(locale, self._impersonate)
 
     def _build(self) -> cffi_requests.Session:
-        return cffi_requests.Session(impersonate=self._impersonate, proxies=self._proxies)
+        return cffi_requests.Session(
+            impersonate=self._impersonate,
+            proxies=self._proxies,
+            use_thread_local_curl=False,
+        )
 
     def acquire(self):
         """Pin the current session until its executor-thread request finishes."""
@@ -183,7 +187,11 @@ class CurlSessionHandle:
         """Смена TLS-отпечатка на лету (ротация идентичности). Новая
         сессия строится ДО подмены: если таргета нет в установленном
         curl_cffi, исключение вылетает, а старая сессия остаётся рабочей."""
-        new = cffi_requests.Session(impersonate=impersonate, proxies=self._proxies)
+        new = cffi_requests.Session(
+            impersonate=impersonate,
+            proxies=self._proxies,
+            use_thread_local_curl=False,
+        )
         self._impersonate = impersonate
         # формат Accept-Language зависит от семейства браузера
         self.accept_language = build_accept_language(self._locale, impersonate)
