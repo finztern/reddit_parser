@@ -425,6 +425,7 @@ async def account_worker(
                         )
                     scheduler.release(slot, outcome, cooldown, sent, kind)
     finally:
+        curl_session.close()
         scheduler.unregister(slot)
 
 

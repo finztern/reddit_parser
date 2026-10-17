@@ -48,6 +48,12 @@ class CurlHandle:
         self.current = Curl(response)
         self.swaps = 0
 
+    def acquire(self):
+        return self.current
+
+    def release(self, _session):
+        return None
+
     def request_headers(self):
         return {"Accept-Language": "en-US"}
 
@@ -273,6 +279,33 @@ def test_curl_session_handle_updates_headers_swaps_and_preserves_on_invalid_targ
     handle.swap()
     assert handle.current is created[-1]
     assert handle.swaps == 2
+
+
+def test_curl_session_handle_closes_replaced_sessions_after_requests_finish(monkeypatch):
+    created = []
+
+    class Session:
+        def __init__(self, *, impersonate, proxies):
+            self.closed = False
+            created.append(self)
+
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(http_client.cffi_requests, "Session", Session)
+    handle = CurlSessionHandle("chrome131", {"http": "http://proxy"})
+    in_flight = handle.acquire()
+
+    handle.swap()
+    assert not in_flight.closed
+    handle.release(in_flight)
+    assert in_flight.closed
+
+    replaced = handle.current
+    handle.swap()
+    assert replaced.closed
+    handle.close()
+    assert handle.current.closed
 
 
 @pytest.mark.parametrize("children,after,expected_kind,expected_after", [

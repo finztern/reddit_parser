@@ -3,6 +3,7 @@ import functools
 import json
 import logging
 import random
+import threading
 import time
 from curl_cffi import requests as cffi_requests
 
@@ -84,6 +85,10 @@ class CurlSessionHandle:
         self.extra_headers: dict[str, str] = {}
         self.current = self._build()
         self.swaps = 0
+        self._lock = threading.Lock()
+        self._in_flight: dict[int, int] = {}
+        self._retired: dict[int, cffi_requests.Session] = {}
+        self._closed = False
 
     def set_profile_headers(self, profile: dict | None):
         """UA и sec-ch-ua* из профиля устройства — те же значения видит браузер."""
@@ -105,9 +110,74 @@ class CurlSessionHandle:
     def _build(self) -> cffi_requests.Session:
         return cffi_requests.Session(impersonate=self._impersonate, proxies=self._proxies)
 
+    def acquire(self):
+        """Pin the current session until its executor-thread request finishes."""
+        with self._lock:
+            if self._closed:
+                raise RuntimeError("curl session handle is closed")
+            session = self.current
+            key = id(session)
+            self._in_flight[key] = self._in_flight.get(key, 0) + 1
+            return session
+
+    def release(self, session) -> None:
+        close_session = None
+        key = id(session)
+        with self._lock:
+            remaining = self._in_flight.get(key, 0) - 1
+            if remaining > 0:
+                self._in_flight[key] = remaining
+            else:
+                self._in_flight.pop(key, None)
+                close_session = self._retired.pop(key, None)
+        self._close(close_session)
+
+    @staticmethod
+    def _close(session) -> None:
+        if session is not None:
+            try:
+                close = getattr(session, "close", None)
+                if close is not None:
+                    close()
+            except Exception:
+                log.debug("Не удалось закрыть заменённую curl-сессию", exc_info=True)
+
+    def _replace(self, new_session) -> None:
+        close_session = None
+        rejected = False
+        with self._lock:
+            if self._closed:
+                rejected = True
+            else:
+                old_session = self.current
+                self.current = new_session
+                key = id(old_session)
+                if self._in_flight.get(key, 0):
+                    self._retired[key] = old_session
+                else:
+                    close_session = old_session
+                self.swaps += 1
+        if rejected:
+            self._close(new_session)
+            raise RuntimeError("curl session handle is closed")
+        self._close(close_session)
+
+    def close(self) -> None:
+        close_session = None
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            session = self.current
+            key = id(session)
+            if self._in_flight.get(key, 0):
+                self._retired[key] = session
+            else:
+                close_session = session
+        self._close(close_session)
+
     def swap(self):
-        self.current = self._build()
-        self.swaps += 1
+        self._replace(self._build())
 
     def set_impersonate(self, impersonate: str):
         """Смена TLS-отпечатка на лету (ротация идентичности). Новая
@@ -117,8 +187,7 @@ class CurlSessionHandle:
         self._impersonate = impersonate
         # формат Accept-Language зависит от семейства браузера
         self.accept_language = build_accept_language(self._locale, impersonate)
-        self.current = new
-        self.swaps += 1
+        self._replace(new)
 
 
 async def _fetch_comments_page(
@@ -144,7 +213,7 @@ async def _fetch_comments_page(
 
     cookies = {c.key: c.value for c in session.cookie_jar}
 
-    curl = curl_session.current
+    curl = curl_session.acquire()
     call = functools.partial(
         curl.get,
         url,
@@ -160,7 +229,42 @@ async def _fetch_comments_page(
     resp = None
     try:
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(http_executor.current, call)
+        try:
+            request_state = {"started": False, "cancelled": False, "released": False}
+            request_lock = threading.Lock()
+
+            def release_once():
+                with request_lock:
+                    if request_state["released"]:
+                        return
+                    request_state["released"] = True
+                curl_session.release(curl)
+
+            def run_call():
+                with request_lock:
+                    if request_state["cancelled"]:
+                        return None
+                    request_state["started"] = True
+                try:
+                    return call()
+                finally:
+                    release_once()
+
+            future = loop.run_in_executor(http_executor.current, run_call)
+        except BaseException:
+            curl_session.release(curl)
+            raise
+
+        def release_if_cancelled_before_start(done):
+            if not done.cancelled():
+                return
+            with request_lock:
+                if request_state["started"]:
+                    return
+                request_state["cancelled"] = True
+            release_once()
+
+        future.add_done_callback(release_if_cancelled_before_start)
 
         if executor_health is not None:
             generation = executor_health.on_submit()

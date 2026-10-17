@@ -67,12 +67,16 @@ class CurlSession:
         self.proxies = kwargs["proxies"]
         self.impersonate = kwargs["impersonate"]
         self.swaps = 0
+        self.closed = False
 
     def set_profile_headers(self, _profile):
         return None
 
     def set_locale(self, locale):
         self.accept_language = locale
+
+    def close(self):
+        self.closed = True
 
 
 class SlotQueue:

@@ -70,6 +70,7 @@ class CurlSession:
         self.proxies = kwargs["proxies"]
         self.impersonate = kwargs["impersonate"]
         self.swaps = 0
+        self.closed = False
         self.locales = []
         self.impersonates = []
         self.instances.append(self)
@@ -87,6 +88,9 @@ class CurlSession:
 
     def swap(self):
         self.swaps += 1
+
+    def close(self):
+        self.closed = True
 
 
 class Queue:
