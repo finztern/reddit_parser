@@ -29,6 +29,7 @@ FLEET_DEFAULTS = {
     "node_check_interval_hours": 24,  # как часто filter_nodes.py перепроверяет пул (таймер)
     "node_replace_only": True,        # сгоревшая нода логин-слота = только замена ноды (без смены профиля/сессии)
     "guest_enabled": False,           # гостевой харвест/ротация: код остаётся, но выключен
+    "legacy_scheduler": False,        # вернуть старый планировщик модуля 05 на переходный период
     "use_reddit_ok_file": True,       # кандидатов на замену брать только из all_nodes.reddit_ok.txt (если он есть)
 }
 

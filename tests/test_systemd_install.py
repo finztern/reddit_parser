@@ -21,7 +21,8 @@ def test_renders_units_for_given_user_and_root():
         assert r.returncode == 0, r.stdout + r.stderr
         rendered = {p.name: p.read_text(encoding="utf-8") for p in out.iterdir()}
         # логин-only парк: гостевой харвест по умолчанию НЕ ставится
-        assert set(rendered) == {"refresh-cookies.service", "refresh-cookies.timer",
+        assert set(rendered) == {"backup-sessions.service", "backup-sessions.timer",
+                                 "refresh-cookies.service", "refresh-cookies.timer",
                                  "filter-nodes.service", "filter-nodes.timer",
                                  "rotation-daemon.service"}
         for name, text in rendered.items():

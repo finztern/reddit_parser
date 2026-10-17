@@ -3,6 +3,7 @@ cookies/.*.tmp
 storage_state/*.json
 storage_state/.*.tmp
 state/
+backups/
 __pycache__/
 *.pyc
 mihomo_config.yaml

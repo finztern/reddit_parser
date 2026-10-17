@@ -76,7 +76,7 @@ def snippet(resp, n=150) -> str:
         return "<нет тела>"
 
 
-def test_slot(acc: dict, args) -> bool:
+def check_slot(acc: dict, args) -> bool:
     name = acc["name"]
     imp = acc.get("impersonate")
     port = acc.get("proxy_port")
@@ -195,7 +195,7 @@ def main() -> int:
     for i, n in enumerate(names):
         if i:
             time.sleep(args.pause)
-        results[n] = test_slot(accs[n], args)
+        results[n] = check_slot(accs[n], args)
 
     print("\n--- сводка ---")
     for n, ok in results.items():

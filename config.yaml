@@ -256,6 +256,8 @@ fleet:
   node_replace_only: true
   # гостевой харвест и ротация: код остаётся, но выключен
   guest_enabled: false
+  # временно вернуть старый планировщик модуля 05 при переходе
+  legacy_scheduler: false
   # кандидатов на замену брать только из all_nodes.reddit_ok.txt (результат filter_nodes.py --write)
   use_reddit_ok_file: true
 

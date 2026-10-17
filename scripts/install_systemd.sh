@@ -56,7 +56,7 @@ for bin in flock xvfb-run; do
   command -v "$bin" >/dev/null 2>&1 || echo "ВНИМАНИЕ: нет '$bin' (apt install util-linux xvfb)" >&2
 done
 
-UNITS=(rotation-daemon.service filter-nodes.service filter-nodes.timer)
+UNITS=(rotation-daemon.service filter-nodes.service filter-nodes.timer backup-sessions.service backup-sessions.timer)
 if [[ $GUEST -eq 1 ]]; then
   UNITS+=(refresh-guest-cookies.service refresh-guest-cookies.timer)
 fi
