@@ -1,126 +1,165 @@
-# Схема метрик скрапера (`schema: 1`)
+# Схема метрик scraper-а
 
-Контракт между скрапером (пишет, `scraper/metrics.py`) и панелью (модуль 07, только читает).
-Проверка снимка — `scraper.metrics.validate_snapshot()`, тест — `tests/test_metrics.py`.
+Версия JSON-контракта: `schema: 1`. Производитель — `scraper/metrics.py`;
+потребители — `scripts/dashboard.py` и диагностические инструменты.
+Валидация — `validate_snapshot()`, тесты — `tests/test_metrics.py`.
+
+Это runtime contract, а не обещание производительности/доступности. Метрики
+локальны для одного процесса и сбрасываются после рестарта scraper-а.
 
 ## Транспорт
 
-| Что | Где | Примечание |
+| Канал | Адрес/путь | Поведение |
 |---|---|---|
-| HTTP | `GET http://127.0.0.1:9100/metrics.json` | основной; `503 {"error":"no_data_yet"}` до первого снимка. `METRICS_BIND` / `METRICS_PORT` или секция `metrics:` в `config.yaml`. В bridge-режиме порт публикуется только на `127.0.0.1` хоста |
-| Файл | `state/metrics_snapshot.json` | резерв, атомарная запись раз в 2 с (`os.replace`) |
-| Журнал | `state/events.jsonl` | по строке JSON на событие, ротация по размеру (`events_max_bytes`, `events_backups`) |
+| HTTP | `GET http://127.0.0.1:9100/metrics.json` | Возвращает последний готовый JSON; до первого снимка — HTTP 503 с `{"schema":1,"error":"no_data_yet"}` |
+| Snapshot | `state/metrics_snapshot.json` | Атомарная запись; интервал задаётся `metrics.snapshot_interval_seconds` (default 2 с) |
+| Event journal | `state/events.jsonl` | JSON Lines, batch flush и ротация по `metrics.events_max_bytes`/`events_backups` |
 
-Нет ответа / нет файла / битый JSON / другая `schema` — панель показывает «нет данных»
-(`scraper.metrics.read_snapshot()` в этих случаях возвращает `None`, а не исключение).
-Добавление полей обратно совместимо; смена смысла или удаление поля = `schema: 2`.
+Bind/port настраиваются секцией `metrics` и переменными `METRICS_BIND`,
+`METRICS_PORT`. В bridge compose HTTP port публикуется только на
+`127.0.0.1` хоста. `metrics.enabled: false` выключает сбор/endpoint.
+
+Для файлового канала `read_snapshot(path)` возвращает `None`, если файл
+отсутствует, JSON повреждён или версия схемы не поддерживается. Это не
+гарантирует полную валидацию структуры: для проверки используйте
+`validate_snapshot(snapshot)`.
+
+Совместимое добавление необязательных полей не требует новой версии. Удаление
+обязательных полей или изменение их значения/семантики требует обновить схему,
+валидатор, потребителей и тесты.
 
 ## Верхний уровень
 
 | Поле | Тип | Смысл |
 |---|---|---|
-| `schema` | int | версия схемы, сейчас `1` |
-| `ts` | float | время снимка, unix-секунды |
-| `started_at` | float | старт процесса скрапера, unix-секунды |
-| `uptime_s` | float | аптайм, секунды |
-| `global` | object | глобальные метрики |
-| `series` | object | ряды для графиков (15 минут, шаг 5 с) |
-| `accounts` | array | метрики по аккаунтам |
+| `schema` | integer | Версия контракта, `1` |
+| `ts` | number | Время снимка, Unix seconds |
+| `started_at` | number | Время запуска процесса |
+| `uptime_s` | number | Аптайм текущего процесса |
+| `global` | object | Сводные окна, очередь, состояния и предупреждения |
+| `series` | object | Глобальные кольцевые ряды |
+| `accounts` | array | Одна строка на настроенный/наблюдавшийся аккаунт |
 
 ## `global`
 
-| Поле | Смысл |
-|---|---|
-| `windows` | окна `10s`, `1m`, `15m` (скользящие) и `total` (со старта процесса) — поля ниже |
-| `queue` | очередь пайплайна (последний ответ `/queue`) |
-| `accounts` | счётчики аккаунтов по состояниям |
-| `warning` | предупреждение планировщика (`not_enough_accounts`) или `null` |
-| `metrics_errors` | сколько раз сам сбор метрик падал (в норме 0) |
+Объект содержит ключи `windows`, `queue`, `accounts`, `warning` и
+`metrics_errors`.
 
-### Поля окна (`global.windows.<окно>`)
+### `global.windows`
 
-| Поле | Смысл |
-|---|---|
-| `span_s` | сколько секунд реально покрывает окно (в первые минуты после старта меньше номинала) |
-| `unique_comments_per_sec` | уникальные комментарии, ушедшие в буфер отправки, в секунду |
-| `comments_fetched_per_sec` | все полученные комментарии (с дублями) в секунду |
-| `dedupe_ratio` | `1 − unique / fetched` за окно; `null`, если ничего не получено |
-| `sent_to_collector_per_sec` | подтверждённые коллектором элементы в секунду |
-| `send_errors` | не подтверждённые коллектором элементы за окно (штуки) |
-| `requests_per_sec` | HTTP-запросов к Reddit в секунду (страница пагинации = запрос) |
-| `codes` | запросы по кодам: `200`, `403`, `429`, `5xx`, `other` (штуки за окно) |
-| `empty_listings` | пустые первые страницы (200 + пустой Listing) |
-| `network_errors` | сетевые ошибки / таймауты |
+Содержит `10s`, `1m`, `15m` и `total`. Первые три — агрегаты последних окон;
+`total` — накопление с момента старта процесса. В первые секунды `span_s`
+меньше полного окна.
+
+Поля каждого окна:
+
+| Поле | Тип/единица | Смысл |
+|---|---|---|
+| `span_s` | number, seconds | Фактический интервал нормализации rate |
+| `unique_comments_per_sec` | number | Уникальные элементы, добавленные в sender buffer, в секунду |
+| `comments_fetched_per_sec` | number | Полученные комментарии (до дедупликации), в секунду |
+| `dedupe_ratio` | number или null | `1 - unique/fetched`; null, если fetched = 0 |
+| `sent_to_collector_per_sec` | number | Подтверждённые элементы в секунду |
+| `send_errors` | integer, items | Не подтверждённые элементы за окно |
+| `requests_per_sec` | number | HTTP requests к Reddit в секунду; страница pagination считается запросом |
+| `codes` | object of counts | Ключи `200`, `403`, `429`, `5xx`, `other` |
+| `empty_listings` | integer | Пустые listings |
+| `network_errors` | integer | Ошибки соединения/таймаута |
+
+Классификация кодов строится по результату опроса аккаунта; это не raw access
+log каждого HTTP-запроса. Для точной диагностики используйте логи scraper-а.
 
 ### `global.queue`
 
+Последнее наблюдаемое состояние коллектора и sender-а:
+
 | Поле | Смысл |
 |---|---|
-| `size` | `bpipe_queue` — элементов в очереди пайплайна (`null`, пока `/queue` не опрашивали) |
-| `max` | `bpipe_max` |
-| `inflight` | `bpipe_inflight` |
-| `degraded` | флаг `degraded` от коллектора |
-| `action` | рекомендация коллектора (`slow…`/`pause…`/`stop…`/…) |
-| `buffer` | элементов в буфере отправки скрапера |
+| `size` | `bpipe_queue` либо null до ответа `/queue` |
+| `max` | Максимум очереди, если его сообщает коллектор |
+| `inflight` | Число элементов в обработке, если оно доступно |
+| `degraded` | Флаг деградации коллектора либо null |
+| `action` | Действие, сообщённое queue endpoint |
+| `buffer` | Текущий объём sender buffer |
+
+Часть полей может быть null, если queue endpoint отключён или ещё не ответил.
 
 ### `global.accounts`
 
-`total`, `active`, `cooldown`, `degraded`, `auth_failed`, `blocked_node`, `disabled` — по состояниям
-планировщика (`scraper/fleet_polling.py`); `waiting_login` — нет входа/cookies (воркер не запущен);
-`needs_login` — сколько аккаунтов требуют входа. `total` = число строк в `accounts`.
+Целые счётчики `total`, `active`, `cooldown`, `degraded`, `auth_failed`,
+`blocked_node`, `disabled`, `waiting_login`, `needs_login`. `total` совпадает
+с количеством строк в верхнеуровневом массиве `accounts`. `starting` — это
+состояние отдельной строки аккаунта, отдельного счётчика в `global.accounts`
+для него нет.
+
+`warning` содержит строковое предупреждение планировщика или null.
+`metrics_errors` — количество внутренних ошибок сборщика.
 
 ## `series`
 
-Кольцевые буферы 15 мин × шаг 5 с = 180 точек, от старой к новой, последняя — текущая неполная.
-Служебные: `step_s`, `points`, `ts_end`.
+Глобальные ряды содержат 180 корзин по 5 секунд (15 минут), от старой к новой.
+Пропущенные корзины заполнены нулями; последняя корзина может быть неполной.
 
-| Ряд | Значение точки |
+| Поле | Тип значения точки |
 |---|---|
-| `unique_comments` | уникальных комментариев/с |
-| `sent_to_collector` | отправлено в коллектор/с |
-| `requests` | запросов к Reddit/с |
-| `ok200_ratio` | доля ответов 200 среди запросов шага; `null`, если запросов не было |
-| `empty_listings` | пустых листингов за шаг |
-| `errors` | запросов не-200 за шаг |
+| `step_s` | `5` |
+| `points` | `180` |
+| `ts_end` | Unix seconds |
+| `unique_comments` | Уникальные элементы в секунду за корзину |
+| `sent_to_collector` | Подтверждённые элементы в секунду |
+| `requests` | Reddit requests в секунду |
+| `ok200_ratio` | Доля ответов 200; null при нуле запросов |
+| `empty_listings` | Число пустых listings за корзину |
+| `errors` | Число не-200 requests за корзину |
+
+Эти ряды предназначены для краткосрочного dashboard, не для долговременной
+аналитики.
 
 ## `accounts[]`
 
+Обязательные поля одной записи:
+
 | Поле | Смысл |
 |---|---|
-| `name` | имя слота (`account_N`) |
-| `state` | `active`, `cooldown`, `degraded`, `auth_failed`, `blocked_node`, `disabled` + `waiting_login`, `starting` (воркер ещё не взял слот) |
-| `since` | с какого момента (unix-секунды) аккаунт в этом состоянии |
-| `node` | нода из `state/slots/<name>.json` |
-| `country` | страна выходного IP из профиля устройства (`state/profiles/`) |
-| `exit_ip` | выходной IP из профиля |
-| `requests_1h` | запросов за час |
-| `ok_ratio_1h` | доля успешных запросов за час; `null`, если запросов не было |
-| `last_error` | `rate_or_server`, `ratelimit_low`, `empty_listing`, `auth_401`/`auth_403`, `network` |
-| `last_error_at` | unix-секунды |
-| `last_ok_at` | unix-секунды последнего успешного опроса |
-| `unique_comments_1h` | уникальных комментариев за час |
-| `cookie_age_hours` | возраст cookies-файла по mtime (его обновляют refresh-джобы); `null`, если файла нет |
-| `needs_login` | нужен ручной вход (`auth_failed`, нет cookies, ждёт первого входа) |
-| `needs_login_reason` | `auth_401`/`auth_403`, `no_cookies`, `first_login` или `null` |
-| `series` | сжатый ряд за 15 мин, шаг 30 с (30 точек): `requests`, `ok`, `unique` |
+| `name` | Имя аккаунта, обычно `account_N`; уникально в массиве |
+| `state` | `active`, `cooldown`, `degraded`, `auth_failed`, `blocked_node`, `disabled`, `waiting_login` или `starting` |
+| `since` | Unix seconds начала текущего состояния или null |
+| `node` | Из активного slot state (`state/slots/`) либо null |
+| `country`, `exit_ip` | Доступные сведения из `state/profiles/` либо null |
+| `requests_1h` | Количество запросов за последний час |
+| `ok_ratio_1h` | Доля успешных запросов за последний час или null без запросов |
+| `last_error` | Последняя метка ошибки или null |
+| `last_error_at`, `last_ok_at` | Unix seconds или null |
+| `unique_comments_1h` | Уникальные комментарии за последний час |
+| `cookie_age_hours` | Возраст cookies по mtime либо null |
+| `needs_login` | Boolean |
+| `needs_login_reason` | Причина (`first_login`, `no_cookies`, auth label и др.) или null |
+| `series` | Per-account короткие ряды |
 
-## Журнал событий `state/events.jsonl`
+Per-account `series.step_s` равен 30 с; каждое поле `requests`, `ok`,
+`unique` содержит 30 значений, то есть примерно последние 15 минут. Для
+`requests_1h` и `unique_comments_1h` сборщик хранит 120 корзин по 30 секунд.
 
-Строка: `{"ts": 1700000000.5, "account": "account_3", "event": "state_change", "detail": "active -> auth_failed (auth_403)", "level": "error"}`.
+## `state/events.jsonl`
 
-| `event` | Когда |
-|---|---|
-| `state_change` | любой переход состояния аккаунта (кроме первого наблюдения) |
-| `auth_failed` | аккаунт перешёл в `auth_failed` (`detail` — причина) |
-| `node_blocked` | аккаунт перешёл в `blocked_node` (заявка на замену ноды) |
-| `relogin_ok` | воркер применил новые cookies аккаунта, который был в `auth_failed` |
-| `node_replaced` | демон выполнил замену ноды/ротацию |
+Одна JSON-запись на строку. Основные поля: `ts`, `account` (может быть null),
+`event`, `detail`, `level`. Типичные события: `state_change`, `auth_failed`,
+`node_blocked`, `relogin_ok`, `node_replaced`; список зависит от вызывающих
+модулей.
 
-`level`: `info`, `warn`, `error` — для цвета в панели.
+Журнал ограничен по размеру и числу резервных файлов. Это диагностический
+журнал, не аудит-трейл: он локален, ограниченно хранится и не предназначен
+для доказательства полного набора действий.
 
-## Накладные расходы
+## Изменение схемы
 
-Горячий путь (`record_poll`, `record_send`, `event`) — O(1) без ввода-вывода. Снимок собирается и
-сериализуется раз в 2 с в цикле событий, запись файла и журнала — в потоке (`asyncio.to_thread`),
-HTTP отдаёт готовые байты. Сбой метрик логируется и не влияет на опрос; `metrics.enabled: false`
-отключает модуль целиком.
+При изменении контракта обновите вместе:
+
+1. `SCHEMA_VERSION`, producer и `validate_snapshot()` в `scraper/metrics.py`;
+2. consumer в `scripts/dashboard.py`;
+3. тесты `tests/test_metrics.py` и dashboard tests;
+4. этот документ.
+
+Горячий путь записи счётчиков не выполняет файловый I/O. Снимок сериализуется
+по таймеру, file write выполняется через `asyncio.to_thread`; ошибки метрик
+логируются и не должны останавливать scraper.

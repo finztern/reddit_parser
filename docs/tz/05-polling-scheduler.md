@@ -1,6 +1,10 @@
 # Модуль 05 — планировщик опроса парка
 
-> Статус: реализовано (`scraper/scheduler.py`, `scraper/fleet_polling.py`, `tests/test_fleet_polling.py`); описание — README, «Модуль 05».
+> Статус: код и offline tests есть (`scraper/scheduler.py`,
+> `scraper/fleet_polling.py`, `tests/test_fleet_polling.py`). Этот документ —
+> исходное ТЗ; значения и ограничения текущего runtime описаны в
+> [ARCHITECTURE.md](../../ARCHITECTURE.md) и `config.yaml`. Производственная
+> скорость/поведение не подтверждаются одним unit-test.
 
 ## Проблема
 Сейчас каждый аккаунт сам подбирает интервал 0.4–6 с по перекрытию страниц (`stream_*`, `overlap_target_*`) и по лимитам

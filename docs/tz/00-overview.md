@@ -1,6 +1,9 @@
 # ТЗ: парк только из логин-аккаунтов — обзор и порядок работ
 
-Статус: черновик ТЗ (кода нет). Ветка: `feature/login-only-fleet`.
+Статус: исходное ТЗ; основные модули реализованы в репозитории, но этот файл
+не является точным описанием текущей конфигурации или подтверждением
+production-приёмки. Актуальные руководства: [README](../../README.md),
+[архитектура](../../ARCHITECTURE.md), [развёртывание](../../DEPLOY.md).
 Модули независимы настолько, насколько возможно: у каждого свой файл, критерии приёмки и список зависимостей.
 
 ## Цель
@@ -22,7 +25,27 @@
 | 07 | `07-tui-dashboard.md` | панель управления в консоли, графики, список «кого перелогинить» | 06, 02 |
 | 08 | `08-safety-ops.md` | бэкапы сессий, безопасность VNC, миграция/откат, тесты | все |
 
-Порядок реализации: **01 → 03 → 02 → 05 → 06 → 07 → 04 → 08** (04 последним: он нужен реже всего и опаснее всего).
+Код основных модулей находится в `scripts/`, `scraper/` и `tests/`. Наличие
+тестов не означает, что заявленные в этом ТЗ длительность, скорость, RAM,
+доступность нод или иные эксплуатационные критерии проверены на production.
+Коммитнутый `config.yaml` сохраняет совместимые guest-настройки; текущие
+режим и состояние слотов надо проверять в runtime-конфигурации конкретного
+хоста.
+
+Порядок ниже — исходный порядок разработки, не текущий deployment checklist:
+**01 → 03 → 02 → 05 → 06 → 07 → 04 → 08**.
+
+## Где искать текущую реализацию
+
+| Область | Реализация и актуальное руководство |
+|---|---|
+| Миграция и node replacement | `scripts/convert_to_login.py`, `scripts/add_login_slots.py`, `scripts/rotation_daemon.py`; [ROTATION_SETUP.md](../../ROTATION_SETUP.md) |
+| Параллельный login | `scripts/login_hub.py`; [DEPLOY.md](../../DEPLOY.md) |
+| Профили и гео | `scraper/profile_gen.py`, `scraper/identity.py`, `scripts/profile.py`; [ARCHITECTURE.md](../../ARCHITECTURE.md) |
+| Human session | `scripts/human_session.py`; `tests/test_human_session.py` |
+| Scheduler и fleet state | `scraper/scheduler.py`, `scraper/fleet_polling.py`; [ARCHITECTURE.md](../../ARCHITECTURE.md) |
+| Metrics / dashboard | `scraper/metrics.py`, `scripts/dashboard.py`; [docs/metrics-schema.md](../metrics-schema.md) |
+| Backup / systemd / CI | `scripts/backup_sessions.sh`, `scripts/restore_sessions.sh`, `scripts/systemd/`, `.github/workflows/ci.yml`; [DEPLOY.md](../../DEPLOY.md) |
 
 ## Что в исходной постановке изменено и почему
 
