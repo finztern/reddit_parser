@@ -19,9 +19,10 @@ a substitute for implementation or tests; source code is authoritative.
   file exchanged between scraper, host jobs, dashboard, or rotation daemon.
 - Read [docs/metrics-schema.md](./docs/metrics-schema.md) before changing
   `scraper/metrics.py` or `scripts/dashboard.py`.
-- For work scoped to `scraper/` or `scripts/`, read its local
-  [AGENTS.md](./scraper/AGENTS.md) or [AGENTS.md](./scripts/AGENTS.md)
-  respectively; these contain only subsystem-specific invariants.
+- For Claude-specific guidance scoped to `scraper/` or `scripts/`, read the
+  local [CLAUDE.md](./scraper/CLAUDE.md) or [CLAUDE.md](./scripts/CLAUDE.md).
+  Their sibling `AGENTS.md` files provide additional tool-agnostic subsystem
+  boundaries and test indexes.
 - `docs/tz/` contains original requirements. It is historical context, not a
   production runbook or proof that every acceptance target was measured.
 
@@ -97,6 +98,8 @@ CI publishes XML/HTML coverage and checks changed lines in the measured
 `main.py` + `scraper/` scope on pull requests; the initial diff-coverage gate
 is 80%. Scripts and tests are not currently part of the measured coverage
 scope. There is deliberately no minimum total-project coverage gate.
+CI also runs `python scripts/check_docs.py`, which checks local Markdown links,
+code/test paths in this guide, and the documented `config.yaml` key inventory.
 
 ## Source-of-truth rules
 
