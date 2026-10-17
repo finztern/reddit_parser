@@ -112,11 +112,11 @@ node-replacement и dashboard. Репозиторий содержит конф�
 
 ```bash
 python3 -m venv venv
-venv/bin/pip install -r requirements.txt -r requirements-refresh.txt pytest
+venv/bin/pip install -r requirements.txt -r requirements-refresh.txt pytest pytest-cov diff-cover
 venv/bin/playwright install chromium firefox webkit
 
 python -m compileall -q main.py scraper scripts tests
-python -m pytest -q
+python -m pytest -q --cov=main --cov=scraper --cov-report=term-missing
 ```
 
 Некоторые tests подменяют сетевые клиенты и запускают скрипты в синтетических
@@ -125,8 +125,12 @@ mihomo, коллектора или production-хоста.
 
 GitHub Actions workflow [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)
 запускает на push и pull request установку зависимостей, `compileall` и полный
-pytest-набор. Ruff пока не является CI gate: в существующем коде есть
-неисправленные lint-замечания.
+pytest-набор. Таблица покрытия добавляется в summary запуска, HTML/XML-отчёт
+публикуется как artifact `coverage-report`. Для pull request дополнительно
+проверяется покрытие изменённых строк Python с начальным порогом 80%.
+Жёсткого минимального порога для всего проекта нет, поэтому непокрытые legacy
+модули не блокируют несвязанные изменения. Ruff пока не является CI gate: в
+существующем коде есть неисправленные lint-замечания.
 
 ## Развёртывание и запуск
 

@@ -13,6 +13,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -26,10 +28,41 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt -r requirements-refresh.txt pytest
+          python -m pip install -r requirements.txt -r requirements-refresh.txt pytest pytest-cov diff-cover
 
       - name: Compile Python sources
         run: python -m compileall -q main.py scraper scripts tests
 
-      - name: Run tests
-        run: python -m pytest -q
+      - name: Run tests with coverage
+        run: >-
+          python -m pytest -q
+          --cov=main
+          --cov=scraper
+          --cov-report=term-missing
+          --cov-report=xml:coverage.xml
+          --cov-report=html:htmlcov
+
+      - name: Add coverage summary
+        if: always()
+        run: |
+          if [ -f .coverage ]; then
+            python -m coverage report --format=markdown >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Coverage report was not generated." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Check coverage of changed lines
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: diff-cover coverage.xml --compare-branch="origin/$BASE_REF" --fail-under=80
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-report
+          path: |
+            coverage.xml
+            htmlcov/
+          if-no-files-found: ignore
