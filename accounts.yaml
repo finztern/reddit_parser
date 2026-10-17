@@ -120,8 +120,6 @@ accounts:
   - name: account_11
     enabled: true
     cookie_file: cookies/account_11.json
-    login: true
-    storage_state: storage_state/account_11.json
     proxy_port: 7901
     locale: de-CH
     impersonate: chrome133a
@@ -130,8 +128,6 @@ accounts:
   - name: account_12
     enabled: true
     cookie_file: cookies/account_12.json
-    login: true
-    storage_state: storage_state/account_12.json
     proxy_port: 7902
     locale: cs-CZ
     impersonate: safari260
@@ -140,8 +136,6 @@ accounts:
   - name: account_13
     enabled: true
     cookie_file: cookies/account_13.json
-    login: true
-    storage_state: storage_state/account_13.json
     proxy_port: 7903
     locale: da-DK
     impersonate: chrome131
@@ -150,8 +144,6 @@ accounts:
   - name: account_14
     enabled: true
     cookie_file: cookies/account_14.json
-    login: true
-    storage_state: storage_state/account_14.json
     proxy_port: 7904
     locale: lv-LV
     impersonate: safari180_ios
@@ -160,8 +152,6 @@ accounts:
   - name: account_15
     enabled: true
     cookie_file: cookies/account_15.json
-    login: true
-    storage_state: storage_state/account_15.json
     proxy_port: 7905
     locale: en-CA
     impersonate: safari260_ios
@@ -170,8 +160,6 @@ accounts:
   - name: account_16
     enabled: true
     cookie_file: cookies/account_16.json
-    login: true
-    storage_state: storage_state/account_16.json
     proxy_port: 7906
     locale: en-IN
     impersonate: chrome136
@@ -180,18 +168,14 @@ accounts:
   - name: account_17
     enabled: true
     cookie_file: cookies/account_17.json
-    login: true
-    storage_state: storage_state/account_17.json
     proxy_port: 7907
     locale: en-US
     impersonate: safari170
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
 
   - name: account_18
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_18.json
-    login: true
-    storage_state: storage_state/account_17.json
     proxy_port: 7908
     locale: en-GB
     impersonate: safari184_ios
@@ -200,8 +184,6 @@ accounts:
   - name: account_19
     enabled: true
     cookie_file: cookies/account_19.json
-    login: true
-    storage_state: storage_state/account_19.json
     proxy_port: 7909
     locale: fr-FR
     impersonate: chrome131_android
@@ -210,8 +192,6 @@ accounts:
   - name: account_20
     enabled: true
     cookie_file: cookies/account_20.json
-    login: true
-    storage_state: storage_state/account_20.json
     proxy_port: 7910
     locale: tr-TR
     impersonate: safari2601
@@ -221,8 +201,6 @@ accounts:
   - name: account_21
     enabled: true
     cookie_file: cookies/account_21.json
-    login: true
-    storage_state: storage_state/account_21.json
     proxy_port: 7911
     locale: da-DK
     impersonate: safari180
@@ -231,8 +209,6 @@ accounts:
   - name: account_22
     enabled: true
     cookie_file: cookies/account_22.json
-    login: true
-    storage_state: storage_state/account_22.json
     proxy_port: 7912
     locale: nl-NL
     impersonate: chrome124
@@ -241,8 +217,6 @@ accounts:
   - name: account_23
     enabled: true
     cookie_file: cookies/account_23.json
-    login: true
-    storage_state: storage_state/account_23.json
     proxy_port: 7913
     locale: fi-FI
     impersonate: firefox144
@@ -251,8 +225,6 @@ accounts:
   - name: account_24
     enabled: true
     cookie_file: cookies/account_24.json
-    login: true
-    storage_state: storage_state/account_24.json
     proxy_port: 7914
     locale: en-CA
     impersonate: chrome123
@@ -261,8 +233,6 @@ accounts:
   - name: account_25
     enabled: true
     cookie_file: cookies/account_25.json
-    login: true
-    storage_state: storage_state/account_25.json
     proxy_port: 7915
     locale: sk-SK
     impersonate: chrome145
@@ -277,8 +247,6 @@ accounts:
   - name: account_26
     enabled: true
     cookie_file: cookies/account_26.json
-    login: true
-    storage_state: storage_state/account_26.json
     proxy_port: 7916
     locale: en-US
     impersonate: chrome123
@@ -287,18 +255,14 @@ accounts:
   - name: account_27
     enabled: true
     cookie_file: cookies/account_27.json
-    login: true
-    storage_state: storage_state/account_27.json
     proxy_port: 7917
     locale: en-US
     impersonate: safari180
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15"
 
   - name: account_28
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_28.json
-    login: true
-    storage_state: storage_state/account_28.json
     proxy_port: 7918
     locale: en-US
     impersonate: chrome131
@@ -307,8 +271,6 @@ accounts:
   - name: account_29
     enabled: true
     cookie_file: cookies/account_29.json
-    login: true
-    storage_state: storage_state/account_29.json
     proxy_port: 7919
     locale: en-US
     impersonate: safari184_ios
@@ -317,8 +279,6 @@ accounts:
   - name: account_30
     enabled: true
     cookie_file: cookies/account_30.json
-    login: true
-    storage_state: storage_state/account_30.json
     proxy_port: 7920
     locale: en-US
     impersonate: safari2601
@@ -327,8 +287,6 @@ accounts:
   - name: account_31
     enabled: true
     cookie_file: cookies/account_31.json
-    login: true
-    storage_state: storage_state/account_31.json
     proxy_port: 7921
     locale: en-US
     impersonate: chrome133a
@@ -337,8 +295,6 @@ accounts:
   - name: account_32
     enabled: true
     cookie_file: cookies/account_32.json
-    login: true
-    storage_state: storage_state/account_32.json
     proxy_port: 7922
     locale: en-US
     impersonate: firefox144
@@ -347,8 +303,6 @@ accounts:
   - name: account_33
     enabled: true
     cookie_file: cookies/account_33.json
-    login: true
-    storage_state: storage_state/account_33.json
     proxy_port: 7923
     locale: en-US
     impersonate: chrome145
@@ -357,8 +311,6 @@ accounts:
   - name: account_34
     enabled: true
     cookie_file: cookies/account_34.json
-    login: true
-    storage_state: storage_state/account_34.json
     proxy_port: 7924
     locale: en-US
     impersonate: chrome131_android
@@ -367,8 +319,6 @@ accounts:
   - name: account_35
     enabled: true
     cookie_file: cookies/account_35.json
-    login: true
-    storage_state: storage_state/account_35.json
     proxy_port: 7925
     locale: en-US
     impersonate: safari260_ios
@@ -377,8 +327,6 @@ accounts:
   - name: account_36
     enabled: true
     cookie_file: cookies/account_36.json
-    login: true
-    storage_state: storage_state/account_36.json
     proxy_port: 7926
     locale: en-US
     impersonate: safari180_ios
@@ -387,8 +335,6 @@ accounts:
   - name: account_37
     enabled: true
     cookie_file: cookies/account_37.json
-    login: true
-    storage_state: storage_state/account_37.json
     proxy_port: 7927
     locale: en-US
     impersonate: safari260
@@ -397,8 +343,6 @@ accounts:
   - name: account_38
     enabled: true
     cookie_file: cookies/account_38.json
-    login: true
-    storage_state: storage_state/account_38.json
     proxy_port: 7928
     locale: en-US
     impersonate: safari170
@@ -407,8 +351,6 @@ accounts:
   - name: account_39
     enabled: true
     cookie_file: cookies/account_39.json
-    login: true
-    storage_state: storage_state/account_39.json
     proxy_port: 7929
     locale: en-US
     impersonate: chrome136
@@ -417,8 +359,6 @@ accounts:
   - name: account_40
     enabled: true
     cookie_file: cookies/account_40.json
-    login: true
-    storage_state: storage_state/account_40.json
     proxy_port: 7930
     locale: en-US
     impersonate: chrome124
@@ -427,18 +367,14 @@ accounts:
   - name: account_41
     enabled: true
     cookie_file: cookies/account_41.json
-    login: true
-    storage_state: storage_state/account_41.json
     proxy_port: 7931
     locale: en-US
     impersonate: safari260
     user_agent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15"
 
   - name: account_42
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_42.json
-    login: true
-    storage_state: storage_state/account_42.json
     proxy_port: 7932
     locale: en-US
     impersonate: safari170
@@ -447,8 +383,6 @@ accounts:
   - name: account_43
     enabled: true
     cookie_file: cookies/account_43.json
-    login: true
-    storage_state: storage_state/account_43.json
     proxy_port: 7933
     locale: en-US
     impersonate: chrome145
@@ -457,8 +391,6 @@ accounts:
   - name: account_44
     enabled: true
     cookie_file: cookies/account_44.json
-    login: true
-    storage_state: storage_state/account_44.json
     proxy_port: 7934
     locale: en-US
     impersonate: chrome131
@@ -467,8 +399,6 @@ accounts:
   - name: account_45
     enabled: true
     cookie_file: cookies/account_45.json
-    login: true
-    storage_state: storage_state/account_45.json
     proxy_port: 7935
     locale: en-US
     impersonate: safari260_ios
@@ -477,8 +407,6 @@ accounts:
   - name: account_46
     enabled: true
     cookie_file: cookies/account_46.json
-    login: true
-    storage_state: storage_state/account_46.json
     proxy_port: 7936
     locale: en-US
     impersonate: chrome136
@@ -487,8 +415,6 @@ accounts:
   - name: account_47
     enabled: true
     cookie_file: cookies/account_47.json
-    login: true
-    storage_state: storage_state/account_47.json
     proxy_port: 7937
     locale: en-US
     impersonate: safari2601
@@ -497,8 +423,6 @@ accounts:
   - name: account_48
     enabled: true
     cookie_file: cookies/account_48.json
-    login: true
-    storage_state: storage_state/account_48.json
     proxy_port: 7938
     locale: en-US
     impersonate: firefox144
@@ -507,8 +431,6 @@ accounts:
   - name: account_49
     enabled: true
     cookie_file: cookies/account_49.json
-    login: true
-    storage_state: storage_state/account_49.json
     proxy_port: 7939
     locale: en-US
     impersonate: safari180_ios
@@ -517,8 +439,6 @@ accounts:
   - name: account_50
     enabled: true
     cookie_file: cookies/account_50.json
-    login: true
-    storage_state: storage_state/account_50.json
     proxy_port: 7940
     locale: en-US
     impersonate: chrome133a
@@ -527,18 +447,14 @@ accounts:
   - name: account_51
     enabled: true
     cookie_file: cookies/account_51.json
-    login: true
-    storage_state: storage_state/account_51.json
     proxy_port: 7941
     locale: en-US
     impersonate: safari184_ios
     user_agent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1"
 
   - name: account_52
-    enabled: false
+    enabled: true
     cookie_file: cookies/account_52.json
-    login: true
-    storage_state: storage_state/account_52.json
     proxy_port: 7942
     locale: en-US
     impersonate: chrome124
@@ -547,8 +463,6 @@ accounts:
   - name: account_53
     enabled: true
     cookie_file: cookies/account_53.json
-    login: true
-    storage_state: storage_state/account_53.json
     proxy_port: 7943
     locale: en-US
     impersonate: safari180
@@ -557,8 +471,6 @@ accounts:
   - name: account_54
     enabled: true
     cookie_file: cookies/account_54.json
-    login: true
-    storage_state: storage_state/account_54.json
     proxy_port: 7944
     locale: en-US
     impersonate: chrome123
@@ -567,8 +479,6 @@ accounts:
   - name: account_55
     enabled: true
     cookie_file: cookies/account_55.json
-    login: true
-    storage_state: storage_state/account_55.json
     proxy_port: 7945
     locale: en-US
     impersonate: chrome131_android

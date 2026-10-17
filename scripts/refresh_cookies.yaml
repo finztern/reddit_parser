@@ -23,51 +23,6 @@ login_accounts:
   - account_8
   - account_9
   - account_10
-  - account_11
-  - account_12
-  - account_13
-  - account_14
-  - account_15
-  - account_16
-  - account_17
-  - account_18
-  - account_19
-  - account_20
-  - account_21
-  - account_22
-  - account_23
-  - account_24
-  - account_25
-  - account_26
-  - account_27
-  - account_28
-  - account_29
-  - account_30
-  - account_31
-  - account_32
-  - account_33
-  - account_34
-  - account_35
-  - account_36
-  - account_37
-  - account_38
-  - account_39
-  - account_40
-  - account_41
-  - account_42
-  - account_43
-  - account_44
-  - account_45
-  - account_46
-  - account_47
-  - account_48
-  - account_49
-  - account_50
-  - account_51
-  - account_52
-  - account_53
-  - account_54
-  - account_55
 
 # false — настоящее окно браузера (дебаг / ручное решение капчи).
 # Под systemd без DISPLAY — только true (или xvfb-run, см. .service).
@@ -112,51 +67,6 @@ account_geo:
   account_8:  {locale: "sq-AL", timezone_id: "Europe/Tirane"}
   account_9:  {locale: "uk-UA", timezone_id: "Europe/Kiev"}
   account_10: {locale: "de-DE", timezone_id: "Europe/Berlin"}
-  account_11: {locale: "de-CH", timezone_id: "Europe/Zurich"}   # ie1-1.trust.zone
-  account_12: {locale: "cs-CZ", timezone_id: "Europe/Prague"}   # ro2-1.trust.zone
-  account_13: {locale: "da-DK", timezone_id: "Europe/Copenhagen"}   # at2-1.trust.zone
-  account_14: {locale: "lv-LV", timezone_id: "Europe/Riga"}   # rs1-1.trust.zone
-  account_15: {locale: "en-CA", timezone_id: "America/Toronto"}   # bg1-1.trust.zone
-  account_16: {locale: "en-IN", timezone_id: "Asia/Kolkata"}   # cz2-1.trust.zone
-  account_17: {locale: "en-US", timezone_id: "America/Chicago"}   # jp2-1.trust.zone
-  account_18: {locale: "en-GB", timezone_id: "Europe/London"}   # sg2-1.trust.zone
-  account_19: {locale: "fr-FR", timezone_id: "Europe/Paris"}   # hu1-1.trust.zone
-  account_20: {locale: "tr-TR", timezone_id: "Europe/Istanbul"}   # be1-1.trust.zone
-  account_21: {locale: "da-DK", timezone_id: "Europe/Copenhagen"}   # gosuslug.trust.zone
-  account_22: {locale: "nl-NL", timezone_id: "Europe/Amsterdam"}   # al1-1.trust.zone
-  account_23: {locale: "fi-FI", timezone_id: "Europe/Helsinki"}   # ua2-1.trust.zone
-  account_24: {locale: "en-CA", timezone_id: "America/Toronto"}   # ca9-7.trust.zone
-  account_25: {locale: "sk-SK", timezone_id: "Europe/Bratislava"}   # in1.trust.zone
-  account_26: {locale: "de-DE", timezone_id: "Europe/Berlin"}   # de8-1.trust.zone
-  account_27: {locale: "de-CH", timezone_id: "Europe/Zurich"}   # ch1-1.trust.zone
-  account_28: {locale: "et-EE", timezone_id: "Europe/Tallinn"}   # ee4-5.trust.zone
-  account_29: {locale: "pl-PL", timezone_id: "Europe/Warsaw"}   # pl3-6.trust.zone
-  account_30: {locale: "en-AU", timezone_id: "Australia/Sydney"}   # au11-1.trust.zone
-  account_31: {locale: "es-ES", timezone_id: "Europe/Madrid"}   # es2-1.trust.zone
-  account_32: {locale: "en-CA", timezone_id: "America/Toronto"}   # ca15.trust.zone
-  account_33: {locale: "en-GB", timezone_id: "Europe/London"}   # uk7.trust.zone
-  account_34: {locale: "en-NZ", timezone_id: "Pacific/Auckland"}   # nz1-1.trust.zone
-  account_35: {locale: "de-DE", timezone_id: "Europe/Berlin"}   # de2.trust.zone
-  account_36: {locale: "en-CA", timezone_id: "America/Toronto"}   # ca1-1.trust.zone
-  account_37: {locale: "en-US", timezone_id: "America/New_York"}   # us7.trust.zone
-  account_38: {locale: "en-GB", timezone_id: "Europe/London"}   # uk3.trust.zone
-  account_39: {locale: "en-US", timezone_id: "America/New_York"}   # us14.trust.zone
-  account_40: {locale: "cs-CZ", timezone_id: "Europe/Prague"}   # cz1.trust.zone
-  account_41: {locale: "en-US", timezone_id: "America/New_York"}   # us29.trust.zone
-  account_42: {locale: "nl-NL", timezone_id: "Europe/Amsterdam"}   # nl4.trust.zone
-  account_43: {locale: "en-US", timezone_id: "America/New_York"}   # us74.trust.zone
-  account_44: {locale: "en-US", timezone_id: "America/New_York"}   # us75.trust.zone
-  account_45: {locale: "sv-SE", timezone_id: "Europe/Stockholm"}   # se1.trust.zone
-  account_46: {locale: "lv-LV", timezone_id: "Europe/Riga"}   # lv2.trust.zone
-  account_47: {locale: "fr-FR", timezone_id: "Europe/Paris"}   # fr13.trust.zone
-  account_48: {locale: "en-US", timezone_id: "America/New_York"}   # us76-1.trust.zone
-  account_49: {locale: "uk-UA", timezone_id: "Europe/Kiev"}   # ua3.trust.zone
-  account_50: {locale: "en-US", timezone_id: "America/New_York"}   # us23-5.trust.zone
-  account_51: {locale: "en-CA", timezone_id: "America/Toronto"}   # ca12-1.trust.zone
-  account_52: {locale: "en-CA", timezone_id: "America/Toronto"}   # ca10-1.trust.zone
-  account_53: {locale: "en-CA", timezone_id: "America/Toronto"}   # ca11.trust.zone
-  account_54: {locale: "en-CA", timezone_id: "America/Toronto"}   # ca13-1.trust.zone
-  account_55: {locale: "de-CH", timezone_id: "Europe/Zurich"}   # ch2.trust.zone
 
 # ОПЦИОНАЛЬНО: переопределить движок браузера для аккаунта. По умолчанию
 # он выводится из impersonate в accounts.yaml (firefoxNNN -> firefox,

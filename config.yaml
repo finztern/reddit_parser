@@ -8,7 +8,7 @@
 
 # ---- Что опрашиваем ----
 # Список сабов без "r/", склеивается через "+". Только "all" — основной режим.
-stream_subs: ["AskReddit","AmItheAsshole","politics","worldnews","soccer","nba","gaming","AskOuija","all"]
+stream_subs: ["all"]
 
 reddit_base_url: "https://www.reddit.com"
 
@@ -71,7 +71,7 @@ queue_control:
   request_timeout_seconds: 2
 
   # Сколько элементов должно быть "в работе" у реплик (2 реплики x 64).
-  inflight_target: 192
+  inflight_target: 128
   # Сколько должно ждать в очереди, чтобы реплики не простаивали
   # (по умолчанию = inflight_target).
   # queue_target: 128
@@ -101,7 +101,6 @@ queue_control:
 # Дедуп-кэш (в памяти, общий на все аккаунты).
 seen_cache_size: 40000
 
-  
 store_endpoint: "http://127.0.0.1:9000/store_items"
 # верхняя граница размера одного POST (сам батч — queue_control.send_batch_size)
 batch_max_items: 500
@@ -169,7 +168,52 @@ rotation:
   enabled: true
   # слоты, которым разрешена ротация (только ГОСТЕВЫЕ). Для первого
   # теста оставь один, например [account_14].
-  slots: []
+  slots:
+    - account_11
+    - account_12
+    - account_13
+    - account_14
+    - account_15
+    - account_16
+    - account_17
+    - account_18
+    - account_19
+    - account_20
+    - account_21
+    - account_22
+    - account_23
+    - account_24
+    - account_25
+    - account_26
+    - account_27
+    - account_28
+    - account_29
+    - account_30
+    - account_31
+    - account_32
+    - account_33
+    - account_34
+    - account_35
+    - account_36
+    - account_37
+    - account_38
+    - account_39
+    - account_40
+    - account_41
+    - account_42
+    - account_43
+    - account_44
+    - account_45
+    - account_46
+    - account_47
+    - account_48
+    - account_49
+    - account_50
+    - account_51
+    - account_52
+    - account_53
+    - account_54
+    - account_55
 
   # --- воркер ---
   # Сколько пустых листингов подряд до заявки (кулдауны 3,6,12,24,48,60с —
