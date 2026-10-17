@@ -252,6 +252,30 @@ def test_validate_snapshot_detects_breakage():
     assert m.validate_snapshot("не json") == ["снимок не объект"]
 
 
+def test_validate_snapshot_checks_invalid_nested_values():
+    c, _ = make(accounts=[{"name": "a1", "enabled": True}])
+    original = c.snapshot()
+    mutations = [
+        lambda snap: snap.update({"global": None}),
+        lambda snap: snap["global"].update(windows=None),
+        lambda snap: snap["global"]["windows"].update({"1m": None}),
+        lambda snap: snap["global"]["windows"]["1m"].update({
+            "requests_per_sec": -1, "dedupe_ratio": 2, "codes": [],
+        }),
+        lambda snap: snap["global"].update(queue={}),
+        lambda snap: snap["global"].update(accounts={}),
+        lambda snap: snap.update(series={"points": 1}),
+        lambda snap: snap.update(accounts=[None]),
+        lambda snap: snap.update(accounts=[original["accounts"][0], original["accounts"][0]]),
+        lambda snap: snap["accounts"][0].update(needs_login="no", ok_ratio_1h=2),
+        lambda snap: snap["global"]["accounts"].update(total=2),
+    ]
+    for mutate in mutations:
+        snap = json.loads(json.dumps(original))
+        mutate(snap)
+        assert m.validate_snapshot(snap), mutate
+
+
 def test_schema_doc_lists_every_snapshot_field():
     """docs/metrics-schema.md не отстаёт от кода: каждое поле снимка в нём упомянуто."""
     doc = (ROOT / "docs" / "metrics-schema.md").read_text(encoding="utf-8")

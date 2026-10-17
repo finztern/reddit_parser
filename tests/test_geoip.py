@@ -1,5 +1,7 @@
 import json
 import sys
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -155,6 +157,83 @@ def test_lookup_exit_ip_prefers_maxmind_when_available(monkeypatch, tmp_path):
         "timezone": "America/Chicago", "source": "maxmind",
     }
     assert len(calls) == 1 and "ipify" in calls[0][0]
+
+
+def test_maxmind_lookup_returns_city_timezone(monkeypatch):
+    class Reader:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def city(self, _ip):
+            return types.SimpleNamespace(
+                country=types.SimpleNamespace(iso_code="US"),
+                location=types.SimpleNamespace(time_zone="America/Chicago"),
+            )
+
+    geoip2 = types.ModuleType("geoip2")
+    database = types.ModuleType("geoip2.database")
+    database.Reader = Reader
+    geoip2.database = database
+    monkeypatch.setitem(sys.modules, "geoip2", geoip2)
+    monkeypatch.setitem(sys.modules, "geoip2.database", database)
+
+    assert geoip._maxmind_lookup("203.0.113.1", "/db") == {
+        "ip": "203.0.113.1", "country": "US", "timezone": "America/Chicago",
+    }
+
+
+def test_maxmind_lookup_falls_back_to_country_and_handles_missing_database(monkeypatch):
+    class Reader:
+        def __init__(self, _path):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def city(self, _ip):
+            raise RuntimeError("city record missing")
+
+        def country(self, _ip):
+            return types.SimpleNamespace(country=types.SimpleNamespace(iso_code="DE"))
+
+    geoip2 = types.ModuleType("geoip2")
+    database = types.ModuleType("geoip2.database")
+    database.Reader = Reader
+    geoip2.database = database
+    monkeypatch.setitem(sys.modules, "geoip2", geoip2)
+    monkeypatch.setitem(sys.modules, "geoip2.database", database)
+    assert geoip._maxmind_lookup("203.0.113.2", "/db") == {
+        "ip": "203.0.113.2", "country": "DE", "timezone": None,
+    }
+
+    monkeypatch.delitem(sys.modules, "geoip2.database")
+    monkeypatch.delitem(sys.modules, "geoip2")
+    assert geoip._maxmind_lookup("203.0.113.2", "/db") is None
+
+
+def test_maxmind_lookup_returns_none_when_database_fails(monkeypatch, caplog):
+    class Reader:
+        def __init__(self, _path):
+            raise OSError("database unreadable")
+
+    geoip2 = types.ModuleType("geoip2")
+    database = types.ModuleType("geoip2.database")
+    database.Reader = Reader
+    geoip2.database = database
+    monkeypatch.setitem(sys.modules, "geoip2", geoip2)
+    monkeypatch.setitem(sys.modules, "geoip2.database", database)
+
+    assert geoip._maxmind_lookup("203.0.113.3", "/db") is None
+    assert "MaxMind /db" in caplog.text
 
 
 def test_lookup_exit_ip_accumulates_provider_failures():

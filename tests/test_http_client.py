@@ -13,7 +13,9 @@ sys.path.insert(0, str(ROOT))
 
 from scraper import http_client  # noqa: E402
 from scraper.health import ExecutorHealth  # noqa: E402
+from scraper.http_client import CurlSessionHandle  # noqa: E402
 from scraper.models import FetchResult  # noqa: E402
+from scraper.profile_gen import generate_profile  # noqa: E402
 
 
 class Response:
@@ -162,6 +164,115 @@ def test_fetch_page_classifies_invalid_json_responses(body, expected_kind):
 def test_fetch_page_classifies_request_exceptions_as_network_errors():
     result, _ = fetch_page(cffi_requests.RequestsError("connection failed"))
     assert result.error_kind == "network"
+
+
+def test_fetch_page_timeout_updates_health_and_swaps_session(monkeypatch):
+    curl = CurlHandle(Response(data={"data": {"children": []}}))
+    health = ExecutorHealth()
+
+    async def timeout(*_args, **_kwargs):
+        raise asyncio.TimeoutError
+
+    monkeypatch.setattr(http_client.asyncio, "wait_for", timeout)
+
+    async def scenario():
+        from concurrent.futures import ThreadPoolExecutor
+
+        pool = ThreadPoolExecutor(max_workers=1)
+        executor = type("Executor", (), {"current": pool})()
+        try:
+            return await http_client._fetch_comments_page(
+                AiohttpSession(), "https://reddit.example", "all", 10,
+                curl, 5, "account", executor, executor_health=health,
+            )
+        finally:
+            pool.shutdown(wait=True, cancel_futures=True)
+
+    result = run(scenario())
+    assert result.error_kind == "network"
+    assert curl.swaps == 1
+    assert health.timed_out_waits == 1
+
+
+def test_fetch_page_tolerates_response_debug_fields_that_raise():
+    class BrokenHeaders:
+        def get(self, _key, _default=None):
+            return None
+
+        def items(self):
+            raise OSError("header mapping unavailable")
+
+    response = Response(data={"data": {"children": []}})
+    response.headers = BrokenHeaders()
+    result, _ = fetch_page(response)
+
+    assert result.error_kind == "empty"
+
+
+def test_fetch_page_tolerates_unreadable_body_and_headers_for_invalid_json():
+    class BrokenResponse(Response):
+        @property
+        def text(self):
+            raise OSError("body unavailable")
+
+        @property
+        def headers(self):
+            return BrokenHeaders()
+
+        @headers.setter
+        def headers(self, _value):
+            pass
+
+        @text.setter
+        def text(self, _value):
+            pass
+
+    class BrokenHeaders:
+        def get(self, _key, _default=None):
+            return None
+
+        def items(self):
+            raise OSError("headers unavailable")
+
+    response = BrokenResponse(data=ValueError("bad JSON"))
+    assert fetch_page(response)[0].error_kind == "empty"
+
+
+def test_curl_session_handle_updates_headers_swaps_and_preserves_on_invalid_target(monkeypatch):
+    created = []
+
+    class Session:
+        def __init__(self, *, impersonate, proxies):
+            if impersonate == "unsupported":
+                raise ValueError("unsupported")
+            self.impersonate = impersonate
+            self.proxies = proxies
+            created.append(self)
+
+    monkeypatch.setattr(http_client.cffi_requests, "Session", Session)
+    handle = CurlSessionHandle("chrome131", {"http": "http://proxy"}, locale="en-US")
+    initial = handle.current
+    profile = generate_profile("acct", 1)
+    handle.set_profile_headers(profile)
+    assert handle.request_headers()["User-Agent"] == profile["user_agent"]
+    assert "Accept-Language" in handle.request_headers()
+
+    handle.set_locale("de-DE")
+    assert handle.request_headers()["Accept-Language"].startswith("de-DE")
+    handle.set_impersonate("firefox147")
+    assert handle.current is created[-1]
+    assert handle.current is not initial
+    assert handle.current.impersonate == "firefox147"
+    assert handle.swaps == 1
+
+    active = handle.current
+    with pytest.raises(ValueError, match="unsupported"):
+        handle.set_impersonate("unsupported")
+    assert handle.current is active
+    assert handle._impersonate == "firefox147"
+    handle.swap()
+    assert handle.current is created[-1]
+    assert handle.swaps == 2
 
 
 @pytest.mark.parametrize("children,after,expected_kind,expected_after", [
