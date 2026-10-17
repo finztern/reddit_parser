@@ -10,8 +10,8 @@
 # Опции:
 #   --user NAME   от чьего имени работают джобы (по умолчанию $SUDO_USER, иначе текущий)
 #   --root DIR    каталог проекта (по умолчанию — родитель каталога scripts/)
-#   --enable      enable --now для refresh-cookies.timer, filter-nodes.timer, rotation-daemon
-#                 (+ refresh-guest-cookies.timer только с --with-guest)
+#   --enable      enable --now для backup-sessions.timer, filter-nodes.timer,
+#                 rotation-daemon и выбранных таймеров обновления
 #   --no-login    не ставить refresh-cookies (логин-аккаунты не нужны)
 #   --with-guest  ставить и включать гостевой харвест (refresh-guest-cookies.*); по умолчанию
 #                 парк логин-only и гостевой таймер НЕ ставится (fleet.guest_enabled: false)
@@ -93,12 +93,12 @@ if [[ $GUEST -eq 0 ]]; then
   fi
 fi
 if [[ $ENABLE -eq 1 ]]; then
-  TO_ENABLE=(filter-nodes.timer rotation-daemon.service)
+  TO_ENABLE=(backup-sessions.timer filter-nodes.timer rotation-daemon.service)
   [[ $GUEST -eq 1 ]] && TO_ENABLE+=(refresh-guest-cookies.timer)
   [[ $LOGIN -eq 1 ]] && TO_ENABLE+=(refresh-cookies.timer)
   systemctl enable --now "${TO_ENABLE[@]}"
   echo "Включено: ${TO_ENABLE[*]}"
 else
   echo "Юниты установлены, но не включены. Включить:"
-  echo "  sudo systemctl enable --now filter-nodes.timer rotation-daemon.service$([[ $GUEST -eq 1 ]] && echo ' refresh-guest-cookies.timer')$([[ $LOGIN -eq 1 ]] && echo ' refresh-cookies.timer')"
+  echo "  sudo systemctl enable --now backup-sessions.timer filter-nodes.timer rotation-daemon.service$([[ $GUEST -eq 1 ]] && echo ' refresh-guest-cookies.timer')$([[ $LOGIN -eq 1 ]] && echo ' refresh-cookies.timer')"
 fi

@@ -22,6 +22,8 @@ if [[ ! -d "${SRC}" ]]; then
   exit 1
 fi
 
+RESTORED=0
+
 restore_dir() {
   local name="$1"
   local target="${ROOT}/${name}"
@@ -29,6 +31,7 @@ restore_dir() {
   if [[ -n "${ACCOUNT}" ]]; then
     if [[ -f "${SRC}/${name}/${ACCOUNT}.json" ]]; then
       cp -a "${SRC}/${name}/${ACCOUNT}.json" "${target}/"
+      RESTORED=$((RESTORED + 1))
     fi
   elif [[ -d "${SRC}/${name}" ]]; then
     find "${SRC}/${name}" -mindepth 1 -maxdepth 1 -exec cp -a {} "${target}/" \;
@@ -42,6 +45,7 @@ if [[ -d "${SRC}/state/profiles" ]]; then
   if [[ -n "${ACCOUNT}" ]]; then
     if [[ -f "${SRC}/state/profiles/${ACCOUNT}.json" ]]; then
       cp -a "${SRC}/state/profiles/${ACCOUNT}.json" "${ROOT}/state/profiles/"
+      RESTORED=$((RESTORED + 1))
     fi
   else
     find "${SRC}/state/profiles" -mindepth 1 -maxdepth 1 -exec cp -a {} "${ROOT}/state/profiles/" \;
@@ -49,6 +53,10 @@ if [[ -d "${SRC}/state/profiles" ]]; then
 fi
 
 if [[ -n "${ACCOUNT}" ]]; then
+  if [[ "${RESTORED}" -eq 0 ]]; then
+    echo "no session files found for account ${ACCOUNT} in ${SRC}" >&2
+    exit 1
+  fi
   echo "restored account ${ACCOUNT} from ${SRC}"
 else
   echo "restored from ${SRC}"

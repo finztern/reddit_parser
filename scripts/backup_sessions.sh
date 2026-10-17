@@ -21,7 +21,9 @@ if [[ -d "${ROOT}/state/profiles" ]]; then
   cp -a "${ROOT}/state/profiles/." "${DEST}/state/profiles/"
 fi
 
+find "${DEST}" -type d -exec chmod 700 {} +
 find "${DEST}" -type f -exec chmod 600 {} +
-find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d -mtime +14 -exec rm -rf {} +
+find "${BACKUP_ROOT}" -mindepth 1 -maxdepth 1 -type d \
+  -regextype posix-extended -regex '.*/[0-9]{8}' -mmin +20160 -exec rm -rf {} +
 
 echo "backup: ${DEST}"
