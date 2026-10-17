@@ -47,6 +47,10 @@ services:
     container_name: reddit_scraper_app
     network_mode: host
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 524288
     depends_on:
       - mihomo
     volumes:
