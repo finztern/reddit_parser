@@ -52,6 +52,20 @@ MIN_FLEET_INTERVAL = 0.05
 STARVED_WARN_RATIO = 0.2
 
 
+def read_runtime_disabled(path) -> set[str]:
+    """Имена слотов, выключенных «на лету» (панель, модуль 07: клавиша `p`) — без правки yaml.
+    Файл — JSON-список имён или {"disabled": [...]}; нет файла / мусор -> пустое множество."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    if isinstance(data, dict):
+        data = data.get("disabled")
+    if not isinstance(data, list):
+        return set()
+    return {str(x) for x in data}
+
+
 @dataclass
 class PollOutcome:
     page_len: int         # сколько комментариев на первой странице
@@ -75,8 +89,12 @@ class AccountSlot:
 
 
 class PollScheduler:
-    def __init__(self, get, demand=None, clock=time.monotonic, rng=random):
+    def __init__(self, get, demand=None, clock=time.monotonic, rng=random, runtime_disabled_path=None):
         self._get = get  # ConfigStore.get — конфиг читается на лету
+        # state/runtime_disabled.json: пауза аккаунтов из панели; объединяется с fleet_polling.disabled_accounts
+        self._rt_path = Path(runtime_disabled_path) if runtime_disabled_path else None
+        self._rt_mtime: float | None = None
+        self._rt_names: set[str] = set()
         self._demand = demand  # Sender.demand: 0 — не опрашивать, 1 — обычно, 2 — срочно
         self._clock = clock
         self._rng = rng
@@ -186,8 +204,21 @@ class PollScheduler:
             return float(self._get("stream_min_interval_seconds", 0.4))
         return self.interval
 
+    def _runtime_disabled(self) -> set[str]:
+        """Перечитывается только при смене mtime (одна os.stat на тик)."""
+        if self._rt_path is None:
+            return set()
+        try:
+            mt = self._rt_path.stat().st_mtime_ns
+        except OSError:
+            mt = None
+        if mt != self._rt_mtime:
+            self._rt_mtime = mt
+            self._rt_names = read_runtime_disabled(self._rt_path) if mt is not None else set()
+        return self._rt_names
+
     def _sync_disabled(self, cfg: FleetPollingConfig, now: float):
-        off = set(cfg.disabled_accounts)
+        off = set(cfg.disabled_accounts) | self._runtime_disabled()
         for s in self.slots:
             want = s.name in off
             if want != (s.health.state == DISABLED):
