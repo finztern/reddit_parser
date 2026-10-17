@@ -57,6 +57,7 @@ async def account_worker(
     scheduler: PollScheduler,
     http_executor: ExecutorHandle,
     executor_health: ExecutorHealth | None = None,
+    metrics=None,  # MetricsCollector | None (модуль 06); None — метрики выключены
 ):
     name = account["name"]
     cookie_file = BASE_DIR / account["cookie_file"]
@@ -146,6 +147,7 @@ async def account_worker(
                 await slot.queue.get()  # слот выдан планировщиком
 
                 outcome: PollOutcome | None = None
+                result = None
                 cooldown = 0.0
                 sent = 0
                 kind: str | None = None  # итог цикла для счётчиков планировщика
@@ -180,6 +182,8 @@ async def account_worker(
                                     auth_dead = False
                                     force_profile = True
                                     health.reset(now_m, "rotation_done")
+                                    if metrics is not None:
+                                        metrics.event(name, "node_replaced", "rotation_done")
                                     log.info("[%s] ротация выполнена — возобновляю опрос с новой идентичностью", name)
                                 else:
                                     wait = max(0.0, retry_after - time.time())
@@ -256,6 +260,8 @@ async def account_worker(
                         log.info("[%s] cookies обновлены из %s (%d шт.)", name, cookie_file, len(new_cookies))
                         if health.state == AUTH_FAILED:
                             health.reset(now_m, "new_cookies")
+                            if metrics is not None:
+                                metrics.event(name, "relogin_ok", "новые cookies применены")
                         if auth_dead or backoff.consecutive_auth_errors:
                             backoff.consecutive_auth_errors = 0
                             auth_dead = False
@@ -409,6 +415,14 @@ async def account_worker(
                         dropped_dup, sender.backlog, stats["overlap"], cooldown,
                     )
                 finally:
+                    if metrics is not None and kind and kind != "skipped":
+                        # O(1), без ввода-вывода: запись метрик цикл опроса не блокирует
+                        metrics.record_poll(
+                            name, kind, status=getattr(result, "status", None),
+                            requests=(result.pages_fetched if kind == "ok" and result is not None else 1),
+                            fetched=(len(result.comments) if kind == "ok" and result is not None else 0),
+                            unique=sent, state=health.effective_state(scheduler.now()),
+                        )
                     scheduler.release(slot, outcome, cooldown, sent, kind)
     finally:
         scheduler.unregister(slot)

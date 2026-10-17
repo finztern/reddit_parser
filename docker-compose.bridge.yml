@@ -53,6 +53,11 @@ services:
       # 127.0.0.1 из config.yaml внутри контейнера — это сам контейнер,
       # поэтому URL очереди (QueueGovernor) тоже нужно переопределить:
       - QUEUE_CONTROL_URL=http://host.docker.internal:9000/queue
+      # метрики (модуль 06): внутри контейнера слушаем на всех интерфейсах,
+      # наружу порт публикуется ТОЛЬКО на localhost хоста
+      - METRICS_BIND=0.0.0.0
+    ports:
+      - "127.0.0.1:9100:9100"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     networks:

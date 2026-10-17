@@ -288,3 +288,16 @@ human:
   max_session_seconds: 150      # жёсткий потолок
   on_first_login: true          # короткая сессия после первого входа через login_hub
   start_gap_seconds: 45
+
+# --- метрики скрапера (модуль 06, scraper/metrics.py) ---
+# Скрапер пишет, панель (модуль 07) только читает: GET /metrics.json + state/metrics_snapshot.json
+# + журнал state/events.jsonl. Схема — docs/metrics-schema.md. Хост/порт можно переопределить
+# переменными METRICS_BIND / METRICS_PORT (в bridge-режиме Docker внутри контейнера нужен 0.0.0.0).
+metrics:
+  enabled: true
+  host: "127.0.0.1"
+  port: 9100
+  snapshot_interval_seconds: 2
+  identity_refresh_seconds: 30     # нода/страна/IP/возраст cookies перечитываются раз в N с (в потоке)
+  events_max_bytes: 5242880        # ротация events.jsonl по размеру
+  events_backups: 3

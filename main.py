@@ -38,6 +38,7 @@ from scraper.constants import (
     log,
 )
 from scraper.identity import STATE_DIR
+from scraper.metrics import EventJournal, MetricsCollector, serve_metrics
 from scraper.health import ExecutorHandle, ExecutorHealth, health_report_loop
 from scraper.scheduler import PollScheduler
 from scraper.sender import Sender
@@ -105,8 +106,16 @@ async def main():
     try:
         store_connector = aiohttp.TCPConnector(ttl_dns_cache=300, keepalive_timeout=60)
         async with aiohttp.ClientSession(connector=store_connector) as store_session:
-            sender = Sender(config, seen, store_session, log)
+            mcfg = config.get("metrics", {}) or {}
+            metrics = None
+            if mcfg.get("enabled", True):
+                metrics = MetricsCollector(state_dir=STATE_DIR, journal=EventJournal(
+                    STATE_DIR / "events.jsonl", max_bytes=int(mcfg.get("events_max_bytes", 5 * 1024 * 1024)),
+                    backups=int(mcfg.get("events_backups", 3))))
+            sender = Sender(config, seen, store_session, log, metrics=metrics)
             scheduler = PollScheduler(config.get, demand=sender.demand)
+            if metrics is not None:
+                metrics.attach(scheduler=scheduler, sender=sender, accounts=all_accounts)
 
             # "Ядро" — без любой из этих задач процесс бессмыслен: падение
             # одной из них останавливает процесс (docker перезапустит).
@@ -141,11 +150,17 @@ async def main():
                             account, config, sender, seen, scheduler,
                             http_executor_handle,
                             executor_health,
+                            metrics=metrics,
                             name=account["name"],
                         ),
                         name=f"account_worker[{account['name']}]",
                     )
                 )
+
+            # Метрики — НЕ ядро: их падение не останавливает скрапер (serve_metrics сам глотает ошибки).
+            aux_tasks = []
+            if metrics is not None:
+                aux_tasks.append(asyncio.create_task(serve_metrics(metrics, mcfg, STATE_DIR), name="metrics"))
 
             # Процесс останавливается только по сигналу, при падении ядра
             # или когда завершились ВСЕ воркеры (завершение одного воркера
@@ -186,7 +201,7 @@ async def main():
                     log.error("Ядро: задача %s завершилась%s, останавливаю процесс",
                               t.get_name(), f" с ошибкой: {exc!r}" if exc else "")
 
-            everything = [*core_tasks, *worker_tasks, stop_waiter, workers_waiter]
+            everything = [*core_tasks, *worker_tasks, *aux_tasks, stop_waiter, workers_waiter]
             for t in everything:
                 if not t.done():
                     t.cancel()
