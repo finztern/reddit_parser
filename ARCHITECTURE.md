@@ -161,7 +161,9 @@ fallback `target_rate_per_second`. Размер batch дополнительно
 
 `state/runtime_disabled.json` позволяет приостановить слот без правки YAML.
 `state/fleet_polling.json` — диагностика scheduler-а; это не источник
-конфигурации.
+конфигурации. Протоколы файлов и их writers/readers описаны в
+[docs/state-protocols.md](./docs/state-protocols.md); карта потребителей настроек
+и правил reload находится в [docs/configuration-map.md](./docs/configuration-map.md).
 
 `config.yaml` перечитывается раз в `CONFIG_RELOAD_SECONDS` (по умолчанию 5 с).
 `accounts.yaml` читается только при запуске. Пути/параметры с поддержкой

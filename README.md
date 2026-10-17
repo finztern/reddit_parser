@@ -18,6 +18,8 @@
 | Поднять проект на Linux-сервере | [DEPLOY.md](./DEPLOY.md) |
 | Проверить/заменить ноды или изменить тип парка | [ROTATION_SETUP.md](./ROTATION_SETUP.md) |
 | Посмотреть JSON метрик для панели | [docs/metrics-schema.md](./docs/metrics-schema.md) |
+| Найти потребителей настройки и узнать reload behavior | [docs/configuration-map.md](./docs/configuration-map.md) |
+| Изменить протокол обмена через `state/` | [docs/state-protocols.md](./docs/state-protocols.md) |
 | Найти реализацию функции | `main.py`, `scraper/`, `scripts/`; исходные ТЗ в `docs/tz/` не являются runbook |
 | Быстро сориентировать coding assistant | [CLAUDE.md](./CLAUDE.md) |
 
@@ -56,7 +58,9 @@ scripts/
   restore_sessions.sh       Восстановление резервной копии
 tests/                      Offline unit/integration tests по компонентам
 docs/
+  configuration-map.md     Настройки, consumers и reload behavior
   metrics-schema.md         Публичный JSON contract для метрик
+  state-protocols.md       Протоколы файлов между workers/jobs/dashboard
   tz/                       Исторические ТЗ; реализация и тесты — актуальнее
 ```
 

@@ -13,6 +13,10 @@ a substitute for implementation or tests; source code is authoritative.
   host jobs, backup, or recovery.
 - Read [ROTATION_SETUP.md](./ROTATION_SETUP.md) before changing account
   migration, proxy pools, node replacement, or guest rotation.
+- Read [docs/configuration-map.md](./docs/configuration-map.md) before changing
+  YAML settings, defaults, or configuration reload behavior.
+- Read [docs/state-protocols.md](./docs/state-protocols.md) before changing a
+  file exchanged between scraper, host jobs, dashboard, or rotation daemon.
 - Read [docs/metrics-schema.md](./docs/metrics-schema.md) before changing
   `scraper/metrics.py` or `scripts/dashboard.py`.
 - `docs/tz/` contains original requirements. It is historical context, not a
@@ -37,6 +41,8 @@ alone may miss callers or cleanup paths.
 | Config reload and cookie file updates | `scraper/config.py` | `main.py`, `scraper/worker.py` | `tests/test_config_runtime.py`, `tests/test_repo_config.py`, `tests/test_worker_branches.py` |
 | Account/profile geo and fingerprints | `scraper/profile_gen.py` | `scraper/geo.py`, `scraper/geoip.py`, `scraper/identity.py` | `tests/test_profile_gen.py`, `tests/test_profile_edges.py`, `tests/test_geo.py`, `tests/test_geoip.py`, `tests/test_identity_state.py` |
 | Metrics payload, endpoint, dashboard | `scraper/metrics.py` | `scripts/dashboard.py`, `docs/metrics-schema.md` | `tests/test_metrics.py`, `tests/test_dashboard.py` |
+| YAML defaults, consumers, reload behavior | `docs/configuration-map.md` | Relevant `get()` call sites and script-specific loaders | `tests/test_config_runtime.py`, `tests/test_repo_config.py` |
+| Shared JSON/marker files under `state/` | `docs/state-protocols.md` | Search both writers and readers before changing a field/status | `tests/test_identity_state.py`, subsystem-specific tests |
 | Login and cookie maintenance | Relevant script in `scripts/` | `scripts/human_session.py`, `scripts/login_hub.py`, `scripts/login_fleet.py`, config files under `scripts/` | `tests/test_human_session.py`, `tests/test_login_hub.py`, `tests/test_login_fleet.py` |
 | Node checks, migration, replacement | `scripts/filter_nodes.py`, `scripts/convert_to_login.py`, or `scripts/rotation_daemon.py` | `scraper/identity.py`, `scraper/profile_gen.py`, `state/` contracts | `tests/test_filter_nodes.py`, `tests/test_add_guest_slots.py`, `tests/test_backup_sessions.py` |
 
