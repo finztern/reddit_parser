@@ -19,6 +19,9 @@ a substitute for implementation or tests; source code is authoritative.
   file exchanged between scraper, host jobs, dashboard, or rotation daemon.
 - Read [docs/metrics-schema.md](./docs/metrics-schema.md) before changing
   `scraper/metrics.py` or `scripts/dashboard.py`.
+- For work scoped to `scraper/` or `scripts/`, read its local
+  [AGENTS.md](./scraper/AGENTS.md) or [AGENTS.md](./scripts/AGENTS.md)
+  respectively; these contain only subsystem-specific invariants.
 - `docs/tz/` contains original requirements. It is historical context, not a
   production runbook or proof that every acceptance target was measured.
 

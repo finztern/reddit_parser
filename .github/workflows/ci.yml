@@ -25,6 +25,9 @@ jobs:
             requirements.txt
             requirements-refresh.txt
 
+      - name: Check documentation links and code map
+        run: python scripts/check_docs.py
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
