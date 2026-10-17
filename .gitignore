@@ -3,11 +3,13 @@ cookies/.*.tmp
 storage_state/*.json
 storage_state/.*.tmp
 state/
+backups/
 __pycache__/
 *.pyc
 mihomo_config.yaml
 vless_accounts.env
 all_nodes.txt
+all_nodes.reddit_ok.txt
 venv/
 .venv*/
 *.bak-*

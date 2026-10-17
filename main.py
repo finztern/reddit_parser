@@ -37,6 +37,8 @@ from scraper.constants import (
     QUEUE_CONTROL_URL_OVERRIDE,
     log,
 )
+from scraper.identity import STATE_DIR
+from scraper.metrics import EventJournal, MetricsCollector, serve_metrics
 from scraper.health import ExecutorHandle, ExecutorHealth, health_report_loop
 from scraper.scheduler import PollScheduler
 from scraper.sender import Sender
@@ -61,7 +63,12 @@ async def main():
     config = ConfigStore(CONFIG_PATH, CONFIG_RELOAD_SECONDS)
     config.load_once()
 
-    accounts = [a for a in load_accounts() if a.get("enabled")]
+    all_accounts = load_accounts()
+    accounts = [a for a in all_accounts if a.get("enabled")]
+    waiting = [a["name"] for a in all_accounts if a.get("login") and not a.get("enabled")]
+    if waiting:
+        log.warning("Нужен вход (login: true, enabled: false — не запускаются, пока не войдёшь через "
+                    "scripts/manual_login.py): %d — %s", len(waiting), ", ".join(waiting))
     if not accounts:
         log.error("Нет ни одного enabled:true аккаунта в accounts.yaml — нечего запускать")
         return
@@ -99,8 +106,17 @@ async def main():
     try:
         store_connector = aiohttp.TCPConnector(ttl_dns_cache=300, keepalive_timeout=60)
         async with aiohttp.ClientSession(connector=store_connector) as store_session:
-            sender = Sender(config, seen, store_session, log)
-            scheduler = PollScheduler(config.get, demand=sender.demand)
+            mcfg = config.get("metrics", {}) or {}
+            metrics = None
+            if mcfg.get("enabled", True):
+                metrics = MetricsCollector(state_dir=STATE_DIR, journal=EventJournal(
+                    STATE_DIR / "events.jsonl", max_bytes=int(mcfg.get("events_max_bytes", 5 * 1024 * 1024)),
+                    backups=int(mcfg.get("events_backups", 3))))
+            sender = Sender(config, seen, store_session, log, metrics=metrics)
+            scheduler = PollScheduler(config.get, demand=sender.demand,
+                                      runtime_disabled_path=STATE_DIR / "runtime_disabled.json")
+            if metrics is not None:
+                metrics.attach(scheduler=scheduler, sender=sender, accounts=all_accounts)
 
             # "Ядро" — без любой из этих задач процесс бессмыслен: падение
             # одной из них останавливает процесс (docker перезапустит).
@@ -120,7 +136,10 @@ async def main():
                     name="health_report_loop",
                 ),
                 asyncio.create_task(scheduler.run(), name="poll_scheduler"),
-                asyncio.create_task(scheduler.stats_loop(log), name="stream_stats"),
+                asyncio.create_task(
+                    scheduler.stats_loop(log, snapshot_path=STATE_DIR / "fleet_polling.json"),
+                    name="stream_stats",
+                ),
             ]
 
             worker_tasks = []
@@ -132,11 +151,17 @@ async def main():
                             account, config, sender, seen, scheduler,
                             http_executor_handle,
                             executor_health,
+                            metrics=metrics,
                             name=account["name"],
                         ),
                         name=f"account_worker[{account['name']}]",
                     )
                 )
+
+            # Метрики — НЕ ядро: их падение не останавливает скрапер (serve_metrics сам глотает ошибки).
+            aux_tasks = []
+            if metrics is not None:
+                aux_tasks.append(asyncio.create_task(serve_metrics(metrics, mcfg, STATE_DIR), name="metrics"))
 
             # Процесс останавливается только по сигналу, при падении ядра
             # или когда завершились ВСЕ воркеры (завершение одного воркера
@@ -177,7 +202,7 @@ async def main():
                     log.error("Ядро: задача %s завершилась%s, останавливаю процесс",
                               t.get_name(), f" с ошибкой: {exc!r}" if exc else "")
 
-            everything = [*core_tasks, *worker_tasks, stop_waiter, workers_waiter]
+            everything = [*core_tasks, *worker_tasks, *aux_tasks, stop_waiter, workers_waiter]
             for t in everything:
                 if not t.done():
                     t.cancel()

@@ -24,6 +24,19 @@ Cookies в неё не входят — их харвестим заново п�
      атомарно кладёт cookies в cookies/account_N.json, затем status=done.
      Воркер подхватывает всё сам.
 
+РЕЖИМ node-replace-only (fleet.node_replace_only, модуль 01) — для ЛОГИН-слотов
+(accounts.yaml: login: true / refresh_cookies.yaml: login_accounts):
+  - заявка воркера («нода сгорела»: 403/blocked/пустые листинги подряд) переводит
+    слот в needs_node;
+  - демон берёт свободную ГОДНУЮ ноду из запаса (all_nodes.reddit_ok.txt, только
+    нетронутые ноды — без чужих идентичностей), переключает её в mihomo и проверяет;
+  - отпечаток слота (профиль) НЕ меняется, сессия и cookies НЕ трогаются, браузер
+    не запускается — меняется только IP/нода (и гео в профиле слота);
+  - слот помечается «проверить вход» (state/check_login/account_N): флаг снимает
+    manual_login.py / refresh_cookies.py после подтверждённого входа;
+  - если замены нет — слот остаётся needs_node, демон повторяет попытку сам.
+Гостевая ротация (описана выше) работает только при fleet.guest_enabled: true.
+
 Переживает рестарты контейнеров: всё состояние в state/. Каждые
 reconcile_seconds демон сверяет выбор ноды в mihomo с реестром — если
 mihomo перезапускали (select сбрасывается на первую ноду), выбор
@@ -57,6 +70,7 @@ sys.path.insert(0, str(SCRIPTS))
 sys.path.insert(0, str(ROOT))
 
 import generate_mihomo_config as gmc  # noqa: E402
+import login_fleet as lf  # noqa: E402
 import refresh_guest_cookies as rgc  # noqa: E402
 import rotate_fingerprints as rf  # noqa: E402
 import rotation as rot  # noqa: E402
@@ -107,6 +121,10 @@ def load_rcfg() -> dict:
         log.warning("config.yaml не прочитан (%s) — беру дефолты", e)
         data = {}
     return {**DEFAULTS, **(data.get("rotation") or {})}
+
+
+def load_fleet() -> dict:
+    return lf.load_fleet_cfg(ROOT / "config.yaml")
 
 
 def load_state() -> dict:
@@ -174,10 +192,15 @@ class Daemon:
         self.gcfg: dict = {}
         self.env = None
         self.reserved_keys: set[str] = set()
+        self.fleet: dict = dict(lf.FLEET_DEFAULTS)
+        self.login_cfg: dict = {}
+        self.login_set: set[str] = set()
+        self.ok_keys: set[str] | None = None   # годные ноды (reddit_ok.txt); None — фильтра нет
 
     # ---- контекст (перечитываем файлы на каждой итерации) ----
     def refresh_ctx(self) -> None:
         self.rc = load_rcfg()
+        self.fleet = load_fleet()
         self.mihomo = rot.Mihomo(self.rc["mihomo_api"], self.rc.get("mihomo_secret", ""))
         data = yaml.safe_load((ROOT / "accounts.yaml").read_text(encoding="utf-8")) or {}
         self.accounts = {a["name"]: a for a in data.get("accounts", [])}
@@ -206,8 +229,27 @@ class Daemon:
         # ноды логин-аккаунтов (не гостевых) — только им, гостям не отдаём
         self.reserved_keys = {rot.node_key(l) for a, l in assigned.items() if a not in guest}
 
+        # логин-слоты и пул годных нод (модуль 01)
+        self.login_cfg = lf.load_yaml(SCRIPTS / "refresh_cookies.yaml")
+        self.login_set = lf.login_account_names(self.login_cfg, list(self.accounts.values())) - guest
+        self.ok_keys = None
+        if self.fleet.get("use_reddit_ok_file"):
+            ok_file = nf.with_name(nf.stem + ".reddit_ok.txt") if nf.is_absolute() else \
+                (ROOT / nf).with_name(nf.stem + ".reddit_ok.txt")
+            if ok_file.exists():
+                self.ok_keys = {n.key for n in rot.load_pool(ok_file)}
+
     def guest_names(self) -> list[str]:
+        """Гостевые слоты — только при fleet.guest_enabled (иначе гостевой режим выключен)."""
+        if not self.fleet.get("guest_enabled"):
+            return []
         return sorted(self.gcfg["guest_accounts"], key=rot._acc_num)
+
+    def login_slots(self) -> list[str]:
+        """Логин-слоты под присмотром демона (режим node-replace-only)."""
+        if not self.fleet.get("node_replace_only"):
+            return []
+        return sorted((n for n in self.login_set if n in self.accounts), key=rot._acc_num)
 
     # ---- реестр ----
     def _make_identity(self, key: str, uri: str, fp: dict, geo: dict) -> dict:
@@ -222,7 +264,8 @@ class Daemon:
         идентичность (из accounts.yaml / guest yaml). Нужно, чтобы чужие
         стартовые ноды считались занятыми."""
         changed = False
-        for name in self.guest_names():
+        login = set(self.login_slots())
+        for name in self.guest_names() + sorted(login, key=rot._acc_num):
             slot = self.st["slots"].get(name)
             if slot and slot.get("active") in self.st["identities"]:
                 continue
@@ -244,8 +287,12 @@ class Daemon:
                     "impersonate": imp, "label": "seed",
                 }
                 node_name = self.env.key2name.get(key, name)
-                geo = (self.gcfg.get("account_geo", {}).get(name) or spec.get("geo")
-                       or rot.geo_for(node_name))
+                if name in login:
+                    geo = ((self.login_cfg.get("account_geo") or {}).get(name)
+                           or self.gcfg.get("account_geo", {}).get(name) or rot.geo_for(node_name))
+                else:
+                    geo = (self.gcfg.get("account_geo", {}).get(name) or spec.get("geo")
+                           or rot.geo_for(node_name))
                 self.st["identities"][iid] = self._make_identity(key, link, fp, geo)
             self.st["slots"].setdefault(name, {"rotations": [], "rev": 0})["active"] = iid
             changed = True
@@ -435,6 +482,145 @@ class Daemon:
         os.replace(staging, ROOT / acc["cookie_file"])
         log.info("[%s] ротация СОХРАНЕНА: нода %s, %s (rev %d)", name, node_name, fp["impersonate"], slot["rev"])
 
+    # ---- логин-слоты: только замена ноды (профиль и сессия не трогаются) ----
+    def replacement_candidates(self, tried: set[str]) -> list[str]:
+        """Свободные ГОДНЫЕ ноды из запаса: не назначены слотам в vless_accounts.env, нет в реестре
+        идентичностей (нетронутые), не плохие, прошли filter_nodes (если all_nodes.reddit_ok.txt есть).
+        Чужие/забаненные идентичности не берём — у них свой отпечаток, а профиль слота постоянный."""
+        known = {i["node_key"] for i in self.st["identities"].values()}
+        assigned = {rot.node_key(l) for l in self.env.assigned.values()}
+        out = [k for k in self.env.key2name
+               if k not in known and k not in assigned and k not in tried and not self._bad(k)
+               and (self.ok_keys is None or k in self.ok_keys)]
+        random.shuffle(out)
+        return out
+
+    def replace_node(self, name: str) -> bool:
+        """Слот с сгоревшей нодой -> новая нода из запаса. Отпечаток слота (fp) остаётся тем же,
+        cookies/сессия не трогаются, браузер не запускается. -> True, если замена выдана."""
+        now = time.time()
+        rc = self.rc
+        slot = self.st["slots"][name]
+        prev = self.st["identities"][slot["active"]]
+        acc = self.accounts[name]
+        port = int(acc["proxy_port"])
+        group = f"pg-{name}"
+
+        if not slot.get("needs_node"):
+            slot["needs_node"], slot["needs_node_since"] = True, now
+            if prev.get("active_since"):
+                self.st["ban_lifetimes"].append({"slot": name, "identity": prev["id"],
+                                                 "seconds": now - prev["active_since"], "ts": now})
+            prev["banned_at"], prev["ban_reason"] = now, "node_burned"
+            save_state(self.st)
+            log.warning("[%s] нода %s сгорела — слот needs_node, ищу замену из запаса",
+                        name, node_label(prev["node_uri"]))
+
+        tried: set[str] = set()
+        attempts = 0
+        while attempts < rc["max_candidates_per_request"]:
+            cands = self.replacement_candidates(tried)
+            if not cands:
+                break
+            key = cands[0]
+            tried.add(key)
+            attempts += 1
+            node_name = self.env.key2name[key]
+            try:
+                self.mihomo.select(group, node_name)
+            except rot.RotationError as e:
+                log.warning("[%s] mihomo не принял ноду %s (%s) — пул не в конфиге? "
+                            "перегенерируй mihomo_config.yaml и перезапусти mihomo", name, node_name, e)
+                continue
+            self.mihomo.close_inbound(port)
+            time.sleep(0.5)
+            alive, info = rot.precheck(port)
+            if not alive:
+                self.st["bad_nodes"][key] = {"ts": time.time(), "ttl_hours": rc["bad_node_ttl_hours"],
+                                             "reason": info[:100], "name": node_name}
+                save_state(self.st)
+                log.warning("[%s] замена %s не отвечает (%s) — в bad_nodes", name, node_name, info)
+                continue
+            ident = self._make_identity(key, self.env.key2uri[key], copy.deepcopy(prev["fp"]),
+                                        rot.geo_for(node_name))
+            self.commit_node(name, ident, node_name)
+            left = len(self.replacement_candidates(set()))
+            log.info("[%s] нода заменена на %s (%s); отпечаток %s сохранён; в запасе ещё %d",
+                     name, node_name, info, ident["fp"].get("impersonate"), left)
+            if left < self.fleet["reserve_nodes"]:
+                log.warning("запас годных нод %d < fleet.reserve_nodes=%d — перепроверь пул: "
+                            "scripts/filter_nodes.py --write", left, self.fleet["reserve_nodes"])
+            return True
+
+        # замены нет — вернуть mihomo на прежнюю ноду, слот остаётся needs_node
+        prev_node = self.env.key2name.get(prev["node_key"])
+        if prev_node:
+            try:
+                self.mihomo.select(group, prev_node)
+                self.mihomo.close_inbound(port)
+            except rot.RotationError as e:
+                log.warning("[%s] не вернул ноду %s: %s", name, prev_node, e)
+        return False
+
+    def commit_node(self, name: str, ident: dict, node_name: str) -> None:
+        """Фиксирует замену ноды: реестр, профиль слота (тот же отпечаток), флаг «проверить вход».
+        cookies-файл НЕ перезаписывается."""
+        now = time.time()
+        fp = ident["fp"]
+        ident.update(banned_at=None, ban_reason=None, active_since=now, ok_at=now, uses=1)
+        self.st["identities"][ident["id"]] = ident
+        slot = self.st["slots"][name]
+        slot["active"] = ident["id"]
+        slot["needs_node"] = False
+        slot.pop("needs_node_since", None)
+        slot.pop("needs_node_retry", None)
+        slot.setdefault("rotations", []).append(now)
+        slot["rev"] = slot.get("rev", 0) + 1
+        save_state(self.st)
+        idn.write_json_atomic(idn.slot_profile_path(name), {
+            "rev": slot["rev"], "identity": ident["id"], "node": node_name,
+            "engine": fp.get("engine"), "channel": fp.get("channel"), "device": fp.get("device"),
+            "user_agent": fp.get("user_agent"), "impersonate": fp["impersonate"],
+            "geo": ident["geo"], "updated": now,
+        })
+        lf.set_check_login(idn.STATE_DIR, name, node_name)
+
+    def handle_login(self, name: str, req: dict) -> None:
+        rc = self.rc
+        now = time.time()
+        if name not in self.st["slots"]:
+            raise Reject("у слота нет ноды в vless_accounts.env", now + 3600)
+        rots = [t for t in self.st["slots"][name].get("rotations", []) if now - t < 86400]
+        if len(rots) >= rc["max_rotations_per_day"]:
+            raise Reject(f"лимит {rc['max_rotations_per_day']} замен ноды в сутки", min(rots) + 86400)
+        n_en = sum(1 for n in self.login_slots() if (self.accounts.get(n) or {}).get("enabled"))
+        pend = len(self.pending_requests())
+        if n_en >= 3 and pend >= max(2, math.ceil(rc["global_outage_fraction"] * n_en)):
+            raise Reject(f"проблемы у {pend}/{n_en} слотов сразу — похоже на сбой Reddit/сети, а не сгоревшую ноду",
+                         now + rc["global_outage_pause_seconds"])
+        self.set_req(name, req, status="working", started=now)
+        if not self.replace_node(name):
+            raise Reject("в запасе нет годной ноды — слот needs_node",
+                         time.time() + rc["failed_all_pause_seconds"])
+
+    def retry_needs_node(self) -> None:
+        """Слоты, которым замены не нашлось (запас кончился), демон перепробует сам —
+        когда filter_nodes.py пополнит пул годных нод."""
+        now = time.time()
+        for name in self.login_slots():
+            slot = self.st["slots"].get(name)
+            if not slot or not slot.get("needs_node") or now < slot.get("needs_node_retry", 0):
+                continue
+            try:
+                ok = self.replace_node(name)
+            except Exception:
+                log.exception("[%s] ошибка замены ноды", name)
+                ok = False
+            if not ok:
+                slot["needs_node_retry"] = time.time() + self.rc["failed_all_pause_seconds"]
+                save_state(self.st)
+            return  # один слот за итерацию
+
     # ---- заявка целиком ----
     def rotate(self, name: str) -> None:
         now = time.time()
@@ -480,6 +666,10 @@ class Daemon:
     def handle(self, name: str, req: dict) -> None:
         rc = self.rc
         now = time.time()
+        if name in self.login_slots():
+            return self.handle_login(name, req)
+        if not self.fleet.get("guest_enabled"):
+            raise Reject("гостевая ротация выключена (fleet.guest_enabled: false)", now + 3600)
         if name not in rc["slots"] or name not in self.gcfg["guest_accounts"]:
             raise Reject("слот не в rotation.slots / guest_accounts", now + 3600)
         if name not in self.st["slots"]:
@@ -545,6 +735,7 @@ class Daemon:
                         log.exception("[%s] ошибка обработки заявки", name)
                         self.set_req(name, req, status="rejected", reason=f"ошибка демона: {e}"[:200],
                                      retry_after=time.time() + 300)
+                self.retry_needs_node()
             except Exception:
                 log.exception("ошибка итерации демона")
             if once:
@@ -553,6 +744,49 @@ class Daemon:
 
 
 # ---------------------------------------------------------------- #
+
+def _print_fleet_status(st: dict) -> None:
+    """Логин-парк: кому нужен вход / нужна нода / проверить вход, запас годных нод, отчёт filter_nodes."""
+    fleet = load_fleet()
+    data = yaml.safe_load((ROOT / "accounts.yaml").read_text(encoding="utf-8")) or {}
+    accounts = {a["name"]: a for a in data.get("accounts", [])}
+    login_cfg = lf.load_yaml(SCRIPTS / "refresh_cookies.yaml")
+    names = sorted((n for n in lf.login_account_names(login_cfg, list(accounts.values())) if n in accounts),
+                   key=rot._acc_num)
+    print(f"\nЛОГИН-СЛОТЫ ({len(names)}; node_replace_only={fleet['node_replace_only']}, "
+          f"guest_enabled={fleet['guest_enabled']})")
+    counts: dict[str, int] = {}
+    for n in names:
+        acc = {**accounts[n], "login": True}
+        flags = {"needs_node": bool((st["slots"].get(n) or {}).get("needs_node")),
+                 "check_login": lf.check_login_flag(idn.STATE_DIR, n).exists()}
+        status = lf.login_status(acc, flags)
+        counts[status] = counts.get(status, 0) + 1
+        if status != lf.LOGIN_OK:
+            print(f"  {n:11} {status}")
+    print("  итого: " + (", ".join(f"{k}: {v}" for k, v in sorted(counts.items())) or "—"))
+
+    try:
+        nf = Path(load_rcfg()["nodes_file"])
+        nf = nf if nf.is_absolute() else ROOT / nf
+        ok_file = nf.with_name(nf.stem + ".reddit_ok.txt")
+        if ok_file.exists():
+            good = {n.key for n in rot.load_pool(ok_file)}
+            known = {i["node_key"] for i in st["identities"].values()}
+            assigned = {rot.node_key(l) for l in gmc.load_vless_links().values()}
+            spare = len(good - known - assigned)
+            warn = "  <-- МАЛО, перепроверь пул: scripts/filter_nodes.py --write" if spare < fleet["reserve_nodes"] else ""
+            print(f"\nЗАПАС ГОДНЫХ НОД: {spare} (fleet.reserve_nodes={fleet['reserve_nodes']}){warn}")
+    except Exception as e:   # статус не должен падать из-за пула
+        print(f"\nЗАПАС ГОДНЫХ НОД: не посчитал ({e})")
+    rep = idn.read_json(idn.STATE_DIR / "node_report.json")
+    if rep:
+        age_h = (time.time() - rep.get("ts", 0)) / 3600
+        stale = "  <-- устарел" if age_h > 2 * fleet["node_check_interval_hours"] else ""
+        print(f"ОТЧЁТ filter_nodes ({age_h:.1f}ч назад){stale}: годных {rep.get('good')} из {rep.get('total')}, "
+              f"слотов можно держать {rep.get('slots_target')}"
+              + ("  <-- ВНИМАНИЕ: годных меньше fleet.min_good_nodes_warn" if rep.get("warn") else ""))
+
 
 def cmd_status() -> int:
     st = load_state()
@@ -564,6 +798,7 @@ def cmd_status() -> int:
         r24 = sum(1 for t in s.get("rotations", []) if now - t < 86400)
         print(f"  {n:11} {node_label(i.get('node_uri', '?')):22} {i.get('fp', {}).get('impersonate', '?'):18} "
               f"ротаций/24ч={r24} rev={s.get('rev', 0)}")
+    _print_fleet_status(st)
     print("\nИДЕНТИЧНОСТИ")
     leased = {s.get("active") for s in st["slots"].values()}
     for i in sorted(st["identities"].values(), key=lambda x: x.get("banned_at") or 0):

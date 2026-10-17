@@ -1,0 +1,13 @@
+# Скрипт backup_sessions.sh запускается раз в день.
+# OnUnitActiveSec считается от последнего запуска юнита.
+
+[Unit]
+Description=Reddit scraper - daily session backup
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+RandomizedDelaySec=30min
+
+[Install]
+WantedBy=timers.target

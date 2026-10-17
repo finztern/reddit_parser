@@ -1,197 +1,300 @@
 # Архитектура
 
-Документ описывает скрапер **по коду в репозитории** (`main.py` + `scraper/`).
+Этот документ описывает текущую реализацию в `main.py`, `scraper/` и
+`scripts/`. Он дополняет [README.md](./README.md) и не заменяет runbook
+[DEPLOY.md](./DEPLOY.md).
 
-## 1. Общая картина
+## 1. Системная схема
 
-```
-                    ┌────────────────────────────────────────┐
-                    │                main.py                  │
-                    │ ConfigStore (hot-reload)                │
-                    │ Sender       — буфер + отправка по /queue│
-                    │ SeenCache    — дедуп                    │
-                    │ PollScheduler— слоты опроса по спросу   │
-                    │ ExecutorHandle/Health — пул curl_cffi   │
-                    │ aiohttp.ClientSession (store_items)     │
-                    └───────────────┬────────────────────────┘
-                                    │ N задач (supervised)
-        ┌───────────────┬───────────┴───────┬───────────────┐
-  account_worker   account_worker      account_worker   ...
-  (account_1)      (account_2)         (account_N)
-  свой proxy_port, cookies, impersonate, BackoffState, CookieFileWatcher,
-  SlotProfileWatcher
-        ▲ слот выдаёт PollScheduler (самому давно не опрашивавшемуся, по спросу Sender)
-        │
-        └──► GET /r/all/comments.json ─► фильтр max_age ─► SeenCache
-             ─► буфер Sender ─► POST /store_items (батч, самые свежие первыми, по /queue)
+```text
+config.yaml ── ConfigStore (hot reload) ───────────────┐
+accounts.yaml ─ load_accounts (на старте) ─────────────┤
+                                                       ▼
+ Reddit ── proxy через mihomo ── account_worker × N ── PollScheduler
+                                      │                    │
+                                      │ fetch/paginate      │ выдаёт слоты
+                                      ▼                    ▼
+                                  SeenCache ◄──────────────┘
+                                      │ try_claim
+                                      ▼
+                                    Sender ── GET /queue
+                                      │       POST /store_items
+                                      ├── MetricsCollector ── HTTP /metrics.json
+                                      │                     ├─ state/metrics_snapshot.json
+                                      │                     └─ state/events.jsonl
+                                      ▼
+                                   collector
 
-  Вне процесса (хост, systemd):
-    refresh_cookies.py        (логин, account_1..10)   ─┐ пишут атомарно
-    refresh_guest_cookies.py  (гости, account_11..25)  ─┤ cookies/account_N.json
-    manual_login.py           (первый логин)           ─┘      │
-    rotation_daemon.py        (смена идентичности)  ──────────►│
-                                           CookieFileWatcher ◄─┘ (hot-reload)
-    state/requests, state/slots  ◄──► воркер (заявки / активный профиль)
+Host jobs ── cookies/, storage_state/, state/
+  refresh_cookies.py / refresh_guest_cookies.py
+  manual_login.py / login_hub.py / rotation_daemon.py
+  filter_nodes.py / dashboard.py / backup_sessions.sh
 ```
 
-Все аккаунты опрашивают **один и тот же поток** (`stream_subs`, обычно
-`r/all`), но не каждый по своему таймеру: единый `PollScheduler` раздаёт
-«слоты» аккаунтам по кругу. Это убирает пачки одновременных запросов и
-почти все дубли от пересекающихся опросов.
+Scraper и host jobs связывает filesystem: `cookies/`, `storage_state/` и
+`state/`. В Linux Compose-контейнере `cookies/` read-only, а `state/` read/write.
+Host jobs изменяют файлы atomically, когда это поддерживается реализацией;
+scraper проверяет обновления cookies и профилей. Подробная схема volume-ов —
+в [docker-compose.yml](./docker-compose.yml) и
+[docker-compose.bridge.yml](./docker-compose.bridge.yml).
 
-Общие объекты: `Sender`, `SeenCache`, `PollScheduler`,
-`ExecutorHandle`, `ConfigStore`. Своё на аккаунт: proxy-порт, cookies +
-`CookieFileWatcher`, `impersonate`/UA (+ `SlotProfileWatcher`),
-`curl_cffi.Session` (`CurlSessionHandle`), `BackoffState`, слот планировщика.
+## 2. Процесс `main.py`
 
-Аккаунты 1..10 — логин, 11..25 — гостевые: для самого скрапера разницы нет
-(оба читают `cookies/account_N.json`), отличается только джоб, который этот
-файл обновляет.
+На старте приложение:
 
-## 2. Модули
+1. Загружает `config.yaml` через `ConfigStore`, список аккаунтов из
+   `accounts.yaml`.
+2. Создаёт общие `SeenCache`, `Sender`, `PollScheduler`, пул потоков для
+   блокирующего `curl_cffi`, health-monitor и задачи метрик.
+3. Запускает `account_worker` для каждого `enabled: true` аккаунта.
+4. Обслуживает signal shutdown; падение core task завершает процесс, чтобы
+   Docker `restart: unless-stopped` мог поднять его заново.
 
-### `main.py`
-Поднимает общие объекты, `Sender`, `PollScheduler`, health-цикл и по
-задаче `account_worker` на каждый `enabled: true` аккаунт (через
-`supervised()`). Пул `ThreadPoolExecutor` — `max(32, 2 * аккаунтов)`.
+`account_worker` под supervision перезапускается после исключения с
+экспоненциальной задержкой; штатный return не является ошибкой. Процесс
+завершается по SIGTERM/SIGINT, падению критической фоновой задачи или когда
+завершились все worker-ы.
 
-**Остановка.** Процесс завершается только: по SIGTERM/SIGINT, при падении
-любой «ядерной» задачи (config_reload, sender, health, scheduler, stats) или
-когда завершились **все** воркеры. Завершение одного воркера процесс не
-останавливает.
+Основные модули:
 
-### `scraper/scheduler.py` — `PollScheduler`
-Раз в `interval` секунд (± `stream_jitter_ratio`) выбирает среди готовых
-аккаунтов (не заняты, `not_before` — личный rate-limit-кулдаун — наступил)
-того, кто **дольше всех не опрашивался**, и кладёт ему слот в очередь.
-Слоты выдаются **по спросу** `Sender.demand()`: буфер полон — пауза (аккаунты
-отдыхают); буфера меньше батча при голодной очереди — слоты идут с
-`stream_min_interval_seconds` (подключается больше аккаунтов). `interval`
-подстраивается по доле дублей на 1-й странице (EWMA); первый опрос после
-паузы в подстройке не участвует.
+| Модуль | Ответственность |
+|---|---|
+| `scraper/scheduler.py` | Выдаёт запросные слоты по общему спросу Sender; среди доступных аккаунтов предпочитает давно не опрашивавшиеся |
+| `scraper/fleet_polling.py` | Состояния аккаунтов, cooldown, восстановительные пробы и runtime-отключение |
+| `scraper/worker.py` | Проверка файлов состояния, получение страниц, фильтрация, ошибки и передача результата |
+| `scraper/http_client.py` | `curl_cffi` session per account, headers/cookies, timeouts и Reddit pagination |
+| `scraper/state.py` | `SeenCache` с `try_claim → confirm/release` и локальное backoff-состояние |
+| `scraper/sender.py` | Буфер свежих элементов; чтение очереди и отправка батчей |
+| `scraper/pipeline.py` | Формирование payload и вызов `store_endpoint` |
+| `scraper/health.py` | Наблюдение за executor; замена пула при зависших потоках |
+| `scraper/identity.py` | Пути к `state/`, чтение заявок и профиля активной идентичности слота |
+| `scraper/config.py` | `ConfigStore`, чтение аккаунтов/cookies и `CookieFileWatcher` |
+| `scraper/metrics.py` | Счётчики, снимок и события для TUI |
 
-### `scraper/sender.py` — `Sender`
-Воркеры кладут комментарии в буфер (`put_many`; id остаётся в
-`SeenCache._pending`). Раз в `poll_interval_seconds` Sender читает
-`GET queue_control.url` (`bpipe_queue`, `bpipe_inflight`, `degraded`, ...);
-если `bpipe_queue < queue_target`, уходит батч `send_batch_size` из самых
-свежих комментариев буфера, в порядке свежести. Цель: `bpipe_inflight ==
-inflight_target` (реплики загружены), очередь всегда готова их накормить.
-Неполный батч — только если очередь почти пуста либо данные «созрели»;
-протухшие (`max_age_seconds`) выбрасываются, при переполнении буфера
-вытесняются самые старые. При ошибке отправки свежие элементы возвращаются
-в буфер. Если `/queue` молчит дольше `stale_seconds` — fallback на
-`target_rate_per_second`.
+## 3. Запросы, дедупликация и отправка
 
-### `scraper/worker.py` — `account_worker`
-1. Если `cookies/account_N.json` нет — ждёт его появления (раз в минуту).
-2. Читает активный профиль слота `state/slots/account_N.json` (если есть) —
-   он перекрывает `impersonate`/UA из `accounts.yaml`. Регистрирует слот в
-   планировщике.
-3. На каждом слоте: проверяет заявку на ротацию (pending/working — слот
-   пропускается, Reddit не опрашивается); читает актуальный конфиг;
-   `SlotProfileWatcher` — при смене профиля меняет `impersonate`
-   (`CurlSessionHandle.set_impersonate`); `CookieFileWatcher` — при смене
-   файла обновляет cookies и пересоздаёт `curl_cffi`-сессию.
-4. `fetch_comments(..., stop_when=…)`: страницы листаются, пока не встретится
-   уже виденный комментарий, страница не станет старше `max_age`, не кончится
-   `after` или не будет достигнут лимит страниц.
-5. Ошибки: `rate_or_server` (429/5xx) → экспоненциальный кулдаун; `network`
-   → мягкий кулдаун ≤30 с; `auth` (401/403) → кулдаун, после
-   `max_consecutive_auth_errors` подряд — пауза с редкими пробами;
-   `empty` (пустой листинг) → растущий кулдаун, а при
-   `rotation.empty_streak_trigger` подряд — заявка на ротацию.
-6. Успех: `build_payload` → фильтр `max_age` → `SeenCache.try_claim` →
-   `Sender.put_many` (буфер) → батч в `/store_items` по очереди bpipe → `confirm()`/`release()` (в Sender).
-7. `cooldown` аккаунта = `reset / (remaining * ratelimit_safety_margin)`.
+Все включённые аккаунты читают выбранный поток (обычно `r/all`). Запросы
+получают индивидуальные proxy-порты mihomo и cookies аккаунта. Планировщик
+ограничивает общий темп и учитывает минимум паузы аккаунта из
+`fleet_polling.pause_min_seconds`/`pause_max_seconds`; 429, `Retry-After`,
+ошибки сервера и близкий к исчерпанию rate-limit переводят слот в cooldown.
 
-`supervised()` перезапускает воркер при исключениях (экспоненциальная
-задержка до 60 с); штатный `return` не перезапускает.
+Клиент продолжает pagination, пока не встретит пересечение с уже известными
+элементами, более старый комментарий, окончание `after` или предел страниц.
+`max_age_seconds` ограничивает свежесть перед отправкой.
 
-### `scraper/identity.py`
-Обмен состоянием с демоном ротации через `state/` (атомарная запись):
-`requests/account_N.json` (заявка и её результат), `slots/account_N.json`
-(активный профиль слота), `SlotProfileWatcher`.
+`SeenCache` общий для процесса:
 
-### `scraper/http_client.py`
-`_fetch_comments_page` — один запрос `curl_cffi` в `http_executor` под
-`asyncio.wait_for`; `fetch_comments` — пагинация. `CurlSessionHandle` —
-сессия аккаунта, `swap()` / `set_impersonate()`.
+1. Новый комментарий временно резервируется через `try_claim`.
+2. `Sender` буферизует его и выбирает свежие элементы к отправке.
+3. При подтверждении коллектора id фиксируется (`confirm`); при ошибке
+   освобождается (`release`), чтобы его можно было повторно обработать.
 
-### `scraper/health.py`
-`ExecutorHandle` пересоздаёт пул при зависании потоков `curl_cffi`;
-`ExecutorHealth` считает занятость текущего пула по поколениям.
+Если включён `queue_control`, Sender опрашивает `/queue` и согласует отправку
+с очередью и inflight коллектора. При выключенной/недоступной очереди действует
+fallback `target_rate_per_second`. Размер batch дополнительно ограничивается
+серверным пределом 1000 элементов.
 
-### `scraper/state.py`
-`SeenCache` (двухфазный `try_claim → confirm/release`),
-`BackoffState`.
+`SeenCache` хранится только в RAM. Рестарт очищает его; постоянно хранимой
+глобальной дедупликации в проекте нет.
 
-### `scraper/pipeline.py`
-`build_payload` (схема коллектора) и `send_batch_to_store` (чанки по
-`min(batch_max_items, 1000)`, поэлементные результаты).
+### 3.1 Один цикл опроса
 
-### `scraper/config.py`
-`ConfigStore` (hot-reload), `load_accounts`, `load_cookies`,
-`CookieFileWatcher`.
+Последовательность важна: scheduler владеет eligibility аккаунтов, worker
+выполняет один выданный слот, а `Sender` отдельно управляет доставкой.
 
-## 3. Блокирующий `curl_cffi` и пул потоков
+1. `Sender.demand()` сообщает scheduler-у, нужен ли ещё сбор данных. При
+   полном буфере новые Reddit-запросы останавливаются, но sender продолжает
+   отправку и очистку буфера.
+2. `PollScheduler` выбирает живой и готовый слот, учитывая состояние аккаунта,
+   минимальную паузу, общий темп и спрос. Опросы не запускаются независимо по
+   таймеру каждого аккаунта.
+3. `account_worker` проверяет запросы ротации и обновления профиля/cookies,
+   затем получает страницы через `fetch_comments`. Pagination останавливается
+   на пересечении с известным ID, по возрасту, по завершении `after` или по
+   `pagination_max_pages`.
+4. Worker отбрасывает невалидные и старые payload-ы, вызывает
+   `SeenCache.try_claim()` и передаёт успешные claims в `Sender.put_many()`.
+   Claims в буфере продолжают считаться pending и защищают от дублей между
+   параллельными worker-ами.
+5. `Sender` выбирает содержимое батча и вызывает `send_batch_to_store()`.
+   Только после подтверждения вызывается `SeenCache.confirm()`; неподтверждённые,
+   просроченные или вытесненные ID освобождаются через `release()`.
+6. Worker сообщает итог опроса через `PollScheduler.release()`. Этот результат
+   обновляет состояние/паузы аккаунта и статистику scheduler-а; sender не
+   определяет здоровье аккаунта.
 
-`curl_cffi` синхронный → `run_in_executor`. `wait_for` на таймауте отменяет
-только asyncio-обёртку, поток остаётся занят. Меры: запас потоков, раздельные
-connect/read-таймауты, пересоздание `curl`-сессии аккаунта при таймауте, и
-своп всего пула (`health.py`).
+### 3.2 Обработка результатов опроса
 
-## 4. Дедуп и надёжность доставки
+| Результат Reddit | Состояние/действие | Что важно при изменениях |
+|---|---|---|
+| Успешный непустой Listing | Формирование payload, claim, буферизация; reset последовательных ошибок | Получение данных не означает, что collector их уже подтвердил |
+| Пустой Listing | Нарастающая пауза; после порога состояние может стать `degraded` | Пустой ответ не считать успешным восстановлением |
+| 429 или 5xx | Cooldown конкретного аккаунта; остальные слоты продолжают работать | Уважать `Retry-After`; не блокировать весь парк из-за одного аккаунта |
+| 401/403 | Auth backoff; после порога `auth_failed` и редкие пробы | Новые cookies перечитываются worker-ом; для login-403 может быть заявка на замену ноды |
+| Сетевая ошибка | Ограниченный backoff и уведомление scheduler-а | Не превращать сетевую ошибку в пустой успешный результат |
+| Ошибка/неподтверждённый ответ collector-а | Sender освобождает неуспешные claims для повторной обработки | Не подтверждать ID только из-за попытки POST |
+| Исключение из worker | `supervised()` перезапускает воркер с экспоненциальной задержкой | `CancelledError` проходит наружу; штатное завершение worker не перезапускается |
 
-Любой сбой на пути → `release()`: элемент будет подхвачен на следующем
-опросе, пока не протух по `max_age_seconds`.
+Пороговые значения, точные классификаторы ошибок и тайминги задаются в коде и
+конфигурации (`scraper/worker.py`, `scraper/fleet_polling.py`,
+`scraper/http_client.py`, `config.yaml`). Таблица описывает контракт, а не
+полный список status code или все числовые defaults.
 
-## 5. Конфигурация и hot-reload
+## 4. Состояния аккаунта и конфигурация
 
-`config.yaml` — каждые `CONFIG_RELOAD_SECONDS` (5 с). `accounts.yaml` — один
-раз при старте. Файл cookies конкретного аккаунта и профиль слота — на лету.
-Env: `CONFIG_PATH`, `ACCOUNTS_PATH`, `PROXY_HOST`, `STORE_ENDPOINT`,
-`QUEUE_CONTROL_URL`, `CONFIG_RELOAD_SECONDS`, `STATE_DIR`, `LOG_FILE`,
-`EXECUTOR_*`.
+Аккаунты в `accounts.yaml` должны иметь уникальные `name` и `proxy_port`,
+путь `cookie_file`, `impersonate` и `user_agent`. Включаются только записи
+`enabled: true`. Списки login/guest refresh jobs хранятся отдельно; не
+запускайте оба вида refresh для одного аккаунта.
 
-## 6. Внешние джобы (cookies)
+`fleet_polling` управляет рабочими состояниями:
 
-Точки пересечения с процессом скрапера — `cookies/account_N.json` и `state/`.
-Файлы пишутся атомарно (`os.replace()` из tmp в той же директории).
+| Состояние | Поведение |
+|---|---|
+| `active` | Может получать слоты |
+| `cooldown` | Временно исключён после rate/server/ограничений |
+| `degraded` | Частые пустые результаты; возвращается после успешных проб |
+| `auth_failed` | После порога auth-ошибок редкая recovery-проба до обновления cookies |
+| `blocked_node` | Запрос на замену/проверку ноды |
+| `disabled` | Отключён конфигом или runtime-файлом |
 
-- **`refresh_cookies.py`** — логин-аккаунты.
-- **`refresh_guest_cookies.py`** — гостевые слоты: харвест → верификация →
-  запись только при 200. Слоты в ротации пропускает, активный профиль после
-  ротации перекрывает `accounts.yaml`.
-- **`manual_login.py`** — первичный логин через Xvfb + x11vnc + noVNC.
-- Один браузер за раз: общий `flock` (`/tmp/reddit_scraper_browser.lock`).
+`state/runtime_disabled.json` позволяет приостановить слот без правки YAML.
+`state/fleet_polling.json` — диагностика scheduler-а; это не источник
+конфигурации. Протоколы файлов и их writers/readers описаны в
+[docs/state-protocols.md](./docs/state-protocols.md); карта потребителей настроек
+и правил reload находится в [docs/configuration-map.md](./docs/configuration-map.md).
 
-Прокси-порт у джобов и скрапера **один и тот же** (`proxy_port`).
+`config.yaml` перечитывается раз в `CONFIG_RELOAD_SECONDS` (по умолчанию 5 с).
+`accounts.yaml` читается только при запуске. Пути/параметры с поддержкой
+окружения перечислены в `scraper/constants.py`: `CONFIG_PATH`,
+`ACCOUNTS_PATH`, `PROXY_HOST`, `STORE_ENDPOINT`, `QUEUE_CONTROL_URL`,
+`CONFIG_RELOAD_SECONDS`, `STATE_DIR`, `LOG_FILE`, `LOG_MAX_BYTES`,
+`LOG_BACKUP_COUNT` и `EXECUTOR_*`. `METRICS_BIND`/`METRICS_PORT` задают
+endpoint метрик. Точный набор переменных — source of truth в коде, не этот
+перечень.
 
-## 7. Ротация идентичностей (`scripts/rotation_daemon.py`)
+### Владельцы конфигурации и reload
 
-Идентичность = нода + отпечаток + гео (cookies — отдельно, харвестятся
-заново). Реестр — `state/identities.json`: у каждой идентичности `banned_at`,
-у слота — активная идентичность и история ротаций.
+| Данные | Владелец во время работы | Как применяются изменения |
+|---|---|---|
+| `config.yaml` | `ConfigStore` | YAML перечитывается циклом reload; отдельные параметры используются при следующем обращении к `get()` |
+| `accounts.yaml` | `main.py` / `load_accounts()` | Список аккаунтов загружается при старте; изменение требует перезапуска scraper-а |
+| Cookies | `CookieFileWatcher` внутри account worker | Проверка по mtime с ограничением частоты stat; валидный изменившийся файл применяется в runtime |
+| Активный slot profile | `SlotProfileWatcher` внутри account worker | Изменение `state/slots/<name>.json` применяется при последующей проверке watcher-а |
+| Постоянный device profile | `state/profiles/<name>.json` и `profile_gen.py` | Создаётся/меняется профильными утилитами; worker использует его как постоянный fingerprint |
+| Runtime pause | `state/runtime_disabled.json` | Scheduler перечитывает runtime-файл; YAML-конфиг при этом не меняется |
+| Запрос на ротацию | `state/requests/<name>.json` | Worker пишет заявку, daemon обрабатывает и обновляет статус; worker забирает результат |
 
-Поток: воркер → заявка `pending` → демон (под browser-lock): ставит бан
-текущей идентичности, выбирает кандидата (целинные ноды с новым отпечатком →
-отлежавшиеся забаненные, самая старая первой), переключает ноду в mihomo
-(`PUT /proxies/pg-account_N`), проверяет живость, харвестит и верифицирует
-cookies, затем пишет `state/slots/account_N.json` и подкладывает cookies,
-после чего `status=done`. При неудаче — откат ноды и `rejected` с
-`retry_after`.
+Порядок источников fingerprint в worker: постоянный device profile
+`state/profiles/<name>.json` важнее slot profile и `accounts.yaml`; slot profile
+важнее `accounts.yaml`, если постоянного профиля ещё нет. Slot profile задаёт
+активную ноду и может нести текущий fingerprint для legacy/guest-сценария.
+Для аккаунта с постоянным device profile смена ноды должна обновлять geo-группу,
+но не менять постоянный fingerprint автоматически.
 
-Защиты: лимит ротаций в сутки на слот; массовые заявки (≥ доли слотов) —
-считаются сбоем Reddit/сети, а не баном; ноды логин-аккаунтов не отдаются;
-одна нода — один слот. Каждые `reconcile_seconds` демон сверяет выбор ноды в
-mihomo с реестром (после рестарта mihomo `select` сбрасывается).
-Переживает рестарты контейнеров и демона.
+Не вводите второй watcher или независимый кэш для тех же данных, пока не
+определено, кто владеет записью и когда изменение должно стать видимым.
+Некорректное/пустое обновление cookies не должно затирать последние рабочие
+cookies; атомарная замена файла снижает риск чтения частично записанного JSON.
 
-## 8. Случайность (анти-детект)
+## 5. Cookies, профили и browser jobs
 
-1. Фаза слотов: единый планировщик + `stream_jitter_ratio`.
-2. Паузы между страницами пагинации (`pagination_delay_*`).
-3. Личный кулдаун аккаунта по `X-Ratelimit-*`.
-4. Разные `impersonate`+UA на аккаунт; гео браузера джобов = гео ноды.
-5. `stagger_seconds` между аккаунтами в refresh-джобах.
+| Файл/каталог | Кто пишет/читает |
+|---|---|
+| `cookies/<account>.json` | Host refresh/login tools пишут; scraper читает и отслеживает изменение |
+| `storage_state/<account>.json` | Login browser jobs сохраняют состояние Playwright |
+| `state/profiles/<account>.json` | Профиль устройства, валидируемый `scraper/profile_gen.py` |
+| `state/slots/<account>.json` | Активная identity slot-профиля; применяется worker-ом поверх статической настройки |
+| `state/requests/<account>.json` | Заявка/результат взаимодействия worker с daemon |
+| `state/human/<account>.json` | Расписание/итог read-only human session |
+| `state/login_hub/status.json` | Состояние login-hub; секреты VNC сюда не записываются |
+| `state/runtime_disabled.json` | Runtime pause для выбранных аккаунтов |
+
+`refresh_cookies.py` обслуживает только `login_accounts` из
+`scripts/refresh_cookies.yaml`. `refresh_guest_cookies.py` обслуживает только
+`guest_accounts` из `scripts/refresh_guest_cookies.yaml`. Cookies нельзя
+обновлять конкурентно двумя заданиями.
+
+`manual_login.py` выполняет ручной вход одного аккаунта. `login_hub.py`
+запускает несколько браузерных входов, ограниченных настройками RAM,
+`login_hub.max_parallel`, LAN bind и CIDR. Пароли Reddit не сохраняются
+проектом. `human_session.py` применяется при browser-обслуживании сессий;
+он предназначен для read-only взаимодействия. Скрейпер сам браузер не
+запускает.
+
+Браузерные задания разделяют lock
+`/tmp/reddit_scraper_browser.lock`, чтобы не запускать обслуживающие браузеры
+параллельно с другими jobs, которые используют тот же lock.
+
+## 6. Ноды и режимы ротации
+
+`generate_mihomo_config.py` строит `mihomo_config.yaml` из VLESS-файлов.
+`filter_nodes.py` проверяет пул через mihomo delay API и пишет отчёт
+`state/node_report.json`; с `--write` сохраняет прошедшие проверки ноды
+в `all_nodes.reddit_ok.txt`.
+
+У `rotation_daemon.py` два режима, управляемые конфигурацией и типом слота:
+
+- **Login node replacement** (`fleet.node_replace_only`): заменить только
+  вышедшую из строя ноду из подходящего запаса. Профиль и session сохраняются;
+  слот может потребовать повторной проверки входа.
+- **Guest identity rotation**: смена ноды/отпечатка и повторный сбор cookies.
+  Доступна только при `fleet.guest_enabled: true`.
+
+Подробный runbook — [ROTATION_SETUP.md](./ROTATION_SETUP.md). Демон и scraper
+должны видеть один и тот же `state/`; ноды не должны быть одновременно
+назначены нескольким аккаунтам.
+
+`fleet.legacy_scheduler` присутствует как поле совместимости, но в текущем
+коде не управляет scheduler-ом.
+
+## 7. Метрики и TUI
+
+`MetricsCollector` получает события опроса/отправки, формирует снимок раз в
+`metrics.snapshot_interval_seconds` (по умолчанию 2 с) и предоставляет:
+
+- `GET /metrics.json` (по умолчанию `127.0.0.1:9100`);
+- `state/metrics_snapshot.json` — резервный атомарный JSON-снимок;
+- `state/events.jsonl` — журнал событий с ограниченной ротацией.
+
+Структура схемы `1` описана в [docs/metrics-schema.md](./docs/metrics-schema.md).
+Сервис метрик вспомогательный: его недоступность не должна останавливать
+основной scraper.
+
+`scripts/dashboard.py` читает эти данные, может показать состояние login-hub,
+а явно вызванные действия `l`/`p` открывают вход или меняют runtime-паузу.
+Панель не обращается к Reddit.
+
+## 8. Файлы конфигурации и runtime
+
+- `config.yaml` — поведение scraper-а, fleet, metrics и refresh/human settings.
+- `accounts.yaml` — аккаунтные идентификаторы, proxy-порты, cookies и отпечатки.
+- `scripts/refresh_cookies.yaml` — login account list и настройки login refresh.
+- `scripts/refresh_guest_cookies.yaml` — guest account list и настройки guest refresh.
+- `vless_accounts.env`, `all_nodes.txt` — локальные операционные данные, не
+  коммитятся.
+- `mihomo_config.yaml` — производный, генерируемый файл, не коммитится.
+
+Секреты и runtime state намеренно отделены от кода и документации.
+
+## 9. Как выбрать точку изменения
+
+Используйте этот маршрут, чтобы не чинить симптом на неверном уровне:
+
+| Требуется изменить… | Начать с… | Соседние контракты |
+|---|---|---|
+| Классификацию Reddit-ответа / pagination | `scraper/http_client.py` | `PollResult` и его потребители в `worker.py`; scheduler outcome и тесты HTTP/worker |
+| Что считается старым/валидным комментарием | `scraper/worker.py`, `scraper/pipeline.py` | Payload shape в `docs/tz/` (как исторический контекст) и contract tests `test_pipeline_payload.py` |
+| Темп, распределение слотов, паузы | `scraper/scheduler.py`, `scraper/fleet_polling.py` | `Sender.demand()`, `PollScheduler.release()`, `tests/test_fleet_polling.py` |
+| Retry/дедуп/подтверждение доставки | `scraper/sender.py`, `scraper/state.py`, `scraper/pipeline.py` | `try_claim → confirm/release`; `tests/test_delivery_path.py`, `test_sender_edges.py` |
+| Реакцию на новые cookies или node/profile update | `scraper/config.py`, `scraper/identity.py`, `scraper/worker.py` | Пути и владельцы файлов из раздела 5; тесты worker и identity |
+| Форму метрик или поведение панели | `scraper/metrics.py` | `docs/metrics-schema.md`, `scripts/dashboard.py`, `tests/test_metrics.py`, `tests/test_dashboard.py` |
+| Login/guest refresh или browser flow | Конкретный скрипт `scripts/` | Его YAML-настройки, общий browser lock, `DEPLOY.md`; тест соответствующего сценария |
+| Node pool или ротацию | `scripts/filter_nodes.py`, `scripts/rotation_daemon.py` | `ROTATION_SETUP.md`, `state/requests/` и `state/slots/` протокол |
+
+Перед правкой межпроцессного протокола найдите обе стороны: writer и reader.
+Перед изменением JSON/API контракта найдите producer, все consumers, schema
+documentation и contract tests. `CLAUDE.md` содержит быстрый индекс модулей и
+тестов; этот документ описывает взаимодействия, а `DEPLOY.md` и
+`ROTATION_SETUP.md` остаются операционными инструкциями.

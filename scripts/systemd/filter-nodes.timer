@@ -1,0 +1,17 @@
+# scripts/systemd/filter-nodes.timer
+#
+# Раз в сутки (fleet.node_check_interval_hours = 24 по умолчанию в config.yaml).
+# Если меняешь интервал в config.yaml — поменяй и OnUnitActiveSec ниже (юнит значение
+# из config.yaml не читает) и перезапусти таймер.
+# OnUnitActiveSec считается от последнего ЗАПУСКА юнита.
+
+[Unit]
+Description=Reddit scraper - суточная перепроверка пула нод
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=24h
+RandomizedDelaySec=10min
+
+[Install]
+WantedBy=timers.target

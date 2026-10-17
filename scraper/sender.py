@@ -49,8 +49,9 @@ def _num(v, default=None):
 
 
 class Sender:
-    def __init__(self, config, seen: SeenCache, session: aiohttp.ClientSession, log):
+    def __init__(self, config, seen: SeenCache, session: aiohttp.ClientSession, log, metrics=None):
         self.config = config
+        self.metrics = metrics  # MetricsCollector | None (модуль 06)
         self.seen = seen
         self.session = session
         self.log = log
@@ -102,6 +103,15 @@ class Sender:
     @property
     def backlog(self) -> int:
         return len(self._buf)
+
+    def queue_info(self) -> dict:
+        """Состояние очереди пайплайна для метрик (последний ответ /queue; None — пока не опрашивали)."""
+        st = self._status
+        if not st:
+            return {"size": None, "max": None, "inflight": None, "degraded": None, "action": None,
+                    "buffer": len(self._buf)}
+        return {"size": st.get("bpipe_queue"), "max": st.get("bpipe_max"), "inflight": st.get("bpipe_inflight"),
+                "degraded": bool(st.get("degraded")), "action": st.get("action"), "buffer": len(self._buf)}
 
     def demand(self) -> int:
         """Нужен ли планировщику новый опрос Reddit прямо сейчас."""
@@ -209,6 +219,8 @@ class Sender:
         if not items:
             return
         sent = await self._send(items)
+        if self.metrics is not None:
+            self.metrics.record_send(sent, len(items) - sent)
         self._w_batches += 1
         self._w_sent += sent
         if partial:

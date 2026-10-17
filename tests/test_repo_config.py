@@ -37,7 +37,8 @@ def test_accounts_are_consistent():
 
 def test_guest_slots_have_harvester_profile_and_rotation():
     accounts, guest_cfg, config, login = _load()
-    guests = {a["name"]: a for a in accounts if _num(a["name"]) >= 11}
+    # гостевой слот = не логин (login: true появляется после scripts/convert_to_login.py)
+    guests = {a["name"]: a for a in accounts if _num(a["name"]) >= 11 and not a.get("login")}
     spec = guest_cfg["guest_accounts"]
     assert set(spec) == set(guests), "guest_accounts и гостевые слоты accounts.yaml разошлись"
     assert set(config["rotation"]["slots"]) == set(guests), "rotation.slots и гостевые слоты разошлись"
@@ -70,7 +71,8 @@ def test_systemd_templates():
     units = sorted((ROOT / "scripts" / "systemd").iterdir())
     names = {u.name for u in units}
     assert {"refresh-cookies.service", "refresh-cookies.timer", "refresh-guest-cookies.service",
-            "refresh-guest-cookies.timer", "rotation-daemon.service"} <= names
+            "refresh-guest-cookies.timer", "rotation-daemon.service", "filter-nodes.service",
+            "filter-nodes.timer"} <= names
     for u in units:
         text = u.read_text(encoding="utf-8")
         assert "/home/sashko" not in text, f"{u.name}: вшит путь/пользователь"
@@ -83,3 +85,28 @@ def test_systemd_templates():
         if p.exists():
             for ref in re.findall(r"scripts/systemd/([\w.-]+\.(?:service|timer))", p.read_text(encoding="utf-8")):
                 assert ref in names, f"{doc} ссылается на несуществующий scripts/systemd/{ref}"
+
+
+def test_fleet_config_defaults():
+    """Модуль 01: новые поля fleet.* в config.yaml и гостевой режим выключен по умолчанию."""
+    _, _, config, _ = _load()
+    fleet = config["fleet"]
+    assert fleet["reserve_nodes"] == 6
+    assert fleet["min_good_nodes_warn"] == 10
+    assert fleet["node_check_interval_hours"] == 24
+    assert fleet["node_replace_only"] is True
+    assert fleet["guest_enabled"] is False
+
+
+def test_login_fleet_is_consistent():
+    """Логин-слоты: в login_accounts с гео, не гостевые и не в rotation.slots; нет дублей портов;
+    выключенный логин-слот ждёт первого входа (storage_state по соглашению)."""
+    import login_fleet as lf
+
+    accounts, guest_cfg, config, login = _load()
+    problems = lf.validate_fleet(accounts, None, guest_cfg.get("guest_accounts") or {}, login,
+                                 config["rotation"].get("slots") or [])
+    assert not problems, problems
+    for a in accounts:
+        if a.get("login"):
+            assert a["storage_state"] == f"storage_state/{a['name']}.json", a["name"]

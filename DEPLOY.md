@@ -1,227 +1,347 @@
-# Развёртывание на новом сервере
+# Развёртывание и эксплуатация
 
-Цель: с первого запуска получить **45 гостевых слотов** (`account_11..55`) плюс
-логин-аккаунты, если они у тебя есть. Все слоты уже описаны в репозитории
-(порты `7891–7945`, отпечатки, профили харвестера, список ротации), поэтому
-на сервере остаётся одно: **дать каждому слоту свою ноду**. Это делает
-`scripts/add_guest_slots.py`.
+Практическое руководство по Linux-серверу и локальному запуску. Перед
+изменением конфигурации сверяйте этот документ с текущими YAML и CLI.
+Архитектура приложения — в [ARCHITECTURE.md](./ARCHITECTURE.md); порядок
+миграции/ноды — в [ROTATION_SETUP.md](./ROTATION_SETUP.md).
 
-Нужно заранее:
+## 1. Поддерживаемая топология
 
-| Что | Сколько |
+Рекомендуемая production-топология — Linux-хост:
+
+- Docker Compose запускает mihomo и основной Python scraper.
+- Host venv запускает Playwright jobs, `login_hub`, фильтр нод, ротационный
+  демон, dashboard, backup/restore.
+- Scraper общается с mihomo и коллектором на host loopback; в Compose
+  используется `network_mode: host`.
+- Для передачи состояния контейнер и host tools используют общие каталоги
+  проекта `cookies/`, `storage_state/` и `state/`.
+
+`docker-compose.bridge.yml` предназначен для Docker Desktop. Он переопределяет
+сетевые адреса коллектора и метрик, но host networking/доступ к mihomo API и
+часть host-side ротации отличаются от Linux. Не считайте bridge-режим
+эквивалентной production-конфигурацией без отдельной проверки.
+
+Перед настройкой определите:
+
+| Требование | Проверить |
 |---|---|
-| Linux x86_64 (Ubuntu/Debian), доступ в интернет | — |
-| Нод VLESS в `all_nodes.txt` | **слотов + 8 запасных**: для 45 гостей — минимум 53, лучше 60+. Для логин-аккаунтов — ещё по одной на каждый |
-| RAM | скрапер + mihomo ≈ 1–2 ГБ, харвест браузерами — до ~4 ГБ на время прогона |
-| Локальный пайплайн | `http://127.0.0.1:9000/store_items` (или `STORE_ENDPOINT` в `docker-compose.yml`) |
+| Python | Python 3.12 рекомендуется: Dockerfile и CI используют 3.12 |
+| Docker | Docker Engine и Compose plugin |
+| Коллектор | Доступность batch endpoint (по умолчанию `http://127.0.0.1:9000/store_items`) и `/queue` |
+| mihomo | Поддержка используемого Meta delay API, controller API доступен локально |
+| Browser jobs | RAM под запланированное число Chromium/Firefox/WebKit процессов |
+| Доступ к noVNC | Только доверенный LAN/CIDR и firewall; не публиковать в Internet |
 
-## 1. Пакеты
+Не полагайтесь на примерные оценки RAM или числа нод как на гарантию; измерьте
+их на целевом хосте.
+
+## 2. Установка базового окружения
+
+На Debian/Ubuntu установите Docker по официальной инструкции поставщика, затем
+системные зависимости для host jobs (список зависит от используемых браузеров):
 
 ```bash
 sudo apt update
-sudo apt install -y git python3-venv python3-pip xvfb util-linux curl
-# Docker + compose-плагин: https://docs.docker.com/engine/install/
-sudo usermod -aG docker "$USER"      # затем выйти и зайти заново
+sudo apt install -y git python3.12-venv python3-pip xvfb util-linux curl
+# Установите Docker Engine и Compose plugin по документации Docker.
 ```
 
-## 2. Код и окружение
+Клонируйте нужную ветку репозитория и создайте отдельное Python-окружение:
 
 ```bash
-git clone https://github.com/finztern/reddit_parser.git reddit_scraper
-cd reddit_scraper
+git clone https://github.com/finztern/reddit_parser.git reddit_parser
+cd reddit_parser
 
 python3 -m venv venv
-venv/bin/pip install -r requirements-refresh.txt
-sudo venv/bin/playwright install-deps chromium firefox webkit   # системные библиотеки
-venv/bin/playwright install chromium firefox webkit             # сами браузеры (в кэш пользователя)
-
-mkdir -p cookies state storage_state
-chmod 777 state                      # в state/ пишут и контейнер (root), и демон ротации
+venv/bin/pip install --upgrade pip
+venv/bin/pip install -r requirements.txt -r requirements-refresh.txt
+venv/bin/playwright install-deps chromium firefox webkit
+venv/bin/playwright install chromium firefox webkit
 ```
 
-Проверка, что установленный `curl_cffi` знает все отпечатки из `accounts.yaml`:
+Установка Playwright browser-ов на хост нужна для login/refresh/rotation jobs,
+но не копирует браузеры в Docker image скрапера. Устанавливайте только реально
+используемые engine/channel, если хотите сократить размер среды.
+
+Создайте каталоги runtime и ограничьте доступ:
 
 ```bash
-venv/bin/python3 - <<'EOF'
-import yaml
-from curl_cffi.requests import BrowserType
-have = {b.value for b in BrowserType}
-bad = [(a['name'], a['impersonate'])
-       for a in yaml.safe_load(open('accounts.yaml'))['accounts'] if a['impersonate'] not in have]
-print('OK: все отпечатки известны curl_cffi' if not bad else f'НЕИЗВЕСТНЫЕ: {bad}')
-EOF
+mkdir -p cookies storage_state state
+chmod 700 cookies storage_state state
 ```
 
-Если что-то неизвестно — для гостей: `venv/bin/python3 scripts/rotate_fingerprints.py`
-(подберёт отпечатки из установленного `curl_cffi` и синхронно поправит
-`accounts.yaml` и `refresh_guest_cookies.yaml`).
+Если контейнер работает не под тем же UID, что host jobs, заранее продумайте
+права общего `state/`. Compose монтирует его на запись; не используйте
+`chmod 777` как универсальное исправление. Сохраняйте доступ только нужной
+учётной записи/группе.
 
-## 3. Ноды
+## 3. Конфиденциальные входные данные
 
-1. **Пул** — файл `all_nodes.txt`, по одной ссылке `vless://...` на строку.
-2. **Логин-аккаунты** (необязательно) — файл `vless_accounts.env`, по строке на аккаунт:
-   `account_1 = vless://...`. Гостевые слоты в этот файл вписывать **не нужно** —
-   скрипт ниже сделает это сам. Если логин-аккаунтов нет, файл не создавай.
+Положите локально, не в Git:
 
-Оба файла в `.gitignore` и в репозиторий не попадут.
+- `vless_accounts.env` — назначение VLESS-ссылок по слотам;
+- `all_nodes.txt` — пул доступных кандидатов, по одной VLESS-ссылке на строку;
+- cookies, Playwright state и остальные runtime-данные.
 
-## 4. mihomo (прокси)
+Проверьте, что файлы игнорируются Git:
 
 ```bash
-venv/bin/python3 scripts/generate_mihomo_config.py     # на чистом сервере соберёт конфиг из одного пула
+git check-ignore -v vless_accounts.env all_nodes.txt cookies state storage_state
+git status --short
+```
+
+Не вставляйте реальные VLESS URI, cookies, storage state и VNC-пароли в issue,
+коммиты, документацию или вывод CI. Секрет mihomo controller, если он нужен,
+задаётся отдельно в локальной конфигурации.
+
+## 4. Сгенерировать конфигурацию mihomo и проверить ноды
+
+Генератор читает `vless_accounts.env` и `all_nodes.txt`, записывает
+`mihomo_config.yaml` (он игнорируется Git). Не изменяйте его вручную:
+
+```bash
+venv/bin/python3 scripts/generate_mihomo_config.py
 docker compose up -d mihomo
-curl -s http://127.0.0.1:9090/proxies | head -c 200    # API должен отвечать
+curl --fail --silent http://127.0.0.1:9090/proxies >/dev/null
 ```
 
-## 5. Раздать ноды слотам
+Проверьте пул через работающий mihomo:
 
 ```bash
-# сначала план: какая нода какому слоту, гео, сколько нод останется про запас
-venv/bin/python3 scripts/add_guest_slots.py --count 0 --disable-login-without-node
-# если всё устраивает — запись (с бэкапами *.bak-addslots-*)
-venv/bin/python3 scripts/add_guest_slots.py --count 0 --disable-login-without-node --apply
-
-venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo
+venv/bin/python3 scripts/filter_nodes.py
 ```
 
-- `--count 0` — новых слотов не создавать: 11..55 уже есть в репозитории, скрипту
-  остаётся раздать им живые ноды (проверка через mihomo), с разбросом по странам.
-  Гео слота (`locale`/таймзона для браузера и `Accept-Language`) ставится по стране ноды.
-- `--spare 8` (по умолчанию) — столько живых нод скрипт **не трогает**: они нужны демону
-  ротации, чтобы менять забаненные идентичности. Если нод меньше, чем слотов + запас,
-  скрипт создаст столько, сколько получится, и скажет об этом.
-- `--disable-login-without-node` выключает логин-аккаунты, у которых нет ноды в
-  `vless_accounts.env` (на сервере без логин-аккаунтов).
-
-**Хочешь больше 45 слотов** — `--count N` создаёт новые (`account_56...`, порты с 7946),
-каждому нужна своя нода:
+Команда пишет отчёт `state/node_report.json`, но не обновляет accepted-pool.
+После просмотра результатов сохраните только проверенные ноды:
 
 ```bash
-venv/bin/python3 scripts/add_guest_slots.py --count 20 --apply
+venv/bin/python3 scripts/filter_nodes.py --write
 ```
 
-### Нода жива, но Reddit её не пускает
+Не выполняйте массовую выдачу или замену нод, пока не убедились, что тест
+попадает в ожидаемый mihomo controller и ответ Reddit интерпретируется верно.
+Если ни одна нода не прошла, `--write` намеренно не затирает прежний файл.
 
-Reddit банит целые подсети датацентровых VPN: нода проходит проверку живости, а главная
-`reddit.com` отдаёт 403 «blocked due to a network policy». Отфильтруй пул по реальному ответу Reddit:
+## 5. Выбрать и проверить режим парка
+
+Репозиторий поддерживает login- и guest-слоты. Актуальный источник назначений —
+`accounts.yaml` вместе с `scripts/refresh_cookies.yaml` и
+`scripts/refresh_guest_cookies.yaml`. Не исходите из номера слота без проверки
+списков.
+
+### Login-only миграция
+
+Для перевода guest-слотов в login режим сначала сделайте копию проекта или
+snapshot runtime-данных. Сначала команды показывают план:
 
 ```bash
-venv/bin/python3 scripts/filter_nodes.py              # сколько нод Reddit пускает, по странам
-venv/bin/python3 scripts/filter_nodes.py --write      # + all_nodes.reddit_ok.txt
-venv/bin/python3 scripts/add_guest_slots.py --count 0 --require-reddit --apply   # раздать только годные
+venv/bin/python3 scripts/convert_to_login.py --all
 ```
 
-Если ноды слотам **уже выданы** (а Reddit их не пускает), `--require-reddit` их не заменит —
-нужен `--replace-banned`: он проверяет ноды выданных слотов и меняет забаненные на годные
-(остальные слоты не трогает, старые строки в `vless_accounts.env` закомментированы):
+Сверьте, что план содержит ожидаемые аккаунты, гео, proxy-порты и ни один слот
+не будет потерян. Затем миграция с `--apply` сохраняет файлы `*.bak-login-*`:
 
 ```bash
-sudo systemctl stop rotation-daemon 2>/dev/null          # демон не должен писать state параллельно
-venv/bin/python3 scripts/add_guest_slots.py --count 0 --replace-banned --spare 4            # план
-venv/bin/python3 scripts/add_guest_slots.py --count 0 --replace-banned --spare 4 --apply
-venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo
-sudo systemctl start rotation-daemon 2>/dev/null
+venv/bin/python3 scripts/convert_to_login.py --all --apply
 ```
 
-Нужен mihomo Meta (параметр `expected` в delay-API). Если «годными» оказались все ноды,
-перепроверь вручную: `curl -x http://127.0.0.1:ПОРТ -o /dev/null -w "%{http_code}\n" https://www.reddit.com/`.
-
-## 6. Cookies гостевых слотов
-
-Параллельный харвест браузерами. В **первый раз** запусти осторожно и смотри память:
+Новый login-слот создаётся выключенным до первого подтверждённого входа.
+Сначала проверьте ноды и количество запаса (`fleet.reserve_nodes`), затем
+попросите `add_login_slots.py` составить план:
 
 ```bash
-watch -n2 free -m                                          # в соседнем терминале
-xvfb-run -a venv/bin/python3 scripts/refresh_guest_cookies.py --no-headless --workers 3
+venv/bin/python3 scripts/add_login_slots.py
 ```
 
-Запуск **с окном под `xvfb-run`**, как в systemd-юните: ручной прогон должен вести себя так же, как
-таймер, иначе проверка ничего не докажет. Без `--no-headless` браузеры идут в headless-режиме
-(`headless: true` в yaml), а Reddit может отвечать таким сессиям отказом.
-
-Если `available` не падает ниже ~1.5 ГБ, дальше запускай без флага — число воркеров
-выберется само (потолок и пороги памяти — в `scripts/refresh_guest_cookies.yaml`,
-по умолчанию до 6 одновременных браузеров). В конце лога — сводка `успешно=N, ошибок=M` и
-причина для каждого слота, который не прошёл. Слот, не прошедший верификацию, повторяется
-в этом же прогоне; остальное добивается так:
+Проверив соответствие числа хороших нод, списка аккаунтов, уникальности портов
+и резерва, применяйте только явно нужное изменение:
 
 ```bash
-venv/bin/python3 scripts/refresh_guest_cookies.py --account account_17 --account account_31
-ls cookies/ | wc -l                                         # сколько файлов cookies есть
+venv/bin/python3 scripts/add_login_slots.py --apply
 ```
 
-Причину отказа слота показывает последняя строка про него (`не удалось: ...`):
+Опции скриптов могут различаться; перед операцией сверяйте CLI в самом файле
+или запускайте `--help`. Не добавляйте слоты/ноды к активному парку, если
+конфигурация mihomo и account YAML не будут обновлены согласованно.
 
-- `порт N не принимает соединения` — браузер даже не запускался: у слота нет слушателя mihomo
-  (нет ноды в `vless_accounts.env` либо после `generate_mihomo_config.py` не перезапущен mihomo);
-- `ошибка навигации ... — <подсказка>` — прокси-порт, нода или падение браузера (нехватка RAM), подсказка
-  называет причину;
-- `верификация ... вернул 403 ... ВЫВОД: ...` — страница загрузилась, cookies получены, но JSON не отдан.
-  В строке есть статус и заголовки ответа, начало тела и результат **той же проверки из настоящего
-  браузера**. «Браузер получает JSON, а curl_cffi нет» — проблема в отпечатке запроса (`impersonate`),
-  не в IP и cookies. «JSON закрыт и для браузера» — IP ноды заблокирован Reddit'ом либо изменение на
-  стороне Reddit.
+### Сохранить guest-слоты
 
-## 7. Скрапер
+Guest cookies обновляет только `refresh_guest_cookies.py`; настройки и список
+сверяйте в `scripts/refresh_guest_cookies.yaml`. Ручная проверка одного слота:
+
+```bash
+xvfb-run -a venv/bin/python3 scripts/refresh_guest_cookies.py --account account_12 --no-headless
+```
+
+Убедитесь, что этот аккаунт действительно находится в guest-списке и его
+cookies проверены до включения/запуска worker-а. `fleet.guest_enabled`
+управляет гостевой identity rotation, а не самим фактом наличия
+`enabled: true` в `accounts.yaml`.
+
+## 6. Login и ручной вход
+
+Покажите текущий login-статус:
+
+```bash
+venv/bin/python3 scripts/manual_login.py --list
+venv/bin/python3 scripts/login_hub.py --list-queue
+```
+
+Один аккаунт можно обслужить через `manual_login.py`; несколько — через
+`login_hub.py`. Задайте фактический LAN IP сервера и допустимую CIDR-сеть в
+`config.yaml`/CLI. Не оставляйте noVNC открытым на публичном интерфейсе.
+Используйте `MANUAL_LOGIN_VNC_PASSWORD` или `LOGIN_HUB_VNC_PASSWORD` через
+защищённое окружение/секрет-хранилище; не сохраняйте пароль в YAML или
+коммитах.
+
+```bash
+venv/bin/python3 scripts/login_hub.py --accounts account_1 account_2
+```
+
+По умолчанию login-hub ограничивает число сессий как настройкой, так и
+доступной памятью. Сессия с капчей/подтверждением остаётся за оператором до
+таймаута. После успешного входа проверьте `cookies/`, `storage_state/`,
+`enabled` и вывод `manual_login.py --list` прежде чем включать аккаунт.
+
+## 7. Запуск скрапера
+
+Linux:
 
 ```bash
 docker compose up -d --build
-docker compose logs -f scraper
-docker compose logs scraper | grep -c "Старт"               # должно совпасть с числом включённых слотов
+docker compose ps
+docker compose logs --since=10m scraper
 ```
 
-В строке старта каждого слота видно `impersonate` и `Accept-Language` — язык должен
-соответствовать стране ноды слота.
-
-## 8. Автоматика (systemd)
-
-Юниты — шаблоны без вшитых путей; установщик подставляет пользователя и каталог проекта:
+Scraper читает конфигурацию из bind mounts. `config.yaml` обновляется на лету;
+`accounts.yaml` загружен на старте — после его изменения перезапустите
+контейнер:
 
 ```bash
-sudo scripts/install_systemd.sh --enable --no-login     # без логин-аккаунтов
-sudo scripts/install_systemd.sh --enable                # если логин-аккаунты есть
-systemctl list-timers | grep refresh
-journalctl -u rotation-daemon -f
+docker compose restart scraper
 ```
 
-Ставятся: `refresh-guest-cookies.timer` (гостевые cookies раз в час, ~2 ч живут),
-`rotation-daemon.service` (смена ноды/отпечатка у забаненных слотов) и, без
-`--no-login`, `refresh-cookies.timer` (логин-аккаунты раз в неделю). Все браузерные
-джобы берут общий `flock`, а при нехватке памяти ядро убивает их первыми (не скрапер).
+`store_endpoint` и `queue_control.url` по умолчанию указывают на
+`127.0.0.1:9000` хоста в Linux host-network режиме. Если коллектор слушает
+другой интерфейс/порт, задайте правильный endpoint и проверьте доступ до
+запуска полного парка.
 
-## 9. Логин-аккаунты (необязательно)
-
-Первый вход делается руками, дальше сессию поддерживает `refresh-cookies.timer`:
+Bridge mode:
 
 ```bash
-venv/bin/python3 scripts/manual_login.py account_1      # нужны xvfb x11vnc novnc websockify
+docker compose -f docker-compose.bridge.yml up -d --build
 ```
 
-Затем прописать ссылку `account_1 = vless://...` в `vless_accounts.env`, поставить
-`enabled: true` в `accounts.yaml`, пересобрать конфиг mihomo (п. 5) и
-`docker compose restart scraper`.
+В bridge mode compose уже задаёт `host.docker.internal` для коллектора и
+метрики, но проверяйте сетевой путь к mihomo и ограничения rotation отдельно.
 
-## Проверка после запуска
+## 8. Systemd jobs
+
+`scripts/install_systemd.sh` рендерит шаблоны из `scripts/systemd/`, подставляя
+пользователя, группу и абсолютный путь проекта. Сначала можно только
+отрисовать файлы:
 
 ```bash
-venv/bin/python3 scripts/rotation_daemon.py --status   # слоты, идентичности, живые/мёртвые ноды
-docker compose logs --since 10m scraper | grep -c "пустой листинг"
-docker stats --no-stream                               # память контейнеров
+scripts/install_systemd.sh --out /tmp/reddit-units
 ```
 
-Через сутки посмотри `--status`: если свободных нод в запасе почти не осталось,
-слотам при бане некуда ротироваться — пополни `all_nodes.txt` и повтори
-`generate_mihomo_config.py` + `docker compose restart mihomo`.
+Затем после проверки установите их на хост:
 
-## Если что-то пошло не так
+```bash
+sudo scripts/install_systemd.sh --enable
+```
 
-| Симптом | Причина / что делать |
+В режиме `--enable` включаются `backup-sessions.timer`,
+`filter-nodes.timer`, `rotation-daemon.service` и login refresh timer; guest
+refresh units ставятся/включаются только с `--with-guest`. Если guest mode
+выключен, установщик отключает ранее установленный
+`refresh-guest-cookies.timer`. `--no-login` не устанавливает login refresh
+units. Сверяйте список с фактически используемыми типами аккаунтов.
+
+Проверка после установки:
+
+```bash
+systemctl list-timers --all
+systemctl status backup-sessions.timer filter-nodes.timer rotation-daemon.service
+journalctl -u rotation-daemon.service --since today
+journalctl -u backup-sessions.service --since today
+```
+
+Изменение `fleet.node_check_interval_hours` само по себе не меняет
+`filter-nodes.timer`: интервал прописан в systemd unit и требует отдельной
+правки шаблона/переустановки.
+
+## 9. Резервирование и восстановление
+
+`backup_sessions.sh` копирует `cookies/`, `storage_state/`,
+`state/profiles/`. По умолчанию backup root — каталог `backups` рядом с
+каталогом проекта (`${ROOT}/../backups`); переопределить можно переменной
+`BACKUP_ROOT`. Каталогам выставляется `0700`, файлам `0600`. Скрипт удаляет
+только датированные `YYYYMMDD` каталоги старше 14 дней.
+
+Создайте backup перед изменением профиля, аккаунта или ноды:
+
+```bash
+scripts/backup_sessions.sh
+```
+
+Восстановление из копии:
+
+```bash
+scripts/restore_sessions.sh YYYYMMDD
+scripts/restore_sessions.sh YYYYMMDD account_12
+```
+
+Первый вариант копирует всё содержимое поддерживаемых backup-подкаталогов;
+второй копирует только файлы данного аккаунта. Он не удаляет новые файлы и
+не заменяет конфигурацию `accounts.yaml`/`config.yaml`. Проверьте результат и
+владельца файлов перед запуском jobs. Резерв на том же диске не защищает от
+потери хоста; для production используйте отдельный защищённый носитель согласно
+политике хранения секретов.
+
+## 10. Метрики, status и диагностика
+
+```bash
+venv/bin/python3 scripts/dashboard.py
+venv/bin/python3 scripts/dashboard.py --once
+venv/bin/python3 scripts/dashboard.py --json
+venv/bin/python3 scripts/rotation_daemon.py --status
+venv/bin/python3 scripts/filter_nodes.py
+curl --fail --silent http://127.0.0.1:9100/metrics.json
+```
+
+Dashboard читает metrics endpoint (по умолчанию локальный порт 9100), резервный
+`state/metrics_snapshot.json` и `state/events.jsonl`. Формат — в
+[docs/metrics-schema.md](./docs/metrics-schema.md). Значение `needs_login` и
+состояние парка требуют сопоставления с конфигурацией аккаунтов; сам dashboard
+не исправляет cookies и не заменяет ручную проверку.
+
+| Симптом | Что проверить |
 |---|---|
-| `add_guest_slots.py`: «пул нод не загружен в запущенный mihomo» | `generate_mihomo_config.py` → `docker compose restart mihomo`, повторить |
-| «запас на ротацию мал» | в `all_nodes.txt` мало нод — добавь (слотов + 8 минимум) |
-| харвест: `верификация ... вернул 403` у **всех** слотов | причина общая, а не «сломанные ноды». Сначала убедись, что запуск был с окном (`xvfb-run ... --no-headless`), затем читай `ВЫВОД` в строке ошибки (п. 6): отпечаток curl_cffi, блок IP или изменение на стороне Reddit |
-| харвест: `верификация ... вернул 403` у **части** слотов | нода/IP этих слотов у Reddit в бане — слот попадёт в ротацию, либо повтори `--account` |
-| харвест: `не смог запустить webkit/firefox` | `sudo venv/bin/playwright install-deps` и `venv/bin/playwright install webkit firefox` |
-| харвест: «мало свободной RAM» | уменьши `--workers` или `parallel_browsers`; убедись, что скрапер не разросся (`docker stats`) |
-| воркер: сетевые ошибки по одному слоту | у слота нет ноды/слушателя mihomo — раздай ноды (п. 5) или выключи слот (`enabled: false`) |
-| после `git pull` конфликт в `accounts.yaml` | скрипты правят файлы на месте: закоммить локальные правки (`git add -A && git commit`) до `pull` |
+| Scraper не стартует | `docker compose logs scraper`, YAML, хотя бы один `enabled: true`, существование cookies и уникальность портов |
+| Proxy connection refused | Запущен ли mihomo, сгенерирован ли config, совпадает ли proxy host/port |
+| Нода отсутствует в controller | Обновить `mihomo_config.yaml` генератором, затем перезапустить mihomo |
+| Все ноды не проходят probe | mihomo API/Meta version, endpoint проверки, connectivity к Reddit; не перезаписывать accepted-pool пустым результатом |
+| `auth_failed` | Проверить login статус, актуальность cookies/storage state; выполнить ручной login при необходимости |
+| `blocked_node`/`needs_node` | Проверить пул, `all_nodes.reddit_ok.txt`, запас и `rotation_daemon --status` |
+| Нет отправки | Проверить collector batch endpoint, `/queue`, `STORE_ENDPOINT`, compose networking |
+| Dashboard «нет связи» | Проверить scraper, `metrics.enabled`, bind address и локальный port mapping |
+| Backup timer не срабатывает | `systemctl status`, `journalctl -u backup-sessions.service`, права на backup root |
+
+## 11. Проверки перед production и rollback
+
+Перед включением полного парка:
+
+1. Проверить конфиги/порты без сетевого запроса: `python -m pytest -q`.
+2. Убедиться, что CI завершился успешно для коммита.
+3. На целевом хосте проверить mihomo API и небольшой набор нод.
+4. Сделать backup и испытать restore на тестовой копии/аккаунте.
+5. Запустить небольшой ограниченный набор, наблюдать логи, очередь, ответы и
+   память; расширять только после проверки метрик.
+
+CI не проверяет реальные Reddit/VLESS/collector ответы и не является
+production smoke test. Для отката конфигурационных миграций используйте
+сгенерированные `*.bak-*` файлы или отдельный проверенный Git commit.
+Откат systemd units требует восстановить предыдущие templates/units и выполнить
+`daemon-reload`; не рассчитывайте на автоматический rollback installer-а.

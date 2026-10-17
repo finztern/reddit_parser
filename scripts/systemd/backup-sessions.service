@@ -1,0 +1,19 @@
+# Шаблон юнита: ежедневный бэкап cookies/storage_state/state/profiles.
+# НЕ копируй руками: @USER@, @GROUP@ и @ROOT@ подставляет установщик
+#     scripts/install_systemd.sh
+
+[Unit]
+Description=Reddit scraper - backup session data
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/env bash @ROOT@/scripts/backup_sessions.sh
+
+[Install]
+WantedBy=multi-user.target

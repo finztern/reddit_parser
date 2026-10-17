@@ -79,8 +79,22 @@ class CurlSessionHandle:
         self._proxies = proxies
         self._locale = locale
         self.accept_language = build_accept_language(locale, impersonate)
+        # Заголовки из постоянного профиля (модуль 03): User-Agent, sec-ch-ua*.
+        # Accept-Language добавляется отдельно (зависит от locale).
+        self.extra_headers: dict[str, str] = {}
         self.current = self._build()
         self.swaps = 0
+
+    def set_profile_headers(self, profile: dict | None):
+        """UA и sec-ch-ua* из профиля устройства — те же значения видит браузер."""
+        self.extra_headers = {}
+        if not profile:
+            return
+        from .profile_gen import http_headers
+        self.extra_headers = {k: v for k, v in http_headers(profile).items() if k != "Accept-Language"}
+
+    def request_headers(self) -> dict[str, str]:
+        return {**self.extra_headers, "Accept-Language": self.accept_language}
 
     def set_locale(self, locale: str | None):
         """Смена локали (гео ноды) на лету; сессию пересоздавать не нужно —
@@ -136,7 +150,7 @@ async def _fetch_comments_page(
         url,
         params=params,
         cookies=cookies,
-        headers={"Accept-Language": curl_session.accept_language},
+        headers=curl_session.request_headers(),
         timeout=(connect_timeout, timeout),
         allow_redirects=True,
     )

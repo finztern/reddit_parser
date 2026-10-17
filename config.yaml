@@ -16,11 +16,15 @@ reddit_base_url: "https://www.reddit.com"
 fetch_limit: 100
 
 # ---- Планировщик слотов ----
-# Интервал между опросами ВСЕХ аккаунтов вместе (не на аккаунт!).
-# Дальше подстраивается сам по доле дублей на первой странице.
+# Интервал между опросами ВСЕХ аккаунтов вместе (не на аккаунт!) = 1 / T_fleet.
+# При fleet_polling.target_fleet_rate: auto подстраивается сам по доле дублей
+# на первой странице (границы min/max ниже); число в target_fleet_rate его заменяет.
+# Паузы на аккаунт, состояния и аварийный тормоз — секция fleet_polling (модуль 05).
 stream_start_interval_seconds: 1.5
 stream_min_interval_seconds: 0.4
 stream_max_interval_seconds: 6
+# Джиттер берётся из fleet_polling.jitter_ratio; stream_jitter_ratio — запасной
+# вариант, пока в fleet_polling ключа нет.
 stream_jitter_ratio: 0.2
 
 # Целевая доля дублей на 1-й странице (ewma):
@@ -108,21 +112,51 @@ connect_timeout_seconds: 5
 
 cookie_reload_check_interval_seconds: 30
 
-# ---- Бюджет каждого аккаунта по X-Ratelimit-* ----
-# После ответа аккаунт "отдыхает" reset / (remaining * margin) секунд;
-# в это время планировщик его пропускает.
+# ---- Аварийный тормоз по X-Ratelimit-* ----
+# Заголовки больше НЕ задают темп аккаунта (его задаёт поток + fleet_polling).
+# Если остаток почти исчерпан (fleet_polling.ratelimit_emergency_remaining),
+# аккаунт уходит в cooldown до reset (но не дольше ratelimit_max_interval_seconds).
+# false — игнорировать заголовки (429 и Retry-After всё равно уважаются).
 respect_ratelimit_headers: true
-ratelimit_safety_margin: 0.85
+ratelimit_safety_margin: 0.85          # не используется (оставлен для совместимости)
 ratelimit_max_interval_seconds: 900
 
 # ---- Backoff при ошибках (на аккаунт) ----
 base_backoff_seconds: 5
 max_backoff_seconds: 300
-# После стольких подряд 401/403 воркер НЕ завершается, а уходит в паузу и
-# ждёт обновления cookies-файла (его кладут refresh-джобы).
-max_consecutive_auth_errors: 5
+# После fleet_polling.auth_failed_after подряд 401/403 воркер НЕ завершается,
+# а уходит в auth_failed и ждёт обновления cookies-файла (его кладут refresh-джобы).
+# (max_consecutive_auth_errors заменён на fleet_polling.auth_failed_after)
 # Как часто пробовать запрос в этой паузе (сек).
 auth_dead_cooldown_seconds: 120
+
+# ============================================================
+#  Планировщик опроса парка (модуль 05, scraper/scheduler.py + fleet_polling.py)
+#
+#  Темп задаёт ПОТОК: один общий темп парка T_fleet (запросов/с), запросы
+#  раздаются по кругу между здоровыми аккаунтами. Средний интервал на аккаунт
+#  interval_acc = N_здоровых / T_fleet (± jitter_ratio), но не меньше случайной
+#  паузы pause_min..pause_max на каждый запрос. Если interval_acc меньше средней
+#  паузы — парк мал для темпа: warning "не хватает аккаунтов" в логе и в
+#  state/fleet_polling.json (поле warning). Лимиты Reddit — только аварийный тормоз.
+# ============================================================
+fleet_polling:
+  mode: round_robin
+  pause_min_seconds: 3          # нижняя граница паузы аккаунта: random(min, max) на КАЖДЫЙ запрос
+  pause_max_seconds: 7
+  jitter_ratio: 0.2             # разброс интервала между слотами парка
+  target_fleet_rate: auto       # auto (по перекрытию страниц) или число запросов/с парка
+  cooldown_base_seconds: 30     # 429 / Retry-After / аномальные X-Ratelimit-*: base * 2^(n-1)
+  cooldown_max_seconds: 900
+  auth_failed_after: 3          # подряд 401/403 -> auth_failed (нужен вход)
+  # --- пороги переходов ---
+  degraded_after_empty: 3       # пустых листингов подряд -> degraded
+  degraded_recover_ok: 2        # успешных опросов подряд -> обратно в active
+  empty_cooldown_base_seconds: 3
+  empty_cooldown_max_seconds: 60
+  recovery_probe_seconds: 120   # проба аккаунта в auth_failed (blocked_node — в 4 раза чаще)
+  ratelimit_emergency_remaining: 3   # остаток X-Ratelimit-Remaining <= этого -> cooldown до reset
+  disabled_accounts: []         # имена слотов, временно выключенных оператором (горячая перезагрузка)
 
 # ============================================================
 #  Ротация идентичностей гостевых слотов (нода + отпечаток + cookies).
@@ -209,3 +243,63 @@ rotation:
   poll_seconds: 5
   reconcile_seconds: 30
   lock_timeout_seconds: 1500
+
+# --- парк логин-аккаунтов (модуль 01) ---
+fleet:
+  # годных нод (Reddit отдаёт 200), которые НЕ раздаются слотам — запас на замену сгоревших
+  reserve_nodes: 6
+  # меньше годных нод — предупреждение в отчёте filter_nodes.py и в rotation_daemon.py --status
+  min_good_nodes_warn: 10
+  # как часто filter_nodes.py перепроверяет пул (systemd-таймер filter-nodes.timer)
+  node_check_interval_hours: 24
+  # сгоревшая нода логин-слота: только ЗАМЕНА НОДЫ (профиль и сессия остаются)
+  node_replace_only: true
+  # гостевой харвест и ротация: код остаётся, но выключен
+  guest_enabled: false
+  # временно вернуть старый планировщик модуля 05 при переходе
+  legacy_scheduler: false
+  # кандидатов на замену брать только из all_nodes.reddit_ok.txt (результат filter_nodes.py --write)
+  use_reddit_ok_file: true
+
+# --- параллельный ручной вход (модуль 02, scripts/login_hub.py) ---
+login_hub:
+  # порты noVNC: port_base + индекс сессии (6001, 6002, ...)
+  port_base: 6001
+  # одновременных сессий входа; реальный лимит = min(max_parallel, свободная RAM // ram_per_session_mb)
+  max_parallel: 4
+  ram_per_session_mb: 700
+  # noVNC слушает ТОЛЬКО этот LAN-адрес сервера и пускает только клиентов из allowed_cidr
+  bind: "192.168.0.101"
+  allowed_cidr: "192.168.0.0/16"
+  # адрес в ссылках (null = bind)
+  public_host: null
+  # экран Xvfb, если в профиле аккаунта (модуль 03) нет разрешения
+  screen: [1400, 900]
+
+# --- «живое» поведение при обслуживании сессии (модуль 04, scripts/human_session.py) ---
+# Только ЧТЕНИЕ: лента, скролл, 1–2 поста. Никаких лайков/подписок/комментариев/сообщений/сохранений
+# (POST/PUT/PATCH/DELETE на запись блокируются на уровне Playwright). Касается только
+# refresh_cookies.py и login_hub.py; скрапер на curl_cffi не затрагивается.
+human:
+  enabled: true
+  profile: normal               # calm | normal
+  min_interval_hours: 24        # не чаще раза в N часов на аккаунт (реже = безопаснее)
+  interval_jitter: 0.25         # следующий срок = interval * (1 + U(0..0.25)) — аккаунты расходятся
+  refresh_before_hours: 12      # «нуждается в обновлении»: токен истекает раньше этого
+  min_session_seconds: 40
+  max_session_seconds: 150      # жёсткий потолок
+  on_first_login: true          # короткая сессия после первого входа через login_hub
+  start_gap_seconds: 45
+
+# --- метрики скрапера (модуль 06, scraper/metrics.py) ---
+# Скрапер пишет, панель (модуль 07) только читает: GET /metrics.json + state/metrics_snapshot.json
+# + журнал state/events.jsonl. Схема — docs/metrics-schema.md. Хост/порт можно переопределить
+# переменными METRICS_BIND / METRICS_PORT (в bridge-режиме Docker внутри контейнера нужен 0.0.0.0).
+metrics:
+  enabled: true
+  host: "127.0.0.1"
+  port: 9100
+  snapshot_interval_seconds: 2
+  identity_refresh_seconds: 30     # нода/страна/IP/возраст cookies перечитываются раз в N с (в потоке)
+  events_max_bytes: 5242880        # ротация events.jsonl по размеру
+  events_backups: 3
