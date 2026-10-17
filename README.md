@@ -24,32 +24,40 @@
 ## Состав проекта
 
 ```text
-main.py                     Запуск асинхронного скрапера
+main.py                     Сборка и lifecycle приложения
 scraper/
-  config.py                 Загрузка конфигурации и hot-reload
-  scheduler.py              Планировщик запросов и runtime-паузы аккаунтов
-  fleet_polling.py          Состояния аккаунтов, cooldown и восстановление
-  worker.py                 Цикл опроса одного аккаунта
-  http_client.py            Reddit HTTP-клиент на curl_cffi и пагинация
-  sender.py                 Буфер и отправка комментариев в коллектор
-  pipeline.py               Формат payload и обработка ответа коллектора
-  state.py                  Дедупликация и backoff
-  identity.py               Обмен состоянием слотов через state/
-  profile_gen.py            Создание и проверка профилей устройств
-  metrics.py                HTTP/JSON метрики, снимок и журнал событий
+  config.py                 ConfigStore, чтение аккаунтов и watcher cookies
+  worker.py                 Цикл аккаунта, fetch -> filter -> claim -> buffer
+  http_client.py            Reddit HTTP/curl_cffi, pagination, результаты запросов
+  scheduler.py              Общий темп, выдача слотов, спрос и runtime pause
+  fleet_polling.py          Состояния аккаунтов, cooldown и recovery
+  sender.py                 Буфер, backpressure, очередь и доставка батчей
+  pipeline.py               Payload для collector и подтверждение ответа
+  state.py                  In-memory SeenCache и локальный retry backoff
+  health.py                 Обнаружение зависших потоков и смена executor
+  identity.py               Файловый протокол worker <-> rotation daemon
+  profile_gen.py            Fingerprint профили, validation, geo refresh
+  geo.py / geoip.py         Локаль и разрешение geo через IP
+  metrics.py                Snapshot, event journal и HTTP endpoint
+  grouping.py / models.py   Группировка аккаунтов и общие модели
+  constants.py / utils.py   Пути, defaults, logging и общие функции
 scripts/
-  refresh_cookies.py        Обслуживание сессий login-аккаунтов
-  refresh_guest_cookies.py Получение cookies анонимных гостевых слотов
-  manual_login.py           Ручной вход в один аккаунт через браузер
-  login_hub.py              Параллельный ручной вход через noVNC
-  human_session.py          Ограниченная read-only сессия Playwright
-  filter_nodes.py           Проверка пула нод и сохранение годных нод
-  add_login_slots.py        Добор login-слотов под проверенный пул
-  convert_to_login.py       План/миграция гостевых слотов в login-режим
-  rotation_daemon.py        Замена нод и поддержка режимов ротации
-  dashboard.py              Терминальная панель метрик
+  refresh_*                 Обслуживание login/guest cookies
+  manual_login.py           Ручной вход одного аккаунта
+  login_hub.py              Ограниченный LAN/noVNC вход в несколько аккаунтов
+  human_session.py          Read-only browser maintenance
+  filter_nodes.py           Проверка пула и отчёт годных нод
+  add_*_slots.py            Планирование/добавление guest или login слотов
+  convert_to_login.py       План и миграция guest -> login
+  rotation_daemon.py        Обработка node/identity заявок worker-ов
+  profile.py                Создание, проверка и миграция fingerprint профилей
+  dashboard.py              TUI для метрик и runtime pause/login actions
   backup_sessions.sh        Резервная копия cookies и профилей
   restore_sessions.sh       Восстановление резервной копии
+tests/                      Offline unit/integration tests по компонентам
+docs/
+  metrics-schema.md         Публичный JSON contract для метрик
+  tz/                       Исторические ТЗ; реализация и тесты — актуальнее
 ```
 
 Главные входные данные: `config.yaml`, `accounts.yaml` и два файла настроек
@@ -100,6 +108,11 @@ node-replacement и dashboard. Репозиторий содержит конф�
 Файлы cookies и JSON-состояние наблюдаются/перечитываются по своим правилам;
 см. [ARCHITECTURE.md](./ARCHITECTURE.md).
 
+Для изменения кода пользуйтесь [CLAUDE.md](./CLAUDE.md) как индексом «задача →
+модули → тесты». Архитектура описывает lifecycle и владение состоянием;
+[DEPLOY.md](./DEPLOY.md) и [ROTATION_SETUP.md](./ROTATION_SETUP.md) — только
+операционные процедуры.
+
 `fleet.legacy_scheduler` сейчас только описан в настройках/defaults и не
 переключает реализацию планировщика. Не используйте его как рабочий rollback
 переключатель без отдельной реализации.
@@ -127,10 +140,11 @@ GitHub Actions workflow [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)
 запускает на push и pull request установку зависимостей, `compileall` и полный
 pytest-набор. Таблица покрытия добавляется в summary запуска, HTML/XML-отчёт
 публикуется как artifact `coverage-report`. Для pull request дополнительно
-проверяется покрытие изменённых строк Python с начальным порогом 80%.
-Жёсткого минимального порога для всего проекта нет, поэтому непокрытые legacy
-модули не блокируют несвязанные изменения. Ruff пока не является CI gate: в
-существующем коде есть неисправленные lint-замечания.
+проверяется покрытие изменённых строк в scope `main.py` и `scraper/` с
+начальным порогом 80%; скрипты пока не входят в coverage scope. Жёсткого
+минимального порога для всего проекта нет, поэтому непокрытые legacy модули не
+блокируют несвязанные изменения. Ruff пока не является CI gate: в существующем
+коде есть неисправленные lint-замечания.
 
 ## Развёртывание и запуск
 

@@ -98,6 +98,49 @@ fallback `target_rate_per_second`. Размер batch дополнительно
 `SeenCache` хранится только в RAM. Рестарт очищает его; постоянно хранимой
 глобальной дедупликации в проекте нет.
 
+### 3.1 Один цикл опроса
+
+Последовательность важна: scheduler владеет eligibility аккаунтов, worker
+выполняет один выданный слот, а `Sender` отдельно управляет доставкой.
+
+1. `Sender.demand()` сообщает scheduler-у, нужен ли ещё сбор данных. При
+   полном буфере новые Reddit-запросы останавливаются, но sender продолжает
+   отправку и очистку буфера.
+2. `PollScheduler` выбирает живой и готовый слот, учитывая состояние аккаунта,
+   минимальную паузу, общий темп и спрос. Опросы не запускаются независимо по
+   таймеру каждого аккаунта.
+3. `account_worker` проверяет запросы ротации и обновления профиля/cookies,
+   затем получает страницы через `fetch_comments`. Pagination останавливается
+   на пересечении с известным ID, по возрасту, по завершении `after` или по
+   `pagination_max_pages`.
+4. Worker отбрасывает невалидные и старые payload-ы, вызывает
+   `SeenCache.try_claim()` и передаёт успешные claims в `Sender.put_many()`.
+   Claims в буфере продолжают считаться pending и защищают от дублей между
+   параллельными worker-ами.
+5. `Sender` выбирает содержимое батча и вызывает `send_batch_to_store()`.
+   Только после подтверждения вызывается `SeenCache.confirm()`; неподтверждённые,
+   просроченные или вытесненные ID освобождаются через `release()`.
+6. Worker сообщает итог опроса через `PollScheduler.release()`. Этот результат
+   обновляет состояние/паузы аккаунта и статистику scheduler-а; sender не
+   определяет здоровье аккаунта.
+
+### 3.2 Обработка результатов опроса
+
+| Результат Reddit | Состояние/действие | Что важно при изменениях |
+|---|---|---|
+| Успешный непустой Listing | Формирование payload, claim, буферизация; reset последовательных ошибок | Получение данных не означает, что collector их уже подтвердил |
+| Пустой Listing | Нарастающая пауза; после порога состояние может стать `degraded` | Пустой ответ не считать успешным восстановлением |
+| 429 или 5xx | Cooldown конкретного аккаунта; остальные слоты продолжают работать | Уважать `Retry-After`; не блокировать весь парк из-за одного аккаунта |
+| 401/403 | Auth backoff; после порога `auth_failed` и редкие пробы | Новые cookies перечитываются worker-ом; для login-403 может быть заявка на замену ноды |
+| Сетевая ошибка | Ограниченный backoff и уведомление scheduler-а | Не превращать сетевую ошибку в пустой успешный результат |
+| Ошибка/неподтверждённый ответ collector-а | Sender освобождает неуспешные claims для повторной обработки | Не подтверждать ID только из-за попытки POST |
+| Исключение из worker | `supervised()` перезапускает воркер с экспоненциальной задержкой | `CancelledError` проходит наружу; штатное завершение worker не перезапускается |
+
+Пороговые значения, точные классификаторы ошибок и тайминги задаются в коде и
+конфигурации (`scraper/worker.py`, `scraper/fleet_polling.py`,
+`scraper/http_client.py`, `config.yaml`). Таблица описывает контракт, а не
+полный список status code или все числовые defaults.
+
 ## 4. Состояния аккаунта и конфигурация
 
 Аккаунты в `accounts.yaml` должны иметь уникальные `name` и `proxy_port`,
@@ -128,6 +171,30 @@ fallback `target_rate_per_second`. Размер batch дополнительно
 `LOG_BACKUP_COUNT` и `EXECUTOR_*`. `METRICS_BIND`/`METRICS_PORT` задают
 endpoint метрик. Точный набор переменных — source of truth в коде, не этот
 перечень.
+
+### Владельцы конфигурации и reload
+
+| Данные | Владелец во время работы | Как применяются изменения |
+|---|---|---|
+| `config.yaml` | `ConfigStore` | YAML перечитывается циклом reload; отдельные параметры используются при следующем обращении к `get()` |
+| `accounts.yaml` | `main.py` / `load_accounts()` | Список аккаунтов загружается при старте; изменение требует перезапуска scraper-а |
+| Cookies | `CookieFileWatcher` внутри account worker | Проверка по mtime с ограничением частоты stat; валидный изменившийся файл применяется в runtime |
+| Активный slot profile | `SlotProfileWatcher` внутри account worker | Изменение `state/slots/<name>.json` применяется при последующей проверке watcher-а |
+| Постоянный device profile | `state/profiles/<name>.json` и `profile_gen.py` | Создаётся/меняется профильными утилитами; worker использует его как постоянный fingerprint |
+| Runtime pause | `state/runtime_disabled.json` | Scheduler перечитывает runtime-файл; YAML-конфиг при этом не меняется |
+| Запрос на ротацию | `state/requests/<name>.json` | Worker пишет заявку, daemon обрабатывает и обновляет статус; worker забирает результат |
+
+Порядок источников fingerprint в worker: постоянный device profile
+`state/profiles/<name>.json` важнее slot profile и `accounts.yaml`; slot profile
+важнее `accounts.yaml`, если постоянного профиля ещё нет. Slot profile задаёт
+активную ноду и может нести текущий fingerprint для legacy/guest-сценария.
+Для аккаунта с постоянным device profile смена ноды должна обновлять geo-группу,
+но не менять постоянный fingerprint автоматически.
+
+Не вводите второй watcher или независимый кэш для тех же данных, пока не
+определено, кто владеет записью и когда изменение должно стать видимым.
+Некорректное/пустое обновление cookies не должно затирать последние рабочие
+cookies; атомарная замена файла снижает риск чтения частично записанного JSON.
 
 ## 5. Cookies, профили и browser jobs
 
@@ -208,3 +275,24 @@ endpoint метрик. Точный набор переменных — source o
 - `mihomo_config.yaml` — производный, генерируемый файл, не коммитится.
 
 Секреты и runtime state намеренно отделены от кода и документации.
+
+## 9. Как выбрать точку изменения
+
+Используйте этот маршрут, чтобы не чинить симптом на неверном уровне:
+
+| Требуется изменить… | Начать с… | Соседние контракты |
+|---|---|---|
+| Классификацию Reddit-ответа / pagination | `scraper/http_client.py` | `PollResult` и его потребители в `worker.py`; scheduler outcome и тесты HTTP/worker |
+| Что считается старым/валидным комментарием | `scraper/worker.py`, `scraper/pipeline.py` | Payload shape в `docs/tz/` (как исторический контекст) и contract tests `test_pipeline_payload.py` |
+| Темп, распределение слотов, паузы | `scraper/scheduler.py`, `scraper/fleet_polling.py` | `Sender.demand()`, `PollScheduler.release()`, `tests/test_fleet_polling.py` |
+| Retry/дедуп/подтверждение доставки | `scraper/sender.py`, `scraper/state.py`, `scraper/pipeline.py` | `try_claim → confirm/release`; `tests/test_delivery_path.py`, `test_sender_edges.py` |
+| Реакцию на новые cookies или node/profile update | `scraper/config.py`, `scraper/identity.py`, `scraper/worker.py` | Пути и владельцы файлов из раздела 5; тесты worker и identity |
+| Форму метрик или поведение панели | `scraper/metrics.py` | `docs/metrics-schema.md`, `scripts/dashboard.py`, `tests/test_metrics.py`, `tests/test_dashboard.py` |
+| Login/guest refresh или browser flow | Конкретный скрипт `scripts/` | Его YAML-настройки, общий browser lock, `DEPLOY.md`; тест соответствующего сценария |
+| Node pool или ротацию | `scripts/filter_nodes.py`, `scripts/rotation_daemon.py` | `ROTATION_SETUP.md`, `state/requests/` и `state/slots/` протокол |
+
+Перед правкой межпроцессного протокола найдите обе стороны: writer и reader.
+Перед изменением JSON/API контракта найдите producer, все consumers, schema
+documentation и contract tests. `CLAUDE.md` содержит быстрый индекс модулей и
+тестов; этот документ описывает взаимодействия, а `DEPLOY.md` и
+`ROTATION_SETUP.md` остаются операционными инструкциями.
