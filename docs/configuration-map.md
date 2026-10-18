@@ -34,7 +34,7 @@ effect on their next read.
 | Keys | Primary consumer | Notes |
 |---|---|---|
 | `stream_subs`, `reddit_base_url`, `fetch_limit` | `scraper/worker.py`, `scraper/http_client.py` | Source listing and first-page size; fetch limit is capped at Reddit's client limit. |
-| `stream_subs_per_request` | `scraper/worker.py`, `scraper/sub_rotation.py` | `0` = all `stream_subs` in each request; `N` = per-account rotating window of N subs per poll. |
+| `stream_subs_per_request`, `stream_subs_all_chance` | `scraper/worker.py`, `scraper/sub_rotation.py` | `0` = all `stream_subs` in each request; `N` = per-account rotating window of N subs per poll; `all` is added on top with probability `stream_subs_all_chance`. |
 | `stream_start_interval_seconds`, `stream_min_interval_seconds`, `stream_max_interval_seconds`, `stream_jitter_ratio`, `overlap_target_low`, `overlap_target_high`, `full_page_threshold` | `scraper/scheduler.py` | Adaptive fleet polling rate based on overlap; the initial interval is set when the scheduler is constructed. |
 | `pagination_max_pages`, `pagination_delay_min_seconds`, `pagination_delay_max_seconds`, `max_age_seconds` | `scraper/worker.py`, `scraper/http_client.py`, `scraper/sender.py` | Pagination bounds and freshness/drop behavior. |
 | `request_timeout_seconds`, `connect_timeout_seconds` | `scraper/worker.py`, `scraper/http_client.py` | Request-level timeouts; blocking `curl_cffi` work runs in the managed executor. |
@@ -143,6 +143,7 @@ remain in the sections above and in the consuming code.
 ```text
 stream_subs
 stream_subs_per_request
+stream_subs_all_chance
 reddit_base_url
 fetch_limit
 stream_start_interval_seconds

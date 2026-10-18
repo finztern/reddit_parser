@@ -208,7 +208,7 @@ async def account_worker(
                     fetch_limit = min(100, config.get("fetch_limit", 100))
                     subs_joined = "+".join(pick_subs(
                         config.get("stream_subs", ["all"]), config.get("stream_subs_per_request", 0),
-                        name, sub_poll_no))
+                        name, sub_poll_no, config.get("stream_subs_all_chance", 1.0)))
                     sub_poll_no += 1
 
                     # Профиль (impersonate) — раньше cookies: демон пишет
