@@ -15,6 +15,7 @@ from .pipeline import build_payload
 from .scheduler import PollOutcome, PollScheduler
 from .sender import Sender
 from .state import BackoffState, SeenCache
+from .sub_rotation import pick_subs
 
 # Как часто проверять появление/починку cookies-файла, пока его нет
 # (гостевой слот ещё не харвестился) или он не читается.
@@ -134,6 +135,7 @@ async def account_worker(
     )
     auth_dead = False  # cookies отвергнуты — ждём обновления файла
     empty_streak = 0   # подряд пустых листингов (200, children=[]) на 1-й странице
+    sub_poll_no = 0    # номер опроса аккаунта — сдвигает окно сабов (stream_subs_per_request)
     next_request_at = 0.0  # не просить ротацию раньше (wall clock)
 
     slot = scheduler.register(name)
@@ -204,7 +206,10 @@ async def account_worker(
                     connect_timeout = config.get("connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS)
                     base_url = config.get("reddit_base_url", "https://www.reddit.com")
                     fetch_limit = min(100, config.get("fetch_limit", 100))
-                    subs_joined = "+".join(config.get("stream_subs", ["all"]))
+                    subs_joined = "+".join(pick_subs(
+                        config.get("stream_subs", ["all"]), config.get("stream_subs_per_request", 0),
+                        name, sub_poll_no))
+                    sub_poll_no += 1
 
                     # Профиль (impersonate) — раньше cookies: демон пишет
                     # state/slots/* ДО замены cookies-файла.
