@@ -8,11 +8,30 @@
 
 # ---- Что опрашиваем ----
 # Список сабов без "r/", склеивается через "+". Только "all" — основной режим.
-stream_subs: ["all"]
+stream_subs: [
+  "all", "AskReddit", "funny", "pics", "gaming", "worldnews", "news", "politics",
+  "todayilearned", "mildlyinteresting", "interestingasfuck", "Damnthatsinteresting",
+  "nextfuckinglevel", "memes", "dankmemes", "Showerthoughts", "movies", "television", "Music",
+  "videos", "aww", "science", "technology", "space", "sports", "food", "AmItheAsshole",
+  "AITAH", "relationship_advice", "TrueOffMyChest", "tifu", "unpopularopinion",
+  "CasualConversation", "confession", "offmychest", "NoStupidQuestions", "explainlikeimfive",
+  "AskMen", "AskWomen", "AskOldPeople", "self", "Advice", "dating_advice", "relationships",
+  "Vent", "leagueoflegends", "valorant", "Minecraft", "GlobalOffensive", "Fortnite",
+  "pcmasterrace", "PS5", "xboxone", "NintendoSwitch", "Genshin_Impact", "Overwatch", "wow",
+  "DotA2", "gtaonline", "nba", "soccer", "nfl", "formula1", "baseball", "hockey", "MMA", "CFB",
+  "sportsbook", "Android", "iphone", "apple", "buildapc", "pcgaming", "cars",
+  "personalfinance", "wallstreetbets", "stocks", "Bitcoin", "cryptocurrency", "investing",
+  "antiwork", "anime", "Animemes", "marvelstudios", "FauxMoi", "popculturechat", "lgbt",
+  "teenagers", "4chan", "OutOfTheLoop", "whatisthisthing", "JusticeServed",
+  "CrazyFuckingVideos", "PublicFreakout", "facepalm", "mildlyinfuriating", "Unexpected",
+  "BestofRedditorUpdates", "pettyrevenge", "MaliciousCompliance", "entitledparents", "fitness",
+  "loseit", "Eyebleach", "dating", "HistoryMemes", "europe", "canada", "unitedkingdom",
+  "india", "Philippines", "australia"
+]
 # Сколько сабов из stream_subs брать в ОДИН запрос. 0 — весь список (как раньше).
 # N > 0: у каждого аккаунта свой порядок сабов, на каждом опросе берётся окно из N штук
 # и сдвигается на следующем — запросы аккаунтов почти не пересекаются (меньше дублей).
-stream_subs_per_request: 0
+stream_subs_per_request: 3
 # Если в stream_subs есть "all": он не участвует в ротации, а добавляется в склейку (сверх N сабов)
 # с этой вероятностью на каждом опросе: 1.0 — всегда, 0.85 — почти всегда, но не постоянно.
 stream_subs_all_chance: 0.85
