@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/check_nodes.py — жива ли цепочка mihomo -> VLESS-нода -> Reddit.
+scripts/check_nodes.py — жива ли цепочка mihomo -> прокси -> Reddit.
 
     python3 scripts/check_nodes.py                    # все порты из mihomo_config.yaml
     python3 scripts/check_nodes.py --account account_5 --account account_10
@@ -9,7 +9,7 @@ scripts/check_nodes.py — жива ли цепочка mihomo -> VLESS-нода
 Слои (каждый локализует свою причину):
   0. напрямую с хоста (без прокси): интернет и Reddit с IP самого сервера
   1. локальные порты mihomo открыты?
-  2. VLESS-сервер достижим (TCP + TLS-рукопожатие с SNI)?
+  2. прокси-сервер достижим (TCP-соединение)?
   3. через каждый порт: нейтральный сайт (Cloudflare trace) -> нода жива, выходной IP
   4. через каждый порт: Reddit (главная и comments.json без cookies)
   5. встроенный delay-тест mihomo (external-controller :9090), если доступен
@@ -63,23 +63,13 @@ def trace_ip(text: str) -> str:
     return "?"
 
 
-def tcp_tls(server, port, sni, timeout=8):
+def tcp_connect(server, port, timeout=8):
     t0 = time.time()
     try:
-        s = socket.create_connection((server, port), timeout=timeout)
+        socket.create_connection((server, port), timeout=timeout).close()
+        return True, "TCP ok", time.time() - t0
     except Exception as e:
         return False, f"TCP: {e}", time.time() - t0
-    try:
-        ctx = ssl.create_default_context()
-        ctx.check_hostname = False
-        ctx.verify_mode = ssl.CERT_NONE
-        with ctx.wrap_socket(s, server_hostname=sni, do_handshake_on_connect=True):
-            pass
-        return True, "TCP+TLS ok", time.time() - t0
-    except Exception as e:
-        return False, f"TLS: {e}", time.time() - t0
-    finally:
-        s.close()
 
 
 def port_open(port, timeout=2):
@@ -156,18 +146,18 @@ def main() -> int:
     # ---- 2. upstream
     print()
     print("=" * 72)
-    print("2. VLESS-СЕРВЕР (TCP + TLS с SNI)")
+    print("2. ПРОКСИ-СЕРВЕР (TCP)")
     print("=" * 72)
     ups = {}
     for node in {n for _, _, n in rows}:
         p = proxies.get(node)
         if p:
-            ups[(p["server"], p["port"], p.get("servername", ""))] = None
+            ups[(p["server"], p["port"])] = None
     up_ok = {}
     for key in ups:
-        okk, msg, dt = tcp_tls(*key)
+        okk, msg, dt = tcp_connect(*key)
         up_ok[key] = okk
-        print(f"  {key[0]}:{key[1]} sni={key[2][:28]}…  {msg} ({dt:.1f}s)")
+        print(f"  {key[0]}:{key[1]}  {msg} ({dt:.1f}s)")
 
     # ---- 3-4. через каждый порт
     def probe(row):
@@ -225,21 +215,20 @@ def main() -> int:
     if not host_net:
         print("  У самого хоста нет интернета — проблема не в нодах.")
     elif up_ok and not any(up_ok.values()):
-        print("  VLESS-сервер недостижим с хоста (TCP/TLS) — упал, заблокирован или подписка Trust.Zone "
-              "истекла. Все ноды у вас на одном сервере, поэтому ломаются все разом.")
-        print("  Проверь подписку по ссылке из vless_accounts.env и доступность сервера с другой сети.")
+        print("  Прокси-серверы недостижимы с хоста (TCP) — упали, заблокированы или истёк оплаченный период.")
+        print("  Проверь прокси из proxy_accounts.env у провайдера и доступность с другой сети.")
     elif not net_ok:
         print("  Порты открыты и сервер отвечает, но через ни один порт не ходит даже нейтральный сайт — "
-              "ломается сама цепочка mihomo (path/host/uuid в конфиге, истёкший доступ).")
-        print("  docker compose logs --tail 100 mihomo — ищи ошибки vless/ws/httpupgrade.")
+              "ломается сама цепочка mihomo (логин/пароль прокси, истёкший доступ, IP хоста не в белом списке у провайдера).")
+        print("  docker compose logs --tail 100 mihomo — ищи ошибки авторизации прокси (407).")
     elif len(net_ok) < len(live):
         bad = [r[0][0] for r in live if r[1][0] != 200]
-        print(f"  Мёртвые ноды (нейтральный сайт не открывается): {', '.join(bad)} — замени в vless_accounts.env.")
+        print(f"  Мёртвые ноды (нейтральный сайт не открывается): {', '.join(bad)} — замени в proxy_accounts.env.")
     if net_ok and not rd_ok:
         print("  Ноды живы (нейтральный сайт открывается), но Reddit не отвечает НИ через одну — "
               "соединение молча отбрасывается (таймаут), а не 403. Так выглядит сетевая блокировка "
               "IP-диапазона Reddit'ом/провайдером.")
-        print("  Если напрямую с хоста Reddit открывается, а через ноды нет — диапазон нод Trust.Zone забанен.")
+        print("  Если напрямую с хоста Reddit открывается, а через ноды нет — диапазон IP этих прокси забанен.")
     elif rd_ok:
         print(f"  Reddit достижим через {len(rd_ok)}/{len(live)} живых нод. "
               f"comments.json без cookies: {json_codes}")

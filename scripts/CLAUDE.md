@@ -16,7 +16,7 @@ For shared state, update all writers and readers and preserve atomic writes.
 Keep login and guest refresh membership separate; both may target the same
 cookie file. Preserve browser locks, cleanup, backup, and account-file update
 semantics. Never log or document cookies, storage-state contents, credentials,
-VLESS URIs, or sensitive headers.
+proxy URIs/credentials, or sensitive headers.
 
 Use the focused tests listed in `AGENTS.md`. CI coverage currently excludes
 `scripts/`; validate script changes with targeted tests and the docs checks.

@@ -14,7 +14,7 @@ relevant to the task.
   write/apply mode. Do not run production mutations during development.
 - Check exact target paths, current flags, and backups before changing account
   membership, cookies, profiles, node assignments, or systemd state.
-- Never log or document cookies, Playwright storage state, passwords, VLESS
+- Never log or document cookies, Playwright storage state, passwords, proxy
   URIs, noVNC credentials, or sensitive response headers.
 - Do not start real browsers, mihomo changes, login sessions, or remote network
   probes as part of ordinary unit-test validation.

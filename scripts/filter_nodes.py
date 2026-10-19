@@ -2,11 +2,11 @@
 """
 scripts/filter_nodes.py — какие ноды пула Reddit ещё пускает (главная страница = HTTP 200).
 
-    venv/bin/python3 scripts/filter_nodes.py                 # отчёт по всему all_nodes.txt
-    venv/bin/python3 scripts/filter_nodes.py --write         # + all_nodes.reddit_ok.txt (только годные)
+    venv/bin/python3 scripts/filter_nodes.py                 # отчёт по всему all_proxys.txt
+    venv/bin/python3 scripts/filter_nodes.py --write         # + all_proxys.reddit_ok.txt (только годные)
 
 Раз в сутки запускается таймером filter-nodes.timer (fleet.node_check_interval_hours): годные ноды
-обновляют all_nodes.reddit_ok.txt — из него берут ноды add_login_slots.py и демон ротации (замена
+обновляют all_proxys.reddit_ok.txt — из него берут ноды add_login_slots.py и демон ротации (замена
 сгоревшей ноды логин-слота), — а отчёт пишется в state/node_report.json (виден в
 `rotation_daemon.py --status`). Пустой результат (mihomo лёг / Reddit не пускает никого) файл годных
 нод НЕ затирает.
@@ -59,13 +59,54 @@ def write_report(path: Path, report: dict) -> None:
     os.replace(tmp, path)
 
 
+def proxy_url_of(uri: str) -> str:
+    return uri.split("#", 1)[0]
+
+
+def resolve_countries(ok: list, workers: int, lookup=None) -> int:
+    """Страна по реальному выходному IP (ipinfo/ip-api ЧЕРЕЗ сам прокси) для годных
+    прокси без кода страны в имени -> state/proxy_geo.json {имя: "US"}. -> сколько определено.
+    Гео слота (locale/timezone) должно совпадать со страной выходного IP."""
+    from concurrent.futures import ThreadPoolExecutor
+    if lookup is None:
+        sys.path.insert(0, str(ags.ROOT))
+        from scraper import geoip
+        lookup = geoip.lookup_exit_ip
+    todo = [f for f in ok if f.country == "??"]
+    path = ags.ROOT / "state" / "proxy_geo.json"
+    cache = ags.read_json(path)
+    todo = [f for f in todo if not str(cache.get(f.mihomo_name, "")).strip()]
+
+    def one(f):
+        try:
+            return f, lookup(proxy_url_of(f.node.uri), timeout=10.0)["country"]
+        except Exception:
+            return f, None
+
+    n = 0
+    with ThreadPoolExecutor(max(1, workers)) as ex:
+        for f, cc in ex.map(one, todo):
+            if cc and len(str(cc)) == 2:
+                cache[f.mihomo_name] = str(cc).upper()
+                n += 1
+    if n:
+        write_report(path, cache)
+    for f in ok:
+        f.country = rot.country_for(f.mihomo_name)
+    print(f"Страна определена по выходному IP: {n} из {len(todo)} прокси")
+    return n
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--nodes-file", default=None)
-    ap.add_argument("--write", action="store_true", help="записать годные ноды в all_nodes.reddit_ok.txt")
+    ap.add_argument("--write", action="store_true", help="записать годные ноды в all_proxys.reddit_ok.txt")
     ap.add_argument("--url", default=ags.REDDIT_PROBE_URL)
     ap.add_argument("--timeout-ms", type=int, default=8000)
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--no-geo", action="store_true",
+                    help="не определять страну прокси по выходному IP (гео слотов тогда en-US, если в имени нет кода страны)")
+    ap.add_argument("--geo-workers", type=int, default=8)
     args = ap.parse_args()
 
     ropts = ags.load_rotation_cfg()
@@ -86,6 +127,11 @@ def main():
     print(f"\nReddit пускает: {len(ok)}   не пускает/не отвечает: {len(bad)}   нет в mihomo: {len(absent)}")
     if absent and not ok:
         sys.exit("Пул не загружен в mihomo: generate_mihomo_config.py && docker compose restart mihomo")
+    ok.sort(key=lambda f: f.delay if f.delay is not None else float("inf"))   # быстрые первыми
+    if ok:
+        print(f"Самые быстрые: {', '.join(f'{f.mihomo_name} {f.delay}мс' for f in ok[:5])}")
+    if not args.no_geo and ok:
+        resolve_countries(ok, args.geo_workers)
     by = collections.Counter(f.country for f in ok)
     tot = collections.Counter(f.country for f in nodes)
     for cc, n in sorted(tot.items(), key=lambda kv: -kv[1]):
@@ -101,11 +147,11 @@ def main():
           f"{report['slots_target']} (запас {report['reserve_nodes']})")
     if report["warn"]:
         print(f"ВНИМАНИЕ: годных нод {report['good']} < fleet.min_good_nodes_warn={report['min_good_nodes_warn']} — "
-              "пополни all_nodes.txt")
+              "пополни all_proxys.txt")
 
     if args.write:
         if not ok:
-            sys.exit("Ни одной годной ноды — all_nodes.reddit_ok.txt НЕ перезаписываю (проверь mihomo/Reddit).")
+            sys.exit("Ни одной годной ноды — all_proxys.reddit_ok.txt НЕ перезаписываю (проверь mihomo/Reddit).")
         out = nf.with_name(nf.stem + ".reddit_ok.txt")
         out.write_text("\n".join(f.node.uri for f in ok) + "\n", encoding="utf-8")
         print(f"\nЗаписано {len(ok)} нод -> {out}")

@@ -60,7 +60,7 @@ fleet:
   node_replace_only: true
   # гостевой харвест и ротация: код остаётся, но выключен
   guest_enabled: false
-  # кандидатов на замену брать только из all_nodes.reddit_ok.txt (результат filter_nodes.py --write)
+  # кандидатов на замену брать только из all_proxys.reddit_ok.txt (результат filter_nodes.py --write)
   use_reddit_ok_file: true
 """
 
@@ -84,7 +84,7 @@ def slot_geo(name: str, p: lf.Paths, guest_cfg: dict, login_cfg: dict, links: di
     link = links.get(name)
     if link:
         try:
-            return rot.geo_for(gmc.parse_vless(link, name)["name"]), "имя ноды"
+            return rot.geo_for(gmc.parse_proxy(link, name)["name"]), "имя ноды"
         except ValueError:
             pass
     dflt = login_cfg.get("geo_defaults") or {"locale": "en-US", "timezone_id": "America/New_York"}
@@ -126,13 +126,13 @@ def convert(p: lf.Paths, slots: list[str] | None, all_guests: bool, apply: bool,
         link = links.get(s)
         if link:
             try:
-                labels[s] = gmc.parse_vless(link, s)["name"]
+                labels[s] = gmc.parse_proxy(link, s)["name"]
             except ValueError:
                 pass
 
     out(f"{'слот':<11} {'порт':<5} {'гео':<7} {'откуда гео':<19} нода")
     for s in todo:
-        out(f"{s:<11} {by_name[s].get('proxy_port')!s:<5} {geo[s]['locale']:<7} {src[s]:<19} {labels.get(s, '— (нет в vless_accounts.env)')}")
+        out(f"{s:<11} {by_name[s].get('proxy_port')!s:<5} {geo[s]['locale']:<7} {src[s]:<19} {labels.get(s, '— (нет в proxy_accounts.env)')}")
     out(f"\nБудет переведено слотов: {len(todo)} (enabled: false до первого входа)")
 
     # --- новые тексты ---

@@ -7,9 +7,9 @@ backups/
 __pycache__/
 *.pyc
 mihomo_config.yaml
-vless_accounts.env
-all_nodes.txt
-all_nodes.reddit_ok.txt
+proxy_accounts.env
+all_proxys.txt
+all_proxys.reddit_ok.txt
 venv/
 .venv*/
 *.bak-*

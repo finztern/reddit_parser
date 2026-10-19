@@ -80,24 +80,24 @@ chmod 700 cookies storage_state state
 
 Положите локально, не в Git:
 
-- `vless_accounts.env` — назначение VLESS-ссылок по слотам;
-- `all_nodes.txt` — пул доступных кандидатов, по одной VLESS-ссылке на строку;
+- `proxy_accounts.env` — назначение прокси по слотам;
+- `all_proxys.txt` — пул доступных кандидатов, по одному прокси на строку (`user:pass@host:port`);
 - cookies, Playwright state и остальные runtime-данные.
 
 Проверьте, что файлы игнорируются Git:
 
 ```bash
-git check-ignore -v vless_accounts.env all_nodes.txt cookies state storage_state
+git check-ignore -v proxy_accounts.env all_proxys.txt cookies state storage_state
 git status --short
 ```
 
-Не вставляйте реальные VLESS URI, cookies, storage state и VNC-пароли в issue,
+Не вставляйте реальные прокси (логин:пароль@хост), cookies, storage state и VNC-пароли в issue,
 коммиты, документацию или вывод CI. Секрет mihomo controller, если он нужен,
 задаётся отдельно в локальной конфигурации.
 
 ## 4. Сгенерировать конфигурацию mihomo и проверить ноды
 
-Генератор читает `vless_accounts.env` и `all_nodes.txt`, записывает
+Генератор читает `proxy_accounts.env` и `all_proxys.txt`, записывает
 `mihomo_config.yaml` (он игнорируется Git). Не изменяйте его вручную:
 
 ```bash
@@ -324,7 +324,7 @@ Dashboard читает metrics endpoint (по умолчанию локальн�
 | Нода отсутствует в controller | Обновить `mihomo_config.yaml` генератором, затем перезапустить mihomo |
 | Все ноды не проходят probe | mihomo API/Meta version, endpoint проверки, connectivity к Reddit; не перезаписывать accepted-pool пустым результатом |
 | `auth_failed` | Проверить login статус, актуальность cookies/storage state; выполнить ручной login при необходимости |
-| `blocked_node`/`needs_node` | Проверить пул, `all_nodes.reddit_ok.txt`, запас и `rotation_daemon --status` |
+| `blocked_node`/`needs_node` | Проверить пул, `all_proxys.reddit_ok.txt`, запас и `rotation_daemon --status` |
 | Нет отправки | Проверить collector batch endpoint, `/queue`, `STORE_ENDPOINT`, compose networking |
 | Dashboard «нет связи» | Проверить scraper, `metrics.enabled`, bind address и локальный port mapping |
 | Backup timer не срабатывает | `systemctl status`, `journalctl -u backup-sessions.service`, права на backup root |
@@ -340,7 +340,7 @@ Dashboard читает metrics endpoint (по умолчанию локальн�
 5. Запустить небольшой ограниченный набор, наблюдать логи, очередь, ответы и
    память; расширять только после проверки метрик.
 
-CI не проверяет реальные Reddit/VLESS/collector ответы и не является
+CI не проверяет реальные Reddit/прокси/collector ответы и не является
 production smoke test. Для отката конфигурационных миграций используйте
 сгенерированные `*.bak-*` файлы или отдельный проверенный Git commit.
 Откат systemd units требует восстановить предыдущие templates/units и выполнить

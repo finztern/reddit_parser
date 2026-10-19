@@ -12,7 +12,7 @@ scripts/rotation.py — автоматическая смена ноды (IP) и
 
 Как устроена смена ноды: в mihomo_config.yaml каждая группа pg-account_N
 (type: select) содержит назначенную ноду ПЕРВОЙ и дальше ВСЕ остальные
-ноды (пул из all_nodes.txt и ноды других аккаунтов). Переключение —
+ноды (пул из all_proxys.txt и ноды других аккаунтов). Переключение —
 PUT /proxies/pg-account_N у external-controller mihomo, без рестарта.
 Порт аккаунта (proxy_port) не меняется.
 
@@ -21,7 +21,7 @@ rotation_daemon.py (реестр идентичностей: эксклюзив�
 логин-аккаунтов не отдаются).
 
 Класс Rotator ниже — прежний механизм ротации (сохранение в
-accounts.yaml/vless_accounts.env), оставлен для обратной совместимости.
+accounts.yaml/proxy_accounts.env), оставлен для обратной совместимости.
 Для гостевых слотов используй rotation_daemon.py.
 """
 
@@ -59,13 +59,13 @@ log = logging.getLogger("scraper")
 PROXY_HOST = os.environ.get("PROXY_HOST", "127.0.0.1")
 ACCOUNTS_PATH = ROOT / "accounts.yaml"
 GUEST_PATH = SCRIPTS / "refresh_guest_cookies.yaml"
-ENV_PATH = gmc.VLESS_ENV_PATH
+ENV_PATH = gmc.PROXY_ENV_PATH
 STATE_DIR = ROOT / "state"
 STATE_FILE = STATE_DIR / "rotation_state.json"
 
 DEFAULT_OPTS = {
     "enabled": True,
-    "nodes_file": "all_nodes.txt",
+    "nodes_file": "all_proxys.txt",
     "mihomo_api": "http://127.0.0.1:9090",
     "mihomo_secret": "",
     "rotate_node": True,
@@ -128,40 +128,61 @@ def node_key(uri: str) -> str:
     return uri.split("#", 1)[0].strip()
 
 
-def geo_for(node_name: str) -> dict:
+GEO_CACHE_PATH = STATE_DIR / "proxy_geo.json"   # {имя прокси: "US"} — страна по реальному выходному IP
+_geo_cache: dict = {"mtime": None, "data": {}}
+
+
+def load_geo_cache() -> dict[str, str]:
+    try:
+        mt = GEO_CACHE_PATH.stat().st_mtime
+    except OSError:
+        return {}
+    if _geo_cache["mtime"] != mt:
+        try:
+            data = json.loads(GEO_CACHE_PATH.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            data = {}
+        _geo_cache.update(mtime=mt, data=data if isinstance(data, dict) else {})
+    return _geo_cache["data"]
+
+
+def country_for(node_name: str) -> str:
+    """Код страны прокси (нижний регистр) или '??': из имени ('us74' -> us),
+    иначе из state/proxy_geo.json (его пишет filter_nodes.py по реальному выходному IP)."""
     m = re.match(r"([a-z]{2})\d", node_name.strip().lower())
-    loc, tz = COUNTRY_GEO.get(m.group(1) if m else "", ("en-US", "America/New_York"))
+    if m:
+        return m.group(1)
+    cc = str(load_geo_cache().get(node_name, "")).strip().lower()
+    return cc if len(cc) == 2 and cc.isalpha() else "??"
+
+
+def geo_for(node_name: str) -> dict:
+    loc, tz = COUNTRY_GEO.get(country_for(node_name), ("en-US", "America/New_York"))
     return {"locale": loc, "timezone_id": tz}
 
 
 def load_pool(path: Path) -> list[Node]:
-    """Любой текст, содержащий vless://-ссылки (по одной в строке, можно с
-    префиксом 'name = '), либо base64-подписка целиком."""
+    """all_proxys.txt: по одному прокси в строке (user:pass@host:port, scheme://...,
+    host:port:user:pass; необязательный хвост #имя). Дубликаты и мусор пропускаются.
+    Порядок сохраняется (в *.reddit_ok.txt первыми идут самые быстрые)."""
     if not path.exists():
         return []
-    text = path.read_text(encoding="utf-8", errors="ignore")
-    uris = re.findall(r"vless://[^\s\"']+", text)
-    if not uris:
-        try:
-            raw = text.strip()
-            dec = base64.b64decode(raw + "=" * (-len(raw) % 4)).decode("utf-8", "ignore")
-            uris = re.findall(r"vless://[^\s\"']+", dec)
-        except Exception:
-            uris = []
     out, seen = [], set()
-    for u in uris:
+    for raw in path.read_text(encoding="utf-8", errors="ignore").splitlines():
+        u = gmc.normalize_proxy(raw)
+        if not u:
+            continue
         k = node_key(u)
         if k in seen:
             continue
         seen.add(k)
-        name = urllib.parse.unquote(urllib.parse.urlsplit(u).fragment).strip() or k[-24:]
-        out.append(Node(k, name, u))
+        out.append(Node(k, gmc.proxy_name(u), u))
     return out
 
 
 def pool_names(pool: list[Node], reserved: set[str], assigned_keys: set[str]) -> dict[str, str]:
     """key -> уникальное имя прокси в mihomo. Ноды, уже назначенные
-    аккаунтам, пропускаются (у них своё имя из vless_accounts.env)."""
+    аккаунтам, пропускаются (у них своё имя из proxy_accounts.env)."""
     used, out = set(reserved), {}
     for n in pool:
         if n.key in assigned_keys:
@@ -183,7 +204,7 @@ def extend_with_pool(config: dict, nodes_file: Path | None = None) -> int:
     pool = load_pool(nodes_file or (ROOT / DEFAULT_OPTS["nodes_file"]))
     added = []
     if pool:
-        links = gmc.load_vless_links()
+        links = gmc.load_proxy_links()
         assigned_keys = {node_key(l) for l in links.values()}
         names = pool_names(pool, {p["name"] for p in config["proxies"]}, assigned_keys)
         for n in pool:
@@ -191,7 +212,7 @@ def extend_with_pool(config: dict, nodes_file: Path | None = None) -> int:
             if not name:
                 continue
             try:
-                proxy = gmc.parse_vless(n.uri, fallback_name=name)
+                proxy = gmc.parse_proxy(n.uri, fallback_name=name)
             except ValueError as e:
                 print(f"ПРЕДУПРЕЖДЕНИЕ: нода пула пропущена ({e})", file=sys.stderr)
                 continue
@@ -413,14 +434,14 @@ class Rotator:
         self.pool = load_pool(nf if nf.is_absolute() else ROOT / nf)
         if not self.pool:
             log.warning("[rotation] пул нод пуст (%s) — смена IP невозможна, только отпечатки", nf)
-        self.assigned = gmc.load_vless_links()
+        self.assigned = gmc.load_proxy_links()
         self.accounts = (yaml.safe_load(ACCOUNTS_PATH.read_text(encoding="utf-8")) or {}).get("accounts", [])
         self.mihomo = Mihomo(self.o["mihomo_api"], self.o.get("mihomo_secret", ""))
 
         reserved = set()
         for acc, link in self.assigned.items():
             try:
-                reserved.add(gmc.parse_vless(link, acc)["name"])
+                reserved.add(gmc.parse_proxy(link, acc)["name"])
             except ValueError:
                 reserved.add(acc)
         self.names = pool_names(self.pool, reserved, {node_key(l) for l in self.assigned.values()})
@@ -458,7 +479,7 @@ class Rotator:
         orig = None
         if link:
             try:
-                pname = gmc.parse_vless(link, name)["name"]
+                pname = gmc.parse_proxy(link, name)["name"]
             except ValueError:
                 pname = name
             orig = Node(node_key(link), pname, link)
@@ -612,7 +633,7 @@ class Rotator:
 if __name__ == "__main__":
     st = load_state()
     pool = load_pool(ROOT / DEFAULT_OPTS["nodes_file"])
-    links = gmc.load_vless_links()
+    links = gmc.load_proxy_links()
     assigned = {node_key(l) for l in links.values()}
     print(f"пул: {len(pool)} нод в {DEFAULT_OPTS['nodes_file']}, назначено аккаунтам: {len(links)}, "
           f"свободных: {len([n for n in pool if n.key not in assigned])}")

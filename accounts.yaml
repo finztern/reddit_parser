@@ -22,7 +22,7 @@ accounts:
   #  профиль лежит в state/slots/account_N.json и перекрывает этот файл.
   #
   #  enabled: гостевой слот можно включать, когда (1) для него есть строка
-  #  account_N = vless://... в vless_accounts.env (и перегенерирован
+  #  account_N = http://user:pass@host:port в proxy_accounts.env (и перегенерирован
   #  mihomo_config.yaml) и (2) refresh_guest_cookies.py хотя бы раз
   #  отработал для него. Если cookies-файла ещё нет, воркер просто ждёт
   #  его появления (раз в минуту), а не падает.
@@ -115,7 +115,7 @@ accounts:
 
   # --- Гостевые слоты (11..25; дальше 26..55 — ниже) ---
   # Каждый слот — свой уникальный профиль (impersonate + UA). Нода слота —
-  # в vless_accounts.env, гео браузера — refresh_guest_cookies.yaml:account_geo.
+  # в proxy_accounts.env, гео браузера — refresh_guest_cookies.yaml:account_geo.
 
   - name: account_11
     enabled: true
@@ -240,7 +240,7 @@ accounts:
 
   # --- Гостевые слоты (26..55) ---
   # Порт/отпечаток зафиксированы здесь, а НОДУ и гео слота (locale) ставит
-  # scripts/add_guest_slots.py под реальную страну ноды из all_nodes.txt
+  # scripts/add_guest_slots.py под реальную страну ноды из all_proxys.txt
   # (locale ниже — заглушка en-US). enabled: true безопасен и без ноды: пока
   # нет cookies-файла, воркер молча ждёт его появления.
 

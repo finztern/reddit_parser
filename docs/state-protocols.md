@@ -162,7 +162,7 @@ session's behavior must preserve the read-only guarantee and update
 3. Treat missing, malformed, and stale state explicitly; do not turn a failed
    read into a success-shaped “completed” result.
 4. Update focused protocol tests and the relevant runbook/documentation.
-5. Never add cookies, passwords, VLESS URIs, noVNC passwords, or session
+5. Never add cookies, passwords, proxy URIs/credentials, noVNC passwords, or session
    contents to examples or test logs.
 
 Useful tests: `tests/test_identity_state.py`,

@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
 scripts/add_guest_slots.py — добавляет гостевые слоты и сразу связывает их
-со СВОБОДНЫМИ РАБОЧИМИ нодами из пула (all_nodes.txt).
+со СВОБОДНЫМИ РАБОЧИМИ нодами из пула (all_proxys.txt).
 
 Зачем скрипт, а не ручная правка: слот = порт + нода + отпечаток + гео, и
 гео обязано соответствовать стране ноды (локаль/таймзона браузера при
 харвесте, Accept-Language скрапера). Какие ноды свободны и живы, известно
-только на сервере (all_nodes.txt, state/, mihomo), поэтому подбор делается
+только на сервере (all_proxys.txt, state/, mihomo), поэтому подбор делается
 там.
 
 Что делает (по умолчанию — ТОЛЬКО печатает план; запись — с --apply):
 
   1. Находит свободные ноды пула: не назначены ни одному аккаунту в
-     vless_accounts.env, не числятся в реестре идентичностей демона ротации
+     proxy_accounts.env, не числятся в реестре идентичностей демона ротации
      (state/identities.json) и не помечены плохими.
   2. Проверяет их живость через API mihomo (delay, как scripts/check_nodes.py);
      --no-probe — не проверять.
@@ -21,18 +21,18 @@ scripts/add_guest_slots.py — добавляет гостевые слоты и
      --spare N (по умолчанию 8) нод остаются нетронутыми про запас для
      ротации — иначе демону будет некуда менять забаненные идентичности.
   4. Сначала закрывает ГОСТЕВЫЕ слоты, у которых нет ноды в
-     vless_accounts.env (например account_25), потом создаёт --count новых
+     proxy_accounts.env (например account_25), потом создаёт --count новых
      слотов (account_{max+1}...) со свободными портами и уникальными
      отпечатками (impersonate берётся из установленного curl_cffi).
   5. Пишет (с бэкапами *.bak-addslots-<время>):
-       vless_accounts.env                  account_N = vless://...
+       proxy_accounts.env                  account_N = http://user:pass@host:port
        accounts.yaml                       enabled: true, порт, locale, отпечаток
        scripts/refresh_guest_cookies.yaml  guest_accounts[N] (+geo под ноду)
        config.yaml                         rotation.slots += N
   6. Включает (enabled: true) все гостевые слоты, у которых есть нода
      (--no-enable-existing — не трогать уже существующие).
   7. --disable-login-without-node: выключает (enabled: false) ЛОГИН-аккаунты,
-     у которых нет ноды в vless_accounts.env, — на чистом сервере без
+     у которых нет ноды в proxy_accounts.env, — на чистом сервере без
      логин-аккаунтов их воркеры только копили бы сетевые ошибки.
 
 Логин-аккаунты (account_1..10) не затрагиваются (кроме --disable-login-without-node).
@@ -75,7 +75,7 @@ import rotation as rot  # noqa: E402
 ACCOUNTS_PATH = ROOT / "accounts.yaml"
 GUEST_PATH = SCRIPTS / "refresh_guest_cookies.yaml"
 CONFIG_PATH = ROOT / "config.yaml"
-ENV_PATH = gmc.VLESS_ENV_PATH
+ENV_PATH = gmc.PROXY_ENV_PATH
 IDENT_PATH = ROOT / "state" / "identities.json"
 
 DEFAULT_PROBE_URL = "https://www.cloudflare.com/cdn-cgi/trace"
@@ -93,8 +93,7 @@ def acc_num(name: str) -> int:
 
 
 def country_of(node_name: str) -> str:
-    m = re.match(r"([a-z]{2})\d", node_name.strip().lower())
-    return m.group(1) if m else "??"
+    return rot.country_for(node_name)
 
 
 def read_json(path: Path) -> dict:
@@ -118,6 +117,7 @@ class Free:
     mihomo_name: str      # имя прокси в mihomo (как в сгенерированном конфиге)
     country: str
     delay: int | None = None
+    rank: int | None = None   # место в *.reddit_ok.txt (0 = самый быстрый), если задержку не мерили
 
 
 def find_free_nodes(pool_path: Path, assigned: dict[str, str], ident: dict) -> list[Free]:
@@ -126,7 +126,7 @@ def find_free_nodes(pool_path: Path, assigned: dict[str, str], ident: dict) -> l
     reserved_names = set()
     for acc, link in assigned.items():
         try:
-            reserved_names.add(gmc.parse_vless(link, acc)["name"])
+            reserved_names.add(gmc.parse_proxy(link, acc)["name"])
         except ValueError:
             reserved_names.add(acc)
     names = rot.pool_names(pool, reserved_names, assigned_keys)
@@ -184,6 +184,16 @@ def probe_nodes(free: list[Free], api: str, secret: str, url: str, timeout_ms: i
 #  Выбор нод и сборка плана
 # ---------------------------------------------------------------- #
 
+def pick_fastest(cands: list[Free], n: int, rng: random.Random | None = None) -> list[Free]:
+    """n самых быстрых: по задержке (mihomo delay-API), без замера — по месту в
+    *.reddit_ok.txt (его пишет filter_nodes.py, быстрые первыми). Прокси одной
+    страны не группируем: важна скорость, а гео слота берётся с реального IP."""
+    inf = float("inf")
+    ordered = sorted(cands, key=lambda c: (c.delay if c.delay is not None else inf,
+                                           c.rank if c.rank is not None else inf))
+    return ordered[:n]
+
+
 def pick_diverse(cands: list[Free], n: int, rng: random.Random) -> list[Free]:
     """Round-robin по странам; ноды известных стран — раньше неизвестных."""
     known = [c for c in cands if c.country in rot.COUNTRY_GEO]
@@ -229,9 +239,9 @@ def allocate_ports(used: set[int], n: int, check=port_free) -> list[int]:
 
 
 def unique_link(uri: str, taken_names: set[str]) -> tuple[str, str]:
-    """Имя прокси в mihomo берётся из #фрагмента ссылки и обязано быть
+    """Имя прокси в mihomo берётся из #фрагмента ссылки (иначе px-host-port) и обязано быть
     уникальным — при коллизии дописываем ~N. -> (uri, имя)."""
-    base = urllib.parse.unquote(urllib.parse.urlsplit(uri).fragment).strip() or uri[-12:]
+    base = gmc.proxy_name(uri)
     name, i = base, 2
     while name in taken_names:
         name = f"{base}~{i}"
@@ -395,7 +405,7 @@ def main() -> int:
     ap.add_argument("--no-enable-existing", action="store_true",
                     help="не включать уже существующие гостевые слоты, у которых есть нода")
     ap.add_argument("--disable-login-without-node", action="store_true",
-                    help="выключить логин-аккаунты, у которых нет ноды в vless_accounts.env "
+                    help="выключить логин-аккаунты, у которых нет ноды в proxy_accounts.env "
                          "(чистый сервер без логин-аккаунтов)")
     ap.add_argument("--nodes-file", default=None, help="пул нод (по умолчанию rotation.nodes_file из config.yaml)")
     ap.add_argument("--probe-url", default=DEFAULT_PROBE_URL)
@@ -421,7 +431,7 @@ def main() -> int:
     accounts = (yaml.safe_load(accounts_text) or {}).get("accounts") or []
     guest = (yaml.safe_load(guest_text) or {}).get("guest_accounts") or {}
     by_name = {a["name"]: a for a in accounts}
-    links = gmc.load_vless_links()
+    links = gmc.load_proxy_links()
     ident = read_json(IDENT_PATH)
     ropts = load_rotation_cfg()
 
@@ -435,7 +445,7 @@ def main() -> int:
             if not link or slot not in by_name:
                 continue
             try:
-                pname = gmc.parse_vless(link, slot)["name"]
+                pname = gmc.parse_proxy(link, slot)["name"]
             except ValueError:
                 continue
             cand.append((slot, Free(None, pname, country_of(pname))))
@@ -463,7 +473,7 @@ def main() -> int:
     nf = Path(args.nodes_file or ropts["nodes_file"])
     nf = nf if nf.is_absolute() else ROOT / nf
     if want_total and not nf.exists():
-        sys.exit(f"ОШИБКА: нет пула нод {nf} (all_nodes.txt) — свободные ноды взять неоткуда.")
+        sys.exit(f"ОШИБКА: нет пула нод {nf} (all_proxys.txt) — свободные ноды взять неоткуда.")
     free = find_free_nodes(nf, links, ident) if want_total else []
     if want_total:
         print(f"Пул {nf.name}: свободных (не назначены, нет в реестре ротации, не плохие): {len(free)}")
@@ -486,7 +496,7 @@ def main() -> int:
             sys.exit("ОШИБКА: пул нод не загружен в запущенный mihomo. Выполни:\n"
                      "  venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo")
         if absent:
-            print(f"  (ноды, которых нет в mihomo, пропущены: {len(absent)} — они появились в all_nodes.txt "
+            print(f"  (ноды, которых нет в mihomo, пропущены: {len(absent)} — они появились в all_proxys.txt "
                   "после последней генерации конфига)")
 
     available = max(0, len(alive) - max(0, args.spare))
@@ -497,7 +507,7 @@ def main() -> int:
     if want_total and take == 0:
         sys.exit("Свободных нод для новых слотов нет (или всё ушло в запас) — ничего не делаю.")
 
-    chosen = pick_diverse(alive, take, rng)
+    chosen = pick_fastest(alive, take, rng)
     unknown_cc = sorted({c.country for c in chosen if c.country not in rot.COUNTRY_GEO})
     if unknown_cc:
         print(f"ВНИМАНИЕ: страны нод {', '.join(unknown_cc)} нет в COUNTRY_GEO (rotation.py) — "
@@ -523,7 +533,7 @@ def main() -> int:
     taken_names = set()
     for acc, link in links.items():
         try:
-            taken_names.add(gmc.parse_vless(link, acc)["name"])
+            taken_names.add(gmc.parse_proxy(link, acc)["name"])
         except ValueError:
             taken_names.add(acc)
 
@@ -583,7 +593,7 @@ def main() -> int:
         if path.exists():
             shutil.copy2(path, path.with_name(f"{path.name}.bak-addslots-{stamp}"))
 
-    # vless_accounts.env
+    # proxy_accounts.env
     if plans:
         env_text = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
         gone = {p.slot for p in plans} & set(replaced)
@@ -642,7 +652,7 @@ def main() -> int:
         return 1
     yaml.safe_load(GUEST_PATH.read_text(encoding="utf-8"))
 
-    print(f"\nOK: записано (бэкапы *.bak-addslots-{stamp}): vless_accounts.env, accounts.yaml, "
+    print(f"\nOK: записано (бэкапы *.bak-addslots-{stamp}): proxy_accounts.env, accounts.yaml, "
           "scripts/refresh_guest_cookies.yaml, config.yaml")
     print("\nДальше (из корня проекта):")
     print("  1) venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo")
