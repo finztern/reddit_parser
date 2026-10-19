@@ -243,6 +243,11 @@ async def account_worker(
                     connect_timeout = config.get("connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS)
                     base_url = config.get("reddit_base_url", "https://www.reddit.com")
                     fetch_limit = min(100, config.get("fetch_limit", 100))
+                    pcfg = config.get("posts", {}) or {}
+                    posts_on = bool(pcfg.get("enabled", False))
+                    # comments.enabled: false -> основной запрос слота идёт за постами (.../new.json);
+                    # если выключено и то и другое, опрашиваем комментарии, чтобы слот не простаивал
+                    comments_on = bool((config.get("comments", {}) or {}).get("enabled", True)) or not posts_on
                     subs_joined = "+".join(pick_subs(
                         config.get("stream_subs", ["all"]), config.get("stream_subs_per_request", 0),
                         name, sub_poll_no, config.get("stream_subs_all_chance", 1.0)))
@@ -328,6 +333,8 @@ async def account_worker(
                         session, base_url, subs_joined, fetch_limit, curl_session, timeout, name,
                         http_executor, max_age, max_pages, connect_timeout,
                         pg_min, pg_max, executor_health, stop_when=stop_when,
+                        listing="comments" if comments_on else "new",
+                        item_kind="t1" if comments_on else "t3",
                     )
 
                     # ---- ошибки: бэкофф только у этого аккаунта (cooldown),
@@ -422,7 +429,7 @@ async def account_worker(
 
                     payloads = []
                     for c in comments:
-                        p = build_payload(c)
+                        p = build_payload(c) if comments_on else build_post_payload(c)
                         if p is None or p["_age_seconds"] > max_age:
                             continue
                         payloads.append(p)
@@ -441,8 +448,7 @@ async def account_worker(
                     sent = await sender.put_many(to_buffer)
 
                     # ---- посты (необязательно): те же сабы, один-два запроса за слот ----
-                    pcfg = config.get("posts", {}) or {}
-                    if pcfg.get("enabled", False):
+                    if comments_on and posts_on:
                         every = max(1, int(pcfg.get("every_n_polls", 1)))
                         post_poll_no += 1
                         if (post_poll_no - 1) % every == 0:
