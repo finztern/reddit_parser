@@ -210,11 +210,14 @@ async def _fetch_comments_page(
     after: str | None = None,
     connect_timeout: float = DEFAULT_CONNECT_TIMEOUT_SECONDS,
     executor_health: ExecutorHealth | None = None,
+    listing: str = "comments",
+    item_kind: str = "t1",
 ) -> FetchResult:
     """Один HTTP-запрос к .../comments.json (одна страница листинга).
+    listing="new", item_kind="t3" — тот же запрос за постами (.../new.json).
     http_executor.current и curl_session.current резолвятся здесь, на
     каждый запрос."""
-    url = f"{base_url}/r/{subs_joined}/comments.json"
+    url = f"{base_url}/r/{subs_joined}/{listing}.json"
     params = {"limit": fetch_limit}
     if after:
         params["after"] = after
@@ -351,7 +354,7 @@ async def _fetch_comments_page(
         if first_page:
             return FetchResult(status=200, error_kind="empty", ratelimit=ratelimit)
 
-    comments = [c.get("data", {}) for c in children if c.get("kind") == "t1"]
+    comments = [c.get("data", {}) for c in children if c.get("kind") == item_kind]
 
     listing_after = listing_data.get("after")
     if not listing_after and comments:
@@ -376,6 +379,8 @@ async def fetch_comments(
     pagination_delay_max: float = 0.0,
     executor_health: ExecutorHealth | None = None,
     stop_when=None,
+    listing: str = "comments",
+    item_kind: str = "t1",
 ) -> FetchResult:
     """Тянет одну или несколько страниц .../comments.json подряд.
 
@@ -400,7 +405,7 @@ async def fetch_comments(
         page = await _fetch_comments_page(
             session, base_url, subs_joined, fetch_limit, curl_session, timeout,
             account_name, http_executor, after, connect_timeout,
-            executor_health,
+            executor_health, listing, item_kind,
         )
 
         if page.error_kind is not None:

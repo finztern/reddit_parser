@@ -66,6 +66,54 @@ def build_payload(comment_data: dict) -> dict | None:
     }
 
 
+def build_post_payload(post_data: dict) -> dict | None:
+    """Пост (t3_) в том же формате, что и комментарий; summary.data_type="post".
+
+    content — текст поста (selftext); у ссылочных/картиночных постов он пуст, тогда берём заголовок,
+    чтобы content не был пустым. title — заголовок. external_parent_id у поста пуст."""
+    post_id = post_data.get("id")
+    if not post_id:
+        return None
+    created_utc = post_data.get("created_utc")
+    if created_utc is None:
+        return None
+
+    fullname = post_data.get("name") or f"t3_{post_id}"
+    title = post_data.get("title", "") or ""
+    selftext = post_data.get("selftext", "") or ""
+    if selftext.strip() in ("[removed]", "[deleted]"):
+        selftext = ""
+    author = post_data.get("author", "") or ""
+    permalink = post_data.get("permalink", "")
+    url = f"https://www.reddit.com{permalink}" if permalink else ""
+    subreddit = post_data.get("subreddit") or ""
+    community_name = f"r/{subreddit}" if subreddit else ""
+
+    ratio = post_data.get("upvote_ratio")
+    summary = json.dumps({
+        "score": str(post_data.get("score", "")),
+        "upvote_ratio": "" if ratio is None else str(ratio),
+        "num_comments": str(post_data.get("num_comments", "")),
+        "communityName": community_name,
+        "data_type": "post",
+    })
+
+    return {
+        "content": selftext or title,
+        "external_id": fullname,
+        "created_at": iso_utc(created_utc),
+        "domain": "reddit.com",
+        "url": url,
+        "title": title,
+        "author": author,
+        "username": author,
+        "external_parent_id": "",
+        "summary": summary,
+        "_age_seconds": time.time() - created_utc,
+        "_created_utc": float(created_utc),
+    }
+
+
 def _item_ok(entry) -> bool:
     """Разбирает один элемент results[] из ответа /store_items.
     Формат отдельного результата коллектором явно не специфицирован,
