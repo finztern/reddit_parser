@@ -19,3 +19,12 @@ def test_post_payload_falls_back_to_title_and_skips_invalid():
     assert p["content"] == "Only title" and p["external_id"] == "t3_a"
     assert build_post_payload({"created_utc": 1.0}) is None
     assert build_post_payload({"id": "a"}) is None
+
+
+def test_is_nsfw():
+    from scraper.pipeline import is_nsfw
+    assert is_nsfw({"over_18": True})
+    assert is_nsfw({"quarantine": True})
+    assert not is_nsfw({"over_18": False, "subreddit": "aww"})
+    assert is_nsfw({"subreddit": "GoneWild"}, frozenset({"gonewild"}))
+    assert not is_nsfw({"subreddit": "aww"}, frozenset({"gonewild"}))

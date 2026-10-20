@@ -34,6 +34,7 @@ effect on their next read.
 | Keys | Primary consumer | Notes |
 |---|---|---|
 | `stream_subs`, `reddit_base_url`, `fetch_limit` | `scraper/worker.py`, `scraper/http_client.py` | Source listing and first-page size; fetch limit is capped at Reddit's client limit. |
+| `nsfw_filter.enabled`, `blocked_subs` | `scraper/worker.py`, `scraper/pipeline.py` | Drops items with Reddit `over_18`/`quarantine` flags or listed subreddits before claiming/sending. |
 | `comments.enabled` | `scraper/worker.py` | `false` + `posts.enabled: true` = posts-only mode: the slot's main request targets `new.json`; if both are off, comments stay on. |
 | `posts.enabled`, `every_n_polls`, `max_pages` | `scraper/worker.py`, `scraper/pipeline.py` | Optional extra `.../new.json` request per poll slot; posts share `SeenCache`, `Sender` and the collector endpoint with comments (`summary.data_type: post`). |
 | `stream_subs_per_request`, `stream_subs_all_chance` | `scraper/worker.py`, `scraper/sub_rotation.py` | `0` = all `stream_subs` in each request; `N` = per-account rotating window of N subs per poll; `all` is added on top with probability `stream_subs_all_chance`. |
@@ -146,6 +147,8 @@ remain in the sections above and in the consuming code.
 stream_subs
 stream_subs_per_request
 stream_subs_all_chance
+nsfw_filter.enabled
+nsfw_filter.blocked_subs
 comments.enabled
 posts.enabled
 posts.every_n_polls

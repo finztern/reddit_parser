@@ -8,6 +8,14 @@ from .constants import SERVER_HARD_BATCH_LIMIT, log
 from .utils import iso_utc
 
 
+def is_nsfw(data: dict, blocked_subs: frozenset[str] = frozenset()) -> bool:
+    """NSFW-признак из самих данных Reddit: over_18 (пост или родительский пост комментария),
+    quarantine, либо саб из чёрного списка (имена в нижнем регистре, без "r/")."""
+    if data.get("over_18") is True or data.get("quarantine") is True:
+        return True
+    return bool(blocked_subs) and (data.get("subreddit") or "").lower() in blocked_subs
+
+
 def build_payload(comment_data: dict) -> dict | None:
     comment_id = comment_data.get("id")
     if not comment_id:

@@ -11,7 +11,7 @@ from .geo import build_accept_language, pick_locale
 from .profile_gen import load_profile as load_device_profile, refresh_geo as refresh_profile_geo
 from .health import ExecutorHandle, ExecutorHealth
 from .http_client import CurlSessionHandle, fetch_comments
-from .pipeline import build_payload, build_post_payload
+from .pipeline import build_payload, build_post_payload, is_nsfw
 from .scheduler import PollOutcome, PollScheduler
 from .sender import Sender
 from .state import BackoffState, SeenCache
@@ -38,7 +38,7 @@ def _fullname(c: dict) -> str:
 async def poll_posts(
     *, name: str, session, base_url: str, subs_joined: str, fetch_limit: int, curl_session, timeout,
     http_executor, executor_health, connect_timeout, max_age, max_pages: int, pg_min, pg_max,
-    seen: SeenCache, sender: Sender,
+    seen: SeenCache, sender: Sender, nsfw_block: frozenset | None = None,
 ):
     """Опрос постов (.../new.json) теми же сабами, что и комментарии. Возвращает (FetchResult, в_буфер, дублей).
     Посты идут тем же путём, что комментарии: try_claim -> буфер Sender -> confirm/release."""
@@ -54,6 +54,8 @@ async def poll_posts(
         return res, 0, 0
     payloads = []
     for p in res.comments:
+        if nsfw_block is not None and is_nsfw(p, nsfw_block):
+            continue
         payload = build_post_payload(p)
         if payload is None or payload["_age_seconds"] > max_age:
             continue
@@ -243,6 +245,9 @@ async def account_worker(
                     connect_timeout = config.get("connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS)
                     base_url = config.get("reddit_base_url", "https://www.reddit.com")
                     fetch_limit = min(100, config.get("fetch_limit", 100))
+                    ncfg = config.get("nsfw_filter", {}) or {}
+                    nsfw_block = (frozenset(str(s).lower().removeprefix("r/") for s in (ncfg.get("blocked_subs") or []))
+                                  if ncfg.get("enabled", False) else None)
                     pcfg = config.get("posts", {}) or {}
                     posts_on = bool(pcfg.get("enabled", False))
                     # comments.enabled: false -> основной запрос слота идёт за постами (.../new.json);
@@ -428,7 +433,11 @@ async def account_worker(
                     comments = result.comments
 
                     payloads = []
+                    nsfw_dropped = 0
                     for c in comments:
+                        if nsfw_block is not None and is_nsfw(c, nsfw_block):
+                            nsfw_dropped += 1
+                            continue
                         p = build_payload(c) if comments_on else build_post_payload(c)
                         if p is None or p["_age_seconds"] > max_age:
                             continue
@@ -459,7 +468,7 @@ async def account_worker(
                                     http_executor=http_executor, executor_health=executor_health,
                                     connect_timeout=connect_timeout, max_age=max_age,
                                     max_pages=int(pcfg.get("max_pages", 1)), pg_min=pg_min, pg_max=pg_max,
-                                    seen=seen, sender=sender)
+                                    seen=seen, sender=sender, nsfw_block=nsfw_block)
                                 posts_requests = max(1, pres.pages_fetched)
                                 if pres.error_kind == "rate_or_server":
                                     posts_cooldown = health.on_rate_limited(now_m, fp, pres.retry_after)
@@ -488,10 +497,10 @@ async def account_worker(
 
                     log.info(
                         "[%s] r/%s стр=%d получено=%d дубли_стр1=%d/%d в_буфер=%d "
-                        "дубли=%d буфер=%d догнали=%s cooldown=%.1fs",
+                        "дубли=%d nsfw=%d буфер=%d догнали=%s cooldown=%.1fs",
                         name, subs_joined, result.pages_fetched, len(comments),
                         stats["first_dupes"], stats["first_len"], sent,
-                        dropped_dup, sender.backlog, stats["overlap"], cooldown,
+                        dropped_dup, nsfw_dropped, sender.backlog, stats["overlap"], cooldown,
                     )
                 finally:
                     if metrics is not None and kind and kind != "skipped":
