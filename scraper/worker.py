@@ -11,8 +11,7 @@ from .geo import build_accept_language, pick_locale
 from .profile_gen import load_profile as load_device_profile, refresh_geo as refresh_profile_geo
 from .health import ExecutorHandle, ExecutorHealth
 from .http_client import CurlSessionHandle, fetch_comments
-from .pipeline import build_payload
-from .utils import is_nsfw
+from .pipeline import build_payload, build_post_payload, is_nsfw
 from .scheduler import PollOutcome, PollScheduler
 from .sender import Sender
 from .state import BackoffState, SeenCache
@@ -34,6 +33,42 @@ ROTATION_POLL_SECONDS = 5.0
 
 def _fullname(c: dict) -> str:
     return c.get("name") or f"t1_{c.get('id')}"
+
+
+async def poll_posts(
+    *, name: str, session, base_url: str, subs_joined: str, fetch_limit: int, curl_session, timeout,
+    http_executor, executor_health, connect_timeout, max_age, max_pages: int, pg_min, pg_max,
+    seen: SeenCache, sender: Sender, nsfw_block: frozenset | None = None,
+):
+    """Опрос постов (.../new.json) теми же сабами, что и комментарии. Возвращает (FetchResult, в_буфер, дублей).
+    Посты идут тем же путём, что комментарии: try_claim -> буфер Sender -> confirm/release."""
+    def stop_when(page: list[dict]) -> bool:
+        return any(seen.contains(p.get("name") or f"t3_{p.get('id')}") for p in page)
+
+    res = await fetch_comments(
+        session, base_url, subs_joined, fetch_limit, curl_session, timeout, name,
+        http_executor, max_age, max_pages, connect_timeout, pg_min, pg_max, executor_health,
+        stop_when=stop_when, listing="new", item_kind="t3",
+    )
+    if res.error_kind is not None:
+        return res, 0, 0
+    payloads = []
+    for p in res.comments:
+        if nsfw_block is not None and is_nsfw(p, nsfw_block):
+            continue
+        payload = build_post_payload(p)
+        if payload is None or payload["_age_seconds"] > max_age:
+            continue
+        payloads.append(payload)
+    payloads.sort(key=lambda x: x["_age_seconds"])
+    to_buffer: list[dict] = []
+    dropped = 0
+    for payload in payloads:
+        if not await seen.try_claim(payload["external_id"]):
+            dropped += 1
+            continue
+        to_buffer.append(payload)
+    return res, await sender.put_many(to_buffer), dropped
 
 
 def rl_cooldown(ratelimit: dict | None, margin: float, max_interval: float) -> float:
@@ -136,6 +171,7 @@ async def account_worker(
     )
     auth_dead = False  # cookies отвергнуты — ждём обновления файла
     empty_streak = 0   # подряд пустых листингов (200, children=[]) на 1-й странице
+    post_poll_no = 0   # успешных опросов комментариев — для posts.every_n_polls
     sub_poll_no = 0    # номер опроса аккаунта — сдвигает окно сабов (stream_subs_per_request)
     next_request_at = 0.0  # не просить ротацию раньше (wall clock)
 
@@ -153,6 +189,8 @@ async def account_worker(
                 result = None
                 cooldown = 0.0
                 sent = 0
+                posts_sent = posts_fetched = posts_requests = 0
+                posts_cooldown = 0.0
                 kind: str | None = None  # итог цикла для счётчиков планировщика
                 try:
                     fp = scheduler.cfg()          # fleet_polling (читается на лету)
@@ -198,7 +236,6 @@ async def account_worker(
                                             name, st, age)
 
                     max_age = config.get("max_age_seconds", 120)
-                    drop_nsfw = bool(config.get("drop_nsfw", True))
                     max_pages = config.get("pagination_max_pages", 5)
                     pg_min = config.get("pagination_delay_min_seconds", 0.1)
                     pg_max = config.get("pagination_delay_max_seconds", 0.4)
@@ -208,6 +245,14 @@ async def account_worker(
                     connect_timeout = config.get("connect_timeout_seconds", DEFAULT_CONNECT_TIMEOUT_SECONDS)
                     base_url = config.get("reddit_base_url", "https://www.reddit.com")
                     fetch_limit = min(100, config.get("fetch_limit", 100))
+                    ncfg = config.get("nsfw_filter", {}) or {}
+                    nsfw_block = (frozenset(str(s).lower().removeprefix("r/") for s in (ncfg.get("blocked_subs") or []))
+                                  if ncfg.get("enabled", False) else None)
+                    pcfg = config.get("posts", {}) or {}
+                    posts_on = bool(pcfg.get("enabled", False))
+                    # comments.enabled: false -> основной запрос слота идёт за постами (.../new.json);
+                    # если выключено и то и другое, опрашиваем комментарии, чтобы слот не простаивал
+                    comments_on = bool((config.get("comments", {}) or {}).get("enabled", True)) or not posts_on
                     subs_joined = "+".join(pick_subs(
                         config.get("stream_subs", ["all"]), config.get("stream_subs_per_request", 0),
                         name, sub_poll_no, config.get("stream_subs_all_chance", 1.0)))
@@ -293,6 +338,8 @@ async def account_worker(
                         session, base_url, subs_joined, fetch_limit, curl_session, timeout, name,
                         http_executor, max_age, max_pages, connect_timeout,
                         pg_min, pg_max, executor_health, stop_when=stop_when,
+                        listing="comments" if comments_on else "new",
+                        item_kind="t1" if comments_on else "t3",
                     )
 
                     # ---- ошибки: бэкофф только у этого аккаунта (cooldown),
@@ -386,20 +433,15 @@ async def account_worker(
                     comments = result.comments
 
                     payloads = []
-                    nsfw_ids: list[str] = []
+                    nsfw_dropped = 0
                     for c in comments:
-                        p = build_payload(c)
+                        if nsfw_block is not None and is_nsfw(c, nsfw_block):
+                            nsfw_dropped += 1
+                            continue
+                        p = build_payload(c) if comments_on else build_post_payload(c)
                         if p is None or p["_age_seconds"] > max_age:
                             continue
-                        if drop_nsfw and is_nsfw(c):
-                            nsfw_ids.append(p["external_id"])
-                            continue
                         payloads.append(p)
-                    # NSFW не отправляем, но помечаем увиденным: иначе остановка пагинации
-                    # по пересечению (stop_when) не увидит знакомых id и листала бы лишнее.
-                    for nid in nsfw_ids:
-                        if await seen.try_claim(nid):
-                            await seen.confirm(nid)
                     payloads.sort(key=lambda p: p["_age_seconds"])
 
                     # Комментарии не отправляются сразу: они claim'ятся и уходят в
@@ -414,6 +456,35 @@ async def account_worker(
                         to_buffer.append(p)
                     sent = await sender.put_many(to_buffer)
 
+                    # ---- посты (необязательно): те же сабы, один-два запроса за слот ----
+                    if comments_on and posts_on:
+                        every = max(1, int(pcfg.get("every_n_polls", 1)))
+                        post_poll_no += 1
+                        if (post_poll_no - 1) % every == 0:
+                            try:
+                                pres, posts_sent, p_dup = await poll_posts(
+                                    name=name, session=session, base_url=base_url, subs_joined=subs_joined,
+                                    fetch_limit=fetch_limit, curl_session=curl_session, timeout=timeout,
+                                    http_executor=http_executor, executor_health=executor_health,
+                                    connect_timeout=connect_timeout, max_age=max_age,
+                                    max_pages=int(pcfg.get("max_pages", 1)), pg_min=pg_min, pg_max=pg_max,
+                                    seen=seen, sender=sender, nsfw_block=nsfw_block)
+                                posts_requests = max(1, pres.pages_fetched)
+                                if pres.error_kind == "rate_or_server":
+                                    posts_cooldown = health.on_rate_limited(now_m, fp, pres.retry_after)
+                                    log.warning("[%s] посты: %s — аккаунт в cooldown %.1fs",
+                                                name, pres.status, posts_cooldown)
+                                elif pres.error_kind is not None:
+                                    log.warning("[%s] посты: %s (status=%s) — пропускаю до следующего раза",
+                                                name, pres.error_kind, pres.status)
+                                else:
+                                    posts_fetched = len(pres.comments)
+                                    log.info("[%s] посты r/%s стр=%d получено=%d в_буфер=%d дубли=%d",
+                                             name, subs_joined, pres.pages_fetched, posts_fetched,
+                                             posts_sent, p_dup)
+                            except Exception:
+                                log.exception("[%s] посты: ошибка (комментарии не затронуты)", name)
+
                     outcome = PollOutcome(
                         page_len=stats["first_len"], dupes=stats["first_dupes"],
                         pages=result.pages_fetched, overlap_found=stats["overlap"],
@@ -422,22 +493,25 @@ async def account_worker(
                     # (темп парка диктует поток), реагируем лишь на почти исчерпанный остаток.
                     cooldown = (health.on_emergency_ratelimit(now_m, fp, result.ratelimit, rl_max)
                                 if respect_rl else 0.0)
+                    cooldown = max(cooldown, posts_cooldown)
 
                     log.info(
                         "[%s] r/%s стр=%d получено=%d дубли_стр1=%d/%d в_буфер=%d "
-                        "дубли=%d буфер=%d догнали=%s cooldown=%.1fs",
+                        "дубли=%d nsfw=%d буфер=%d догнали=%s cooldown=%.1fs",
                         name, subs_joined, result.pages_fetched, len(comments),
                         stats["first_dupes"], stats["first_len"], sent,
-                        dropped_dup, sender.backlog, stats["overlap"], cooldown,
+                        dropped_dup, nsfw_dropped, sender.backlog, stats["overlap"], cooldown,
                     )
                 finally:
                     if metrics is not None and kind and kind != "skipped":
                         # O(1), без ввода-вывода: запись метрик цикл опроса не блокирует
                         metrics.record_poll(
                             name, kind, status=getattr(result, "status", None),
-                            requests=(result.pages_fetched if kind == "ok" and result is not None else 1),
-                            fetched=(len(result.comments) if kind == "ok" and result is not None else 0),
-                            unique=sent, state=health.effective_state(scheduler.now()),
+                            requests=((result.pages_fetched if kind == "ok" and result is not None else 1)
+                                      + posts_requests),
+                            fetched=((len(result.comments) if kind == "ok" and result is not None else 0)
+                                     + posts_fetched),
+                            unique=sent + posts_sent, state=health.effective_state(scheduler.now()),
                         )
                     scheduler.release(slot, outcome, cooldown, sent, kind)
     finally:

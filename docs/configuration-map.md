@@ -34,9 +34,11 @@ effect on their next read.
 | Keys | Primary consumer | Notes |
 |---|---|---|
 | `stream_subs`, `reddit_base_url`, `fetch_limit` | `scraper/worker.py`, `scraper/http_client.py` | Source listing and first-page size; fetch limit is capped at Reddit's client limit. |
+| `nsfw_filter.enabled`, `blocked_subs` | `scraper/worker.py`, `scraper/pipeline.py` | Drops items with Reddit `over_18`/`quarantine` flags or listed subreddits before claiming/sending. |
+| `comments.enabled` | `scraper/worker.py` | `false` + `posts.enabled: true` = posts-only mode: the slot's main request targets `new.json`; if both are off, comments stay on. |
+| `posts.enabled`, `every_n_polls`, `max_pages` | `scraper/worker.py`, `scraper/pipeline.py` | Optional extra `.../new.json` request per poll slot; posts share `SeenCache`, `Sender` and the collector endpoint with comments (`summary.data_type: post`). |
 | `stream_subs_per_request`, `stream_subs_all_chance` | `scraper/worker.py`, `scraper/sub_rotation.py` | `0` = all `stream_subs` in each request; `N` = per-account rotating window of N subs per poll; `all` is added on top with probability `stream_subs_all_chance`. |
 | `stream_start_interval_seconds`, `stream_min_interval_seconds`, `stream_max_interval_seconds`, `stream_jitter_ratio`, `overlap_target_low`, `overlap_target_high`, `full_page_threshold` | `scraper/scheduler.py` | Adaptive fleet polling rate based on overlap; the initial interval is set when the scheduler is constructed. |
-| `drop_nsfw` | `scraper/worker.py`, `scraper/utils.py` | Drop `over_18` comments before delivery (marked seen, not sent); re-read on every poll. |
 | `pagination_max_pages`, `pagination_delay_min_seconds`, `pagination_delay_max_seconds`, `max_age_seconds` | `scraper/worker.py`, `scraper/http_client.py`, `scraper/sender.py` | Pagination bounds and freshness/drop behavior. |
 | `request_timeout_seconds`, `connect_timeout_seconds` | `scraper/worker.py`, `scraper/http_client.py` | Request-level timeouts; blocking `curl_cffi` work runs in the managed executor. |
 | `respect_ratelimit_headers`, `ratelimit_safety_margin`, `ratelimit_max_interval_seconds` | `scraper/worker.py` | Emergency handling of rate-limit headers; ordinary headers do not set the fleet rate. |
@@ -145,6 +147,12 @@ remain in the sections above and in the consuming code.
 stream_subs
 stream_subs_per_request
 stream_subs_all_chance
+nsfw_filter.enabled
+nsfw_filter.blocked_subs
+comments.enabled
+posts.enabled
+posts.every_n_polls
+posts.max_pages
 reddit_base_url
 fetch_limit
 stream_start_interval_seconds
@@ -158,7 +166,6 @@ pagination_max_pages
 pagination_delay_min_seconds
 pagination_delay_max_seconds
 max_age_seconds
-drop_nsfw
 target_rate_per_second
 queue_control.enabled
 queue_control.url
