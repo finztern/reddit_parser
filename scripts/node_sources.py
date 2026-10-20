@@ -146,6 +146,11 @@ def label(sources: list[str]) -> str:
     return "VLESS+прокси" if len(s) == 2 else ("только VLESS" if s == ["vless"] else "только прокси")
 
 
+def short_label(sources: list[str]) -> str:
+    s = parse_sources(sources)
+    return "оба" if len(s) == 2 else ("VLESS" if s == ["vless"] else "прокси")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--set", dest="mode", help="vless | proxy | all")

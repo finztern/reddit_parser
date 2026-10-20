@@ -997,7 +997,7 @@ class App:
             return t
         if self.msg and self.msg[2] > now:
             return Text(" " + self.msg[0], style=self.msg[1])
-        src = node_src.label(node_src.active_sources(self.state_dir.parent))
+        src = node_src.short_label(node_src.active_sources(self.state_dir.parent))
         return Text(f" q выход · r обновить · s сорт({SORT_LABEL[self.sort]}) · f фильтр({FILTER_LABEL.get(self.flt, self.flt)})"
                     f" · ↑/↓ выбор · l вход · d деталь · p пауза · n узлы({src})", style="dim")
 
