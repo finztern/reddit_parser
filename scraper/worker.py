@@ -12,6 +12,7 @@ from .profile_gen import load_profile as load_device_profile, refresh_geo as ref
 from .health import ExecutorHandle, ExecutorHealth
 from .http_client import CurlSessionHandle, fetch_comments
 from .pipeline import build_payload
+from .utils import is_nsfw
 from .scheduler import PollOutcome, PollScheduler
 from .sender import Sender
 from .state import BackoffState, SeenCache
@@ -197,6 +198,7 @@ async def account_worker(
                                             name, st, age)
 
                     max_age = config.get("max_age_seconds", 120)
+                    drop_nsfw = bool(config.get("drop_nsfw", True))
                     max_pages = config.get("pagination_max_pages", 5)
                     pg_min = config.get("pagination_delay_min_seconds", 0.1)
                     pg_max = config.get("pagination_delay_max_seconds", 0.4)
@@ -384,11 +386,20 @@ async def account_worker(
                     comments = result.comments
 
                     payloads = []
+                    nsfw_ids: list[str] = []
                     for c in comments:
                         p = build_payload(c)
                         if p is None or p["_age_seconds"] > max_age:
                             continue
+                        if drop_nsfw and is_nsfw(c):
+                            nsfw_ids.append(p["external_id"])
+                            continue
                         payloads.append(p)
+                    # NSFW не отправляем, но помечаем увиденным: иначе остановка пагинации
+                    # по пересечению (stop_when) не увидит знакомых id и листала бы лишнее.
+                    for nid in nsfw_ids:
+                        if await seen.try_claim(nid):
+                            await seen.confirm(nid)
                     payloads.sort(key=lambda p: p["_age_seconds"])
 
                     # Комментарии не отправляются сразу: они claim'ятся и уходят в

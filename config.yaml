@@ -74,6 +74,9 @@ pagination_delay_max_seconds: 0.4
 # ---- Свежесть / отправка ----
 max_age_seconds: 15
 
+# Отбрасывать NSFW-комментарии (over_18): в коллектор не уходят, но помечаются увиденными.
+drop_nsfw: true
+
 # fallback-скорость (элементов/сек): используется, только когда
 # queue_control.enabled = false либо /queue недоступна дольше stale_seconds.
 # В этом режиме батч уходит раз в send_batch_size / target_rate_per_second.
