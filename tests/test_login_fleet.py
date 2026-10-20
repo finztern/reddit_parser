@@ -86,7 +86,7 @@ def test_text_patchers_keep_comments_and_are_idempotent():
 def test_validate_fleet_finds_problems():
     accs = [{"name": "account_1", "proxy_port": 1, "login": True}, {"name": "account_2", "proxy_port": 1},
             {"name": "account_3", "proxy_port": 3, "login": True}]
-    links = {"account_1": "http://a:b@h:1#x", "account_2": "http://a:b@h:1#y"}
+    links = {"account_1": "vless://a@h:1#x", "account_2": "vless://a@h:1#y"}
     problems = " | ".join(lf.validate_fleet(accs, links, {"account_3": {}}, {"login_accounts": [], "account_geo": {}},
                                             ["account_1"]))
     for needle in ("дубли proxy_port", "одна нода у нескольких слотов", "одновременно гостевой и login",
@@ -220,9 +220,9 @@ def test_convert_rollback_from_backups_restores_guest_mode():
 # ---------------------------------------------------------------- #
 
 def _write_ok_file(tmp: Path, n_good: int):
-    pool = [l for l in (tmp / "all_proxys.txt").read_text(encoding="utf-8").split()
+    pool = [l for l in (tmp / "all_nodes.txt").read_text(encoding="utf-8").split()
             if not any(x in l for x in ("dead", "ghost"))]
-    (tmp / "all_proxys.reddit_ok.txt").write_text("\n".join(pool[:n_good]) + "\n", encoding="utf-8")
+    (tmp / "all_nodes.reddit_ok.txt").write_text("\n".join(pool[:n_good]) + "\n", encoding="utf-8")
     return pool[:n_good]
 
 
@@ -231,12 +231,12 @@ def test_add_login_slots_count_equals_good_minus_spare():
     try:
         assert _run(tmp, "convert_to_login.py", "--all", "--apply").returncode == 0
         good = _write_ok_file(tmp, 36)
-        before_env = (tmp / "proxy_accounts.env").read_text(encoding="utf-8")
+        before_env = (tmp / "vless_accounts.env").read_text(encoding="utf-8")
 
         r = _run(tmp, "add_login_slots.py", "--seed", "3")
         assert r.returncode == 0, r.stdout + r.stderr
         assert "[план] ничего не записано" in r.stdout
-        assert (tmp / "proxy_accounts.env").read_text(encoding="utf-8") == before_env
+        assert (tmp / "vless_accounts.env").read_text(encoding="utf-8") == before_env
         assert "годные 36 - запас 6 = 30 слотов" in r.stdout, r.stdout
 
         r = _run(tmp, "add_login_slots.py", "--seed", "3", "--apply")
@@ -266,7 +266,7 @@ def test_add_login_slots_count_equals_good_minus_spare():
         assert not guest["guest_accounts"] and config["rotation"]["slots"] == []
         problems = lf.validate_fleet(accounts, links, guest["guest_accounts"], login, config["rotation"]["slots"])
         assert not problems, problems
-        assert list(tmp.glob("proxy_accounts.env.bak-addlogin-*"))
+        assert list(tmp.glob("vless_accounts.env.bak-addlogin-*"))
 
         # повторный запуск ничего не добавляет: слотов уже good - spare
         r = _run(tmp, "add_login_slots.py", "--seed", "3", "--apply")
@@ -290,7 +290,7 @@ def test_add_login_slots_needs_filter_output_and_keeps_spare():
         accounts, *_ = _load(tmp)
         links = lf.load_links(lf.Paths(tmp))
         assert len(links) == 27
-        ok_keys = {l.split("#", 1)[0] for l in (tmp / "all_proxys.reddit_ok.txt").read_text(encoding="utf-8").split()}
+        ok_keys = {l.split("#", 1)[0] for l in (tmp / "all_nodes.reddit_ok.txt").read_text(encoding="utf-8").split()}
         free_left = ok_keys - {v.split("#", 1)[0] for v in links.values()}
         assert len(free_left) >= 6, "запас на замену съеден"
     finally:
@@ -337,7 +337,7 @@ def _daemon(tmp: Path, ok_keys, bad=()):
     d.fleet = dict(lf.FLEET_DEFAULTS)
     d.login_set = {"account_1"}
     d.accounts = {"account_1": {"name": "account_1", "enabled": True, "login": True, "proxy_port": 7892}}
-    k = {i: f"http://u{i}:p{i}@h{i}:3128" for i in range(1, 6)}
+    k = {i: f"vless://uuid{i}@h{i}:443?x=1" for i in range(1, 6)}
     d.env = SimpleNamespace(
         assigned={"account_1": k[1] + "#rs1"},
         key2name={k[i]: f"n{i}" for i in range(1, 6)},

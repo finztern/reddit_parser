@@ -6,7 +6,9 @@ scripts/dashboard.py — панель управления парком в ко�
 скрапера (модуль 06): `GET /metrics.json` (резерв — state/metrics_snapshot.json) и state/events.jsonl.
 К Reddit панель не ходит и на скрапер не влияет, кроме двух явных действий оператора:
   * `l` — запустить scripts/login_hub.py для аккаунтов из очереди «перелогинить»;
-  * `p` — поставить/снять паузу аккаунта через state/runtime_disabled.json (без правки yaml).
+  * `p` — поставить/снять паузу аккаунта через state/runtime_disabled.json (без правки yaml);
+  * `n` — источник узлов: VLESS+прокси → только VLESS → только прокси (state/node_sources.json,
+    аккаунты узлов выключенного источника встают на паузу; см. scripts/node_sources.py).
 
     venv/bin/python3 scripts/dashboard.py                 # живая панель (лучше 120x40 и больше)
     venv/bin/python3 scripts/dashboard.py --once          # текстовый снимок (для логов и чата)
@@ -14,7 +16,7 @@ scripts/dashboard.py — панель управления парком в ко�
     venv/bin/python3 scripts/dashboard.py --demo          # заглушка данных, без скрапера
 
 Клавиши: q выход · r обновить · s сортировка · f фильтр состояний · ↑/↓ выбор аккаунта · l вход ·
-d деталь · p пауза. Esc снимает выбор / закрывает деталь / отменяет подтверждение.
+d деталь · p пауза · n источник узлов (VLESS/прокси). Esc снимает выбор / закрывает деталь / отменяет подтверждение.
 
 `l`: если аккаунт выбран (↑/↓) — вход для него, иначе — для первых 4 из очереди; затем `y`/Enter
 подтверждает (то есть открыть 4 сессии входа = `l`, `y`). Ссылки на noVNC (6001–6004) панель показывает
@@ -65,6 +67,9 @@ from scraper.metrics import (  # noqa: E402
     DEFAULT_HOST, DEFAULT_PORT, SCHEMA_VERSION, STARTING, WAITING_LOGIN, read_events, read_snapshot,
 )
 from scraper.scheduler import read_runtime_disabled  # noqa: E402
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import node_sources as node_src  # noqa: E402
 
 CONFIG_PATH = _ROOT / "config.yaml"
 HUB_SCRIPT = _ROOT / "scripts" / "login_hub.py"
@@ -925,6 +930,8 @@ class App:
             self._toggle_detail(data)
         elif key in ("p", "P"):
             self._pause(data)
+        elif key in ("n", "N"):
+            self._cycle_sources()
         elif key in ("l", "L"):
             self._ask_login(data, ref)
         return True
@@ -937,6 +944,17 @@ class App:
             self.detail_events = read_events(self.state_dir / "events.jsonl", 300)
         else:
             self.say("выберите аккаунт стрелками ↑/↓", "yellow", 3)
+
+    def _cycle_sources(self) -> None:
+        """Источник узлов: оба -> только VLESS -> только прокси. Паузы аккаунтов пересобираются сразу."""
+        root = self.state_dir.parent
+        try:
+            new = node_src.next_mode(node_src.active_sources(root))
+            new, off = node_src.set_sources(root, new)
+        except OSError as e:
+            return self.say(f"не записать переключатель источников: {e}", "bold red")
+        self.say(f"источник узлов: {node_src.label(new)} · на паузе из-за источника: {len(off)}", "bold green")
+        self._refresh()
 
     def _pause(self, data: Data) -> None:
         if not self.selected:
@@ -979,8 +997,9 @@ class App:
             return t
         if self.msg and self.msg[2] > now:
             return Text(" " + self.msg[0], style=self.msg[1])
+        src = node_src.label(node_src.active_sources(self.state_dir.parent))
         return Text(f" q выход · r обновить · s сорт({SORT_LABEL[self.sort]}) · f фильтр({FILTER_LABEL.get(self.flt, self.flt)})"
-                    " · ↑/↓ выбор · l вход · d деталь · p пауза", style="dim")
+                    f" · ↑/↓ выбор · l вход · d деталь · p пауза · n узлы({src})", style="dim")
 
     def render(self, size: tuple[int, int]) -> Layout:
         width, height = size

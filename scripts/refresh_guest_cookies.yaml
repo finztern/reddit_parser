@@ -50,9 +50,9 @@ geo_defaults:
     width: 1920
     height: 1080
 
-# Гео per-слот — под реальную геолокацию прокси слота (в комментарии —
+# Гео per-слот — под реальную геолокацию VLESS-ноды слота (в комментарии —
 # планируемая нода). Поправь, когда впишешь реальные ноды в
-# proxy_accounts.env. При ротации демон кладёт гео в state/slots/.
+# vless_accounts.env. При ротации демон кладёт гео в state/slots/.
 account_geo:
   account_11: {locale: "de-CH", timezone_id: "Europe/Zurich"}       # ch2
   account_12: {locale: "cs-CZ", timezone_id: "Europe/Prague"}       # cz1

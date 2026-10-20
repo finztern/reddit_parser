@@ -14,9 +14,9 @@
 | `scripts/refresh_guest_cookies.yaml` | Guest-аккаунты и настройки получения анонимных cookies |
 | `config.yaml` → `fleet` | Резерв нод, node-replacement политика и guest-enabled flag |
 | `config.yaml` → `rotation` | Пул, mihomo API, cooldown, лимиты и параметры daemon |
-| `proxy_accounts.env` | Текущая привязка `account_N = http://user:pass@host:port` |
-| `all_proxys.txt` | Пул HTTP(S)/SOCKS5-прокси, по одному в строке (`user:pass@host:port`, `http://user:pass@host:port` или `host:port:user:pass`, опционально `#имя`/`#us1`) |
-| `all_proxys.reddit_ok.txt` | Пул, который прошёл последнюю проверку `filter_nodes.py --write` |
+| `vless_accounts.env` | Текущая привязка `account_N = vless://...` |
+| `all_nodes.txt` | Кандидатный пул VLESS, по одной ссылке на строку |
+| `all_nodes.reddit_ok.txt` | Пул, который прошёл последнюю проверку `filter_nodes.py --write` |
 | `state/` | Отчёты, идентичности, заявки и флаги текущего хоста |
 
 Не добавляйте аккаунт одновременно в login- и guest-refresh списки. Оба job-а
@@ -41,7 +41,7 @@ venv/bin/python3 scripts/filter_nodes.py --write
 ```
 
 При пустом результате скрипт завершается ошибкой и не перезаписывает прежний
-`all_proxys.reddit_ok.txt`. Проверяйте controller/Meta API, URL probe и
+`all_nodes.reddit_ok.txt`. Проверяйте controller/Meta API, URL probe и
 доступность сети до любых изменений слотов.
 
 ## 3. Перевести guest-слоты в login-режим
@@ -71,7 +71,7 @@ venv/bin/python3 scripts/convert_to_login.py --all --apply
 
 ## 4. Добрать login-слоты
 
-Перед добором должны существовать свежий `all_proxys.reddit_ok.txt`,
+Перед добором должны существовать свежий `all_nodes.reddit_ok.txt`,
 загруженный в mihomo пул и согласованные исходные настройки. По умолчанию
 `add_login_slots.py` читает число резерва из `fleet.reserve_nodes` (обычно 6)
 и годные ноды из filtered pool. Команда сначала строит план:
@@ -126,7 +126,7 @@ guest-режиме она может поменять ноду/отпечато�
 
 1. Указаны целевые guest slots в `rotation.slots`.
 2. Эти слоты находятся в `guest_accounts`, а не в `login_accounts`.
-3. `all_proxys.txt` содержит незанятые кандидаты; mihomo уже загружен сгенерированной конфигурацией.
+3. `all_nodes.txt` содержит незанятые кандидаты; mihomo уже загружен сгенерированной конфигурацией.
 4. Backup сессий создан и тест восстановления выполнен.
 
 Не включайте `--with-guest` как способ включить login node replacement.
@@ -158,27 +158,28 @@ venv/bin/python3 scripts/rotation_daemon.py --status
 `fleet.legacy_scheduler` пока не переключает scheduler и не является rollback
 механизмом.
 
-## Ветка `proxy-only`: прокси вместо VLESS
+## Два источника узлов: VLESS и прокси
 
-В этой ветке VLESS не поддерживается: каждый аккаунт ходит в Reddit через свой
-HTTP(S)/SOCKS5-прокси, mihomo остаётся локальным шлюзом (порт слота -> прокси).
+Парк может работать на VLESS-нодах (`all_nodes.txt`), на обычных HTTP(S)/SOCKS5-прокси
+(`all_proxys.txt`) или на обоих сразу. В `vless_accounts.env` для аккаунта пишется любая из
+ссылок: `account_N = vless://...` или `account_N = http://user:pass@host:port`.
 
-1. Положите в корень проекта `all_proxys.txt` — по одному прокси в строке:
-   `user:pass@host:port`, `http://user:pass@host:port` или `host:port:user:pass`
-   (необязательный хвост `#us1` задаёт имя и страну). Файл в `.gitignore`/`.dockerignore`.
-2. `python3 scripts/generate_mihomo_config.py && docker compose restart mihomo` —
-   все прокси пула загружаются в mihomo.
-3. `python3 scripts/filter_nodes.py --write` — через каждый прокси проверяется
-   `https://www.reddit.com/` (нужен HTTP 200), замеряется задержка. В
-   `all_proxys.reddit_ok.txt` годные прокси записываются **от самого быстрого к
-   самому медленному**; страна прокси определяется по реальному выходному IP
-   (`state/proxy_geo.json`, отключается `--no-geo`) — по ней выбираются
-   locale/timezone слота.
-4. `python3 scripts/add_login_slots.py` (план) и затем `--apply` — самые быстрые
-   свободные годные прокси привязываются к слотам; один прокси = один аккаунт
-   (уникальный IP). Остаток (`fleet.reserve_nodes`) остаётся запасом, демон
-   ротации заменяет сгоревший прокси следующим по скорости.
-
-`filter_nodes.py` стоит гонять по таймеру: скорость прокси меняется. Привязка
-уже выданных слотов при этом не пересматривается — меняется только замена
-сгоревших.
+- **Пул прокси** — `all_proxys.txt`, по одному в строке: `user:pass@host:port`,
+  `http://user:pass@host:port` или `host:port:user:pass`; необязательный хвост `#us1` задаёт имя и
+  страну. Файл секретный (`.gitignore`/`.dockerignore`), `rotation.proxies_file` меняет имя.
+- **Выбор источника.** Ключ `rotation.node_sources` в `config.yaml`: `[vless]`, `[proxy]` или
+  `[vless, proxy]`. В панели клавиша `n` переключает «оба → только VLESS → только прокси» на лету
+  (`state/node_sources.json` сильнее конфига); то же из консоли:
+  `python3 scripts/node_sources.py --set proxy|vless|all`, `--clear` возвращает значение из конфига.
+- **Что делает переключатель.** mihomo перезапускать не нужно: в нём всегда загружены узлы обоих
+  типов. Аккаунты, чей узел относится к выключенному источнику, ставятся на паузу
+  (`state/node_source_disabled.json`, читает планировщик скрапера); новые слоты и замена
+  сгоревшего узла берут узлы только из включённых источников.
+- **Скорость.** `filter_nodes.py --write` проверяет через каждый узел `reddit.com` (ответ 200),
+  замеряет задержку и пишет годные в `all_nodes.reddit_ok.txt` от самых быстрых к медленным.
+  Прокси выдаются слотам самыми быстрыми первыми, VLESS — как раньше, с разбросом по странам; если
+  включены оба типа, слоты делятся пропорционально числу свободных узлов. Для проверки тысячи
+  узлов используйте `--workers 32 --timeout-ms 5000`.
+- **Гео прокси.** Если в имени нет кода страны, `filter_nodes.py` определяет её по реальному
+  выходному IP (`state/proxy_geo.json`, `--no-geo` отключает) — по ней выбираются locale/timezone.
+- Один узел = один аккаунт (уникальный IP): уже назначенные узлы свободными не считаются.

@@ -38,7 +38,7 @@ COUNTRIES = ["us", "de", "nl", "fr", "jp", "sg", "ca", "uk", "pl", "se", "no", "
 
 
 def vless(i, name):
-    return f"http://user{i}:pass{i}@host{i}.example.net:3128#{name}"
+    return f"vless://00000000-0000-4000-8000-{i:012d}@host{i}.example.net:443?security=tls&type=tcp&sni=h{i}.example.net#{name}"
 
 
 def trim_to_25_slots(tmp: Path):
@@ -82,7 +82,7 @@ def build_fixture(tmp: Path, mihomo_port: int, trim: bool = True):
     lines = []
     for n in range(1, 25):
         lines.append(f"account_{n} = {vless(n, 'rs%d' % n if n <= 10 else 'cz%d' % n)}")
-    (tmp / "proxy_accounts.env").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    (tmp / "vless_accounts.env").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     # пул: 41 живая нода (12 стран) + 2 мёртвые + 1 "призрак" (нет в mihomo) + zz1 (неизвестная страна)
     # + rs1 (имя совпадает с назначенной нодой account_1)
@@ -96,7 +96,7 @@ def build_fixture(tmp: Path, mihomo_port: int, trim: bool = True):
     pool.append(vless(i, "fr92ghost")); i += 1
     pool.append(vless(i, "zz1")); i += 1           # неизвестная страна
     pool.append(vless(i, "rs1")); i += 1           # коллизия имени с назначенной нодой account_1
-    (tmp / "all_proxys.txt").write_text("\n".join(pool) + "\n", encoding="utf-8")
+    (tmp / "all_nodes.txt").write_text("\n".join(pool) + "\n", encoding="utf-8")
 
     stub = tmp / "stubs" / "curl_cffi"
     stub.mkdir(parents=True)
@@ -106,15 +106,6 @@ def build_fixture(tmp: Path, mihomo_port: int, trim: bool = True):
 
 
 BANNED: set = set()   # имена нод, которые «живы», но Reddit (expected=200) их не пускает
-
-
-def delay_of(name: str) -> int:
-    """Детерминированная «скорость» фейкового прокси: rs1* — самый быстрый, остальные — по номеру в имени."""
-    if name.startswith("rs1"):
-        return 50
-    import re
-    m = re.search(r"(\d+)", name)
-    return 100 + int(m.group(1)) if m else 999
 
 
 class FakeMihomo(http.server.BaseHTTPRequestHandler):
@@ -128,7 +119,7 @@ class FakeMihomo(http.server.BaseHTTPRequestHandler):
                 return self._send(504, {"message": "An error occurred in the delay test"})
             if "expected=200" in self.path and name in BANNED:
                 return self._send(504, {"message": "An error occurred in the delay test"})
-            return self._send(200, {"delay": delay_of(name)})
+            return self._send(200, {"delay": 123})
         self._send(404, {})
 
     def _send(self, code, obj):
@@ -156,7 +147,7 @@ def test_end_to_end():
     try:
         build_fixture(tmp, srv.server_port)
         before = {f: (tmp / f).read_text(encoding="utf-8")
-                  for f in ("accounts.yaml", "config.yaml", "proxy_accounts.env", "scripts/refresh_guest_cookies.yaml")}
+                  for f in ("accounts.yaml", "config.yaml", "vless_accounts.env", "scripts/refresh_guest_cookies.yaml")}
 
         # --- 1) план: ничего не пишет ---
         r = run(tmp, "--count", "30", "--seed", "7")
@@ -189,10 +180,10 @@ def test_end_to_end():
         for n in range(1, 11):
             assert by[f"account_{n}"] == orig[f"account_{n}"]
         # у account_25 (не было ноды) теперь есть нода и locale под неё
-        assert "account_25" in (tmp / "proxy_accounts.env").read_text(encoding="utf-8")
+        assert "account_25" in (tmp / "vless_accounts.env").read_text(encoding="utf-8")
 
         # --- ноды: уникальные, живые, нужные страны, запас на ротацию ---
-        env = (tmp / "proxy_accounts.env").read_text(encoding="utf-8")
+        env = (tmp / "vless_accounts.env").read_text(encoding="utf-8")
         links = {l.split("=", 1)[0].strip(): l.split("=", 1)[1].strip()
                  for l in env.splitlines() if l.startswith("account_")}
         assert len(links) == 55
@@ -204,17 +195,12 @@ def test_end_to_end():
         assert len(names) == len(set(names)), f"имена прокси не уникальны: {names}"
         assert any(n == "rs1~2" for n in names), "коллизия имени rs1 не разрешена"
 
-        pool_keys = {l.split("#", 1)[0] for l in (tmp / "all_proxys.txt").read_text(encoding="utf-8").split()}
+        pool_keys = {l.split("#", 1)[0] for l in (tmp / "all_nodes.txt").read_text(encoding="utf-8").split()}
         free_left = pool_keys - set(keys)
         # мёртвая пара + призрак + zz1 + (живые на запас >= 8)
         assert len(free_left) >= 8 + 3, f"запас на ротацию съеден: осталось {len(free_left)}"
-        # выбраны САМЫЕ БЫСТРЫЕ из живых: любой выданный не медленнее любого оставшегося живого
-        def live_delay(uri):
-            nm = urllib.parse.unquote(uri.split("#", 1)[1]) if "#" in uri else ""
-            return delay_of(nm)
-        live_left = [u for u in free_left if "dead" not in u and "ghost" not in u]
-        assert max(live_delay(l) for l in added_links) <= min(live_delay(u) for u in live_left), \
-            "выданы не самые быстрые прокси"
+        countries = {urllib.parse.unquote(l.split('#', 1)[1])[:2] for l in added_links}
+        assert len(countries) >= 8, f"мало разнообразия стран: {countries}"
 
         # --- гео слота = гео ноды (accounts.yaml:locale и guest spec geo) ---
         guest = yaml.safe_load((tmp / "scripts" / "refresh_guest_cookies.yaml").read_text(encoding="utf-8"))
@@ -326,7 +312,7 @@ def test_pick_profiles_reuses_only_when_targets_run_out():
 
 def test_fresh_server_bootstrap():
     """Новый сервер: в репо уже 55 слотов, есть только пул нод (без
-    proxy_accounts.env). generate_mihomo_config поднимает конфиг из одного
+    vless_accounts.env). generate_mihomo_config поднимает конфиг из одного
     пула, а add_guest_slots --count 0 раздаёт ноды готовым слотам 11..55."""
     import importlib
 
@@ -335,9 +321,9 @@ def test_fresh_server_bootstrap():
     tmp = Path(tempfile.mkdtemp(prefix="freshserver-"))
     try:
         build_fixture(tmp, srv.server_port, trim=False)
-        (tmp / "proxy_accounts.env").unlink()                       # чистый сервер
+        (tmp / "vless_accounts.env").unlink()                       # чистый сервер
         pool = [vless(200 + k, f"{COUNTRIES[k % len(COUNTRIES)]}{k + 1}") for k in range(60)]
-        (tmp / "all_proxys.txt").write_text("\n".join(pool) + "\n", encoding="utf-8")
+        (tmp / "all_nodes.txt").write_text("\n".join(pool) + "\n", encoding="utf-8")
 
         env = {**os.environ, "PYTHONPATH": str(tmp / "stubs"), "PYTHONDONTWRITEBYTECODE": "1"}
         gen = lambda: subprocess.run([sys.executable, str(tmp / "scripts" / "generate_mihomo_config.py")],
@@ -357,7 +343,7 @@ def test_fresh_server_bootstrap():
         # логин-аккаунты без ноды выключены, гостевые включены
         assert not any(a["enabled"] for a in accounts if int(a["name"].split("_")[1]) <= 10)
         links = {l.split("=", 1)[0].strip(): l.split("=", 1)[1].strip()
-                 for l in (tmp / "proxy_accounts.env").read_text(encoding="utf-8").splitlines()
+                 for l in (tmp / "vless_accounts.env").read_text(encoding="utf-8").splitlines()
                  if l.startswith("account_")}
         assert sorted(links, key=lambda k: int(k.split("_")[1])) == [f"account_{n}" for n in range(11, 56)]
         assert len({v.split("#", 1)[0] for v in links.values()}) == 45
@@ -399,7 +385,7 @@ def test_replace_banned():
 
         def links():
             return {l.split("=", 1)[0].strip(): l.split("=", 1)[1].strip()
-                    for l in (tmp / "proxy_accounts.env").read_text(encoding="utf-8").splitlines()
+                    for l in (tmp / "vless_accounts.env").read_text(encoding="utf-8").splitlines()
                     if l.startswith("account_")}
 
         before = links()
@@ -414,7 +400,7 @@ def test_replace_banned():
         after = links()
         assert after["account_12"] != old
         assert all(after[k] == v for k, v in before.items() if k not in ("account_12", "account_25")), "тронуты чужие слоты"
-        env = (tmp / "proxy_accounts.env").read_text(encoding="utf-8")
+        env = (tmp / "vless_accounts.env").read_text(encoding="utf-8")
         assert "# (снято: Reddit не пускает) account_12" in env
         # старая забаненная нода не выдана никому
         assert old.split("#", 1)[0] not in [v.split("#", 1)[0] for v in after.values()]

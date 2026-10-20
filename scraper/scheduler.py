@@ -89,12 +89,17 @@ class AccountSlot:
 
 
 class PollScheduler:
-    def __init__(self, get, demand=None, clock=time.monotonic, rng=random, runtime_disabled_path=None):
+    def __init__(self, get, demand=None, clock=time.monotonic, rng=random, runtime_disabled_path=None,
+                 source_disabled_path=None):
         self._get = get  # ConfigStore.get — конфиг читается на лету
         # state/runtime_disabled.json: пауза аккаунтов из панели; объединяется с fleet_polling.disabled_accounts
         self._rt_path = Path(runtime_disabled_path) if runtime_disabled_path else None
         self._rt_mtime: float | None = None
         self._rt_names: set[str] = set()
+        # state/node_source_disabled.json: аккаунты узлов выключенного источника (VLESS/прокси, scripts/node_sources.py)
+        self._src_path = Path(source_disabled_path) if source_disabled_path else None
+        self._src_mtime: float | None = None
+        self._src_names: set[str] = set()
         self._demand = demand  # Sender.demand: 0 — не опрашивать, 1 — обычно, 2 — срочно
         self._clock = clock
         self._rng = rng
@@ -206,16 +211,23 @@ class PollScheduler:
 
     def _runtime_disabled(self) -> set[str]:
         """Перечитывается только при смене mtime (одна os.stat на тик)."""
-        if self._rt_path is None:
-            return set()
-        try:
-            mt = self._rt_path.stat().st_mtime_ns
-        except OSError:
-            mt = None
-        if mt != self._rt_mtime:
-            self._rt_mtime = mt
-            self._rt_names = read_runtime_disabled(self._rt_path) if mt is not None else set()
-        return self._rt_names
+        if self._rt_path is not None:
+            try:
+                mt = self._rt_path.stat().st_mtime_ns
+            except OSError:
+                mt = None
+            if mt != self._rt_mtime:
+                self._rt_mtime = mt
+                self._rt_names = read_runtime_disabled(self._rt_path) if mt is not None else set()
+        if self._src_path is not None:
+            try:
+                mt = self._src_path.stat().st_mtime_ns
+            except OSError:
+                mt = None
+            if mt != self._src_mtime:
+                self._src_mtime = mt
+                self._src_names = read_runtime_disabled(self._src_path) if mt is not None else set()
+        return self._rt_names | self._src_names
 
     def _sync_disabled(self, cfg: FleetPollingConfig, now: float):
         off = set(cfg.disabled_accounts) | self._runtime_disabled()

@@ -229,10 +229,10 @@ cookies; атомарная замена файла снижает риск чт
 
 ## 6. Ноды и режимы ротации
 
-`generate_mihomo_config.py` строит `mihomo_config.yaml` из файлов с прокси (`proxy_accounts.env`, `all_proxys.txt`).
+`generate_mihomo_config.py` строит `mihomo_config.yaml` из VLESS-файлов.
 `filter_nodes.py` проверяет пул через mihomo delay API и пишет отчёт
 `state/node_report.json`; с `--write` сохраняет прошедшие проверки ноды
-в `all_proxys.reddit_ok.txt`.
+в `all_nodes.reddit_ok.txt`.
 
 У `rotation_daemon.py` два режима, управляемые конфигурацией и типом слота:
 
@@ -272,7 +272,7 @@ cookies; атомарная замена файла снижает риск чт
 - `accounts.yaml` — аккаунтные идентификаторы, proxy-порты, cookies и отпечатки.
 - `scripts/refresh_cookies.yaml` — login account list и настройки login refresh.
 - `scripts/refresh_guest_cookies.yaml` — guest account list и настройки guest refresh.
-- `proxy_accounts.env`, `all_proxys.txt` — локальные операционные данные, не
+- `vless_accounts.env`, `all_nodes.txt` — локальные операционные данные, не
   коммитятся.
 - `mihomo_config.yaml` — производный, генерируемый файл, не коммитится.
 

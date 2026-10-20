@@ -108,7 +108,7 @@ code/test paths in this guide, and the documented `config.yaml` key inventory.
 - Account identity/settings: `accounts.yaml`.
 - Login refresh membership: `scripts/refresh_cookies.yaml`.
 - Guest refresh membership: `scripts/refresh_guest_cookies.yaml`.
-- Runtime state, cookies, proxy credentials, proxy lists, and generated mihomo config
+- Runtime state, cookies, VLESS links, node lists, and generated mihomo config
   are local operational data. Never print, commit, or paste their contents.
 - Do not assume the checked-in sample configuration equals a production
   host's state. Verify account lists, flags, mounts, and systemd units.

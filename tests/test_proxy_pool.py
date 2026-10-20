@@ -1,4 +1,4 @@
-"""Прокси-only: разбор all_proxys.txt, имена, гео по выходному IP, выбор самых быстрых.
+"""Прокси-only: разбор all_nodes.txt, имена, гео по выходному IP, выбор самых быстрых.
 Все адреса и логины — вымышленные (example.net)."""
 import sys
 import tempfile
@@ -35,9 +35,41 @@ def test_parse_proxy_for_mihomo_and_name_has_no_credentials():
 def test_load_pool_skips_junk_and_dups_keeps_order():
     d = Path(tempfile.mkdtemp())
     f = d / "all_proxys.txt"
-    f.write_text("# hdr\n\nb.example.net:1:u:p\na.example.net:2:u:p\nu:p@b.example.net:1\nvless://x@h:1\n", encoding="utf-8")
+    f.write_text("# hdr\n\nb.example.net:1:u:p\na.example.net:2:u:p\nu:p@b.example.net:1\nssh://x@h:1\n", encoding="utf-8")
     pool = rot.load_pool(f)
     assert [n.name for n in pool] == ["px-b.example.net-1", "px-a.example.net-2"]
+
+
+def test_pool_mixes_vless_and_proxies_in_file_order():
+    d = Path(tempfile.mkdtemp())
+    f = d / "all_nodes.reddit_ok.txt"
+    f.write_text("http://u:p@a.example.net:1\nvless://00000000-0000-4000-8000-000000000001@v.example.net:443?security=tls#us1\n"
+                 "b.example.net:2:u:p\n", encoding="utf-8")
+    pool = rot.load_pool(f)
+    assert [gmc.link_kind(n.uri) for n in pool] == ["proxy", "vless", "proxy"]
+    assert [n.name for n in rot.of_sources(pool, ["vless"])] == ["us1"]
+    assert len(rot.of_sources(pool, ["proxy"])) == 2 and len(rot.of_sources(pool, ["vless", "proxy"])) == 3
+
+
+def test_load_pools_reads_both_files_and_parse_node_dispatches():
+    d = Path(tempfile.mkdtemp())
+    (d / "all_nodes.txt").write_text("vless://00000000-0000-4000-8000-000000000001@v.example.net:443?security=tls#us1\n", encoding="utf-8")
+    (d / "all_proxys.txt").write_text("u:p@a.example.net:1\n", encoding="utf-8")
+    pool = rot.load_pools(d / "all_nodes.txt")
+    assert [gmc.link_kind(n.uri) for n in pool] == ["vless", "proxy"]
+    assert gmc.parse_node(pool[0].uri)["type"] == "vless" and gmc.parse_node(pool[1].uri)["type"] == "http"
+    assert rot.pools_exist(d / "all_nodes.txt") and not rot.pools_exist(d / "none.txt", "none2.txt")
+
+
+def test_pick_nodes_mixes_by_availability():
+    import random
+    mk = lambda i, uri, delay=None: ags.Free(rot.Node(uri, f"n{i}", uri), f"n{i}", "us", delay)
+    prox = [mk(i, f"http://u:p@h{i}.example.net:1", 100 + i) for i in range(4)]
+    vl = [mk(10 + i, f"vless://00000000-0000-4000-8000-00000000000{i}@v{i}.example.net:443#us{i}") for i in range(4)]
+    got = ags.pick_nodes(prox + vl, 4, random.Random(1))
+    assert len(got) == 4 and sum(gmc.link_kind(f.node.uri) == "proxy" for f in got) == 2
+    only = ags.pick_nodes(prox, 2, random.Random(1))
+    assert [f.mihomo_name for f in only] == ["n0", "n1"]
 
 
 def test_pick_fastest_by_delay_then_file_rank():

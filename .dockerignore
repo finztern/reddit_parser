@@ -9,9 +9,10 @@ ARCHITECTURE.md
 cookies/
 storage_state/
 state/
-proxy_accounts.env
+vless_accounts.env
+all_nodes.txt
+all_nodes.reddit_ok.txt
 all_proxys.txt
-all_proxys.reddit_ok.txt
 mihomo_config.yaml
 venv/
 .venv*/

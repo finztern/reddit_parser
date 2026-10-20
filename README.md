@@ -65,7 +65,7 @@ docs/
 ```
 
 Главные входные данные: `config.yaml`, `accounts.yaml` и два файла настроек
-refresh-скриптов. Файл `mihomo_config.yaml` генерируется из секретных прокси
+refresh-скриптов. Файл `mihomo_config.yaml` генерируется из секретных VLESS
 списков; не редактируйте его вручную.
 
 ## Режимы аккаунтов и конфигурация
@@ -137,7 +137,7 @@ python -m pytest -q --cov=main --cov=scraper --cov-report=term-missing
 ```
 
 Некоторые tests подменяют сетевые клиенты и запускают скрипты в синтетических
-копиях проекта; они не проверяют доступность Reddit, прокси-провайдеров,
+копиях проекта; они не проверяют доступность Reddit, VLESS-провайдеров,
 mihomo, коллектора или production-хоста.
 
 GitHub Actions workflow [`.github/workflows/ci.yml`](./.github/workflows/ci.yml)
@@ -159,7 +159,7 @@ pytest-набор. Таблица покрытия добавляется в sum
 скопированные команды из исходных ТЗ. Кратко:
 
 1. Установить Docker Compose, Python venv, Playwright и системные пакеты.
-2. Создать runtime-каталоги; поместить `proxy_accounts.env` и `all_proxys.txt`
+2. Создать runtime-каталоги; поместить `vless_accounts.env` и `all_nodes.txt`
    вне Git и с ограниченными правами.
 3. Сгенерировать конфигурацию mihomo, запустить mihomo и проверить ноды.
 4. Проверить план миграции/выдачи нод; выполнять запись только после проверки.
@@ -186,10 +186,10 @@ docker compose logs -f scraper
 | `storage_state/` | Playwright login state | Login jobs |
 | `state/` | Снимки метрик, события, профили, заявки, паузы, отчёты | Общий каталог контейнера и host tools |
 | `backups/` | Бэкапы сессий; по умолчанию `../backups` относительно проекта | Вне checkout |
-| `proxy_accounts.env`, `all_proxys*.txt` | Секретные/операционные данные нод | Host tools и mihomo generator |
+| `vless_accounts.env`, `all_nodes*.txt`, `all_proxys*.txt` | Секретные/операционные данные нод | Host tools и mihomo generator |
 
 Перечисленные файлы и каталоги должны оставаться вне Git. Не публикуйте
-содержимое cookies, Playwright `storage_state`, пароли noVNC, прокси с логином/паролем или
+содержимое cookies, Playwright `storage_state`, пароли noVNC, VLESS URI или
 логи с чувствительными заголовками. См. [.gitignore](./.gitignore) и
 [DEPLOY.md — безопасность и резервирование](./DEPLOY.md#9-резервирование-и-восстановление).
 

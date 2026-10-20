@@ -275,7 +275,11 @@ rotation:
   request_timeout_seconds: 1800
 
   # --- демон (хост) ---
-  nodes_file: "all_proxys.txt"
+  nodes_file: "all_nodes.txt"        # пул VLESS-ссылок
+  proxies_file: "all_proxys.txt"     # пул HTTP(S)/SOCKS5-прокси (user:pass@host:port, по одному в строке)
+  # Какие источники узлов в работе: [vless], [proxy] или оба. Панель (клавиша n) переопределяет это
+  # через state/node_sources.json; `python3 scripts/node_sources.py --clear` возвращает значение отсюда.
+  node_sources: [vless, proxy]
   mihomo_api: "http://127.0.0.1:9090"
   mihomo_secret: ""
   # Через сколько часов забаненную идентичность можно вернуть в работу.
@@ -307,7 +311,7 @@ fleet:
   guest_enabled: false
   # временно вернуть старый планировщик модуля 05 при переходе
   legacy_scheduler: false
-  # кандидатов на замену брать только из all_proxys.reddit_ok.txt (результат filter_nodes.py --write)
+  # кандидатов на замену брать только из all_nodes.reddit_ok.txt (результат filter_nodes.py --write)
   use_reddit_ok_file: true
 
 # --- параллельный ручной вход (модуль 02, scripts/login_hub.py) ---

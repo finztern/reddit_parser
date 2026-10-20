@@ -180,7 +180,7 @@ class AccountResult:
 
 NAV_HINTS = {
     "browser": "браузер упал или убит (чаще всего нехватка RAM: sudo dmesg -T | grep -i -E 'out of memory|killed process') — к прокси не относится",
-    "proxy_down": "порт не принимает соединения — у слота нет слушателя mihomo (есть ли нода в proxy_accounts.env, "
+    "proxy_down": "порт не принимает соединения — у слота нет слушателя mihomo (есть ли нода в vless_accounts.env, "
                   "выполнен ли generate_mihomo_config.py + restart mihomo?)",
     "node": "порт жив, но нода отвечает плохо или режет соединения (смотри логи mihomo: dial/ошибки)",
     "other": "причина не распознана — смотри текст ошибки",

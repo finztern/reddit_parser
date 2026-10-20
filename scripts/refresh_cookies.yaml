@@ -51,7 +51,7 @@ geo_defaults:
     width: 1920
     height: 1080
 
-# Гео per-аккаунт = геолокация прокси из proxy_accounts.env:
+# Гео per-аккаунт = геолокация VLESS-ноды из vless_accounts.env:
 #   account_1 rs1, 2 bg1, 3 cz2, 4 jp2, 5 sg2, 6 hu1, 7 be1, 8 al1, 9 ua2, 10 de8
 # (раньше здесь стояли гео от старых нод — de/fi/sv/en-US... — они
 #  перекрывали верные дефолты из refresh_cookies.py и давали рассинхрон

@@ -2,14 +2,18 @@
 """
 scripts/filter_nodes.py — какие ноды пула Reddit ещё пускает (главная страница = HTTP 200).
 
-    venv/bin/python3 scripts/filter_nodes.py                 # отчёт по всему all_proxys.txt
-    venv/bin/python3 scripts/filter_nodes.py --write         # + all_proxys.reddit_ok.txt (только годные)
+    venv/bin/python3 scripts/filter_nodes.py                 # отчёт по всему all_nodes.txt
+    venv/bin/python3 scripts/filter_nodes.py --write         # + all_nodes.reddit_ok.txt (только годные)
 
 Раз в сутки запускается таймером filter-nodes.timer (fleet.node_check_interval_hours): годные ноды
-обновляют all_proxys.reddit_ok.txt — из него берут ноды add_login_slots.py и демон ротации (замена
+обновляют all_nodes.reddit_ok.txt — из него берут ноды add_login_slots.py и демон ротации (замена
 сгоревшей ноды логин-слота), — а отчёт пишется в state/node_report.json (виден в
 `rotation_daemon.py --status`). Пустой результат (mihomo лёг / Reddit не пускает никого) файл годных
 нод НЕ затирает.
+
+Проверяются узлы обоих источников — VLESS (all_nodes.txt) и прокси (all_proxys.txt); годные пишутся в
+all_nodes.reddit_ok.txt вперемешку, самые быстрые первыми. Какие источники в работе, решает
+scripts/node_sources.py (config rotation.node_sources / клавиша `n` в панели).
 
 Проверка идёт через delay-API mihomo с expected=200 на https://www.reddit.com/ — через
 каждую ноду, без отдельных браузеров. Ноды должны быть загружены в mihomo
@@ -72,7 +76,7 @@ def resolve_countries(ok: list, workers: int, lookup=None) -> int:
         sys.path.insert(0, str(ags.ROOT))
         from scraper import geoip
         lookup = geoip.lookup_exit_ip
-    todo = [f for f in ok if f.country == "??"]
+    todo = [f for f in ok if f.country == "??" and ags.gmc.link_kind(f.node.uri) == "proxy"]   # у VLESS страна в имени
     path = ags.ROOT / "state" / "proxy_geo.json"
     cache = ags.read_json(path)
     todo = [f for f in todo if not str(cache.get(f.mihomo_name, "")).strip()]
@@ -100,7 +104,7 @@ def resolve_countries(ok: list, workers: int, lookup=None) -> int:
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--nodes-file", default=None)
-    ap.add_argument("--write", action="store_true", help="записать годные ноды в all_proxys.reddit_ok.txt")
+    ap.add_argument("--write", action="store_true", help="записать годные ноды в all_nodes.reddit_ok.txt")
     ap.add_argument("--url", default=ags.REDDIT_PROBE_URL)
     ap.add_argument("--timeout-ms", type=int, default=8000)
     ap.add_argument("--workers", type=int, default=8)
@@ -112,9 +116,9 @@ def main():
     ropts = ags.load_rotation_cfg()
     nf = Path(args.nodes_file or ropts["nodes_file"])
     nf = nf if nf.is_absolute() else ags.ROOT / nf
-    if not nf.exists():
-        sys.exit(f"нет пула нод {nf}")
-    pool = rot.load_pool(nf)
+    if not rot.pools_exist(nf, ropts.get("proxies_file")):
+        sys.exit(f"нет пула нод {nf} (и {rot.proxies_path(nf, ropts.get('proxies_file')).name})")
+    pool = rot.load_pools(nf, ropts.get("proxies_file"))   # проверяем узлы ВСЕХ источников: в mihomo они загружены всегда
     names = rot.pool_names(pool, set(), set())
     nodes = [ags.Free(n, names[n.key], ags.country_of(names[n.key])) for n in pool if names.get(n.key)]
     print(f"Нод в пуле: {len(nodes)}; проверяю {args.url} через каждую (ожидаю 200)...")
@@ -147,11 +151,11 @@ def main():
           f"{report['slots_target']} (запас {report['reserve_nodes']})")
     if report["warn"]:
         print(f"ВНИМАНИЕ: годных нод {report['good']} < fleet.min_good_nodes_warn={report['min_good_nodes_warn']} — "
-              "пополни all_proxys.txt")
+              "пополни all_nodes.txt / all_proxys.txt")
 
     if args.write:
         if not ok:
-            sys.exit("Ни одной годной ноды — all_proxys.reddit_ok.txt НЕ перезаписываю (проверь mihomo/Reddit).")
+            sys.exit("Ни одной годной ноды — all_nodes.reddit_ok.txt НЕ перезаписываю (проверь mihomo/Reddit).")
         out = nf.with_name(nf.stem + ".reddit_ok.txt")
         out.write_text("\n".join(f.node.uri for f in ok) + "\n", encoding="utf-8")
         print(f"\nЗаписано {len(ok)} нод -> {out}")

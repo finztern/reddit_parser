@@ -114,7 +114,8 @@ async def main():
                     backups=int(mcfg.get("events_backups", 3))))
             sender = Sender(config, seen, store_session, log, metrics=metrics)
             scheduler = PollScheduler(config.get, demand=sender.demand,
-                                      runtime_disabled_path=STATE_DIR / "runtime_disabled.json")
+                                      runtime_disabled_path=STATE_DIR / "runtime_disabled.json",
+                                      source_disabled_path=STATE_DIR / "node_source_disabled.json")
             if metrics is not None:
                 metrics.attach(scheduler=scheduler, sender=sender, accounts=all_accounts)
 

@@ -30,7 +30,7 @@ FLEET_DEFAULTS = {
     "node_replace_only": True,        # сгоревшая нода логин-слота = только замена ноды (без смены профиля/сессии)
     "guest_enabled": False,           # гостевой харвест/ротация: код остаётся, но выключен
     "legacy_scheduler": False,        # вернуть старый планировщик модуля 05 на переходный период
-    "use_reddit_ok_file": True,       # кандидатов на замену брать только из all_proxys.reddit_ok.txt (если он есть)
+    "use_reddit_ok_file": True,       # кандидатов на замену брать только из all_nodes.reddit_ok.txt (если он есть)
 }
 
 FIRST_LOGIN_PORT = 7946
@@ -58,7 +58,7 @@ class Paths:
 
     @property
     def env(self) -> Path:
-        return self.root / "proxy_accounts.env"
+        return self.root / "vless_accounts.env"
 
     @property
     def state(self) -> Path:
@@ -104,16 +104,16 @@ def load_fleet_cfg(config_path: Path) -> dict:
 
 
 def load_links(p: "Paths") -> dict[str, str]:
-    """account_N -> http://user:pass@host:port из proxy_accounts.env проекта p (generate_mihomo_config
+    """account_N -> vless://... из vless_accounts.env проекта p (generate_mihomo_config
     читает путь из модульной константы — подменяем её на время вызова)."""
     import generate_mihomo_config as gmc
 
-    old = gmc.PROXY_ENV_PATH
-    gmc.PROXY_ENV_PATH = p.env
+    old = gmc.VLESS_ENV_PATH
+    gmc.VLESS_ENV_PATH = p.env
     try:
-        return gmc.load_proxy_links()
+        return gmc.load_vless_links()
     finally:
-        gmc.PROXY_ENV_PATH = old
+        gmc.VLESS_ENV_PATH = old
 
 
 def load_yaml(path: Path) -> dict:

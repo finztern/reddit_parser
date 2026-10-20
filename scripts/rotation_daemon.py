@@ -11,7 +11,7 @@ Cookies в неё не входят — их харвестим заново п�
      state/requests/account_N.json (status=pending), сам уходит на паузу.
   2. Демон: текущую идентичность слота помечает забаненной (banned_at),
      выбирает следующую:
-        - сначала "целинные" ноды (из all_proxys.txt и нод слотов, которых
+        - сначала "целинные" ноды (из all_nodes.txt и нод слотов, которых
           ещё нет в реестре) с новым отпечатком;
         - потом "отлежавшиеся" — забаненные давно (>= ban_cooldown_hours),
           самая старая первой, с ТЕМ ЖЕ отпечатком, что была у неё раньше.
@@ -28,7 +28,7 @@ Cookies в неё не входят — их харвестим заново п�
 (accounts.yaml: login: true / refresh_cookies.yaml: login_accounts):
   - заявка воркера («нода сгорела»: 403/blocked/пустые листинги подряд) переводит
     слот в needs_node;
-  - демон берёт свободную ГОДНУЮ ноду из запаса (all_proxys.reddit_ok.txt, только
+  - демон берёт свободную ГОДНУЮ ноду из запаса (all_nodes.reddit_ok.txt, только
     нетронутые ноды — без чужих идентичностей), переключает её в mihomo и проверяет;
   - отпечаток слота (профиль) НЕ меняется, сессия и cookies НЕ трогаются, браузер
     не запускается — меняется только IP/нода (и гео в профиле слота);
@@ -86,7 +86,8 @@ BROWSER_LOCK = "/tmp/reddit_scraper_browser.lock"  # общий с systemd-дж�
 DEFAULTS = {
     "enabled": True,
     "slots": [],
-    "nodes_file": "all_proxys.txt",
+    "nodes_file": "all_nodes.txt",
+    "proxies_file": "all_proxys.txt",
     "mihomo_api": "http://127.0.0.1:9090",
     "mihomo_secret": "",
     "request_cooldown_seconds": 600,
@@ -208,18 +209,18 @@ class Daemon:
         if self.args.no_headless:
             self.gcfg["headless"] = False
 
-        assigned = gmc.load_proxy_links()
+        assigned = gmc.load_vless_links()
         key2name, key2uri, reserved_names = {}, {}, set()
         for acc, link in assigned.items():
             try:
-                pname = gmc.parse_proxy(link, acc)["name"]
+                pname = gmc.parse_node(link, acc)["name"]
             except ValueError:
                 pname = acc
             k = rot.node_key(link)
             key2name[k], key2uri[k] = pname, link
             reserved_names.add(pname)
         nf = Path(self.rc["nodes_file"])
-        pool = rot.load_pool(nf if nf.is_absolute() else ROOT / nf)
+        pool = rot.load_pools(nf if nf.is_absolute() else ROOT / nf, self.rc.get("proxies_file"))
         names = rot.pool_names(pool, reserved_names, set(key2name))
         for n in pool:
             if n.key in names:
@@ -242,6 +243,12 @@ class Daemon:
                 self.ok_keys = {n.key for n in ok_pool}
                 self.ok_rank = {n.key: i for i, n in enumerate(ok_pool)}   # быстрые первыми
 
+    def _src_ok(self, key: str) -> bool:
+        """Узел принадлежит включённому источнику (VLESS / прокси) — см. scripts/node_sources.py.
+        Перечитывается при каждом вызове: переключатель панели действует без рестарта демона."""
+        uri = self.env.key2uri.get(key)
+        return uri is None or gmc.link_kind(uri) in rot.active_sources(ROOT)
+
     def guest_names(self) -> list[str]:
         """Гостевые слоты — только при fleet.guest_enabled (иначе гостевой режим выключен)."""
         if not self.fleet.get("guest_enabled"):
@@ -263,7 +270,7 @@ class Daemon:
         }
 
     def ensure_seeds(self) -> None:
-        """Каждому гостевому слоту с нодой в proxy_accounts.env — стартовая
+        """Каждому гостевому слоту с нодой в vless_accounts.env — стартовая
         идентичность (из accounts.yaml / guest yaml). Нужно, чтобы чужие
         стартовые ноды считались занятыми."""
         changed = False
@@ -357,7 +364,7 @@ class Daemon:
 
         def usable(key: str) -> bool:
             return (key in self.env.key2name and key not in self.reserved_keys
-                    and key not in tried and not self._bad(key))
+                    and key not in tried and not self._bad(key) and self._src_ok(key))
 
         virgin = [k for k in self.env.key2name if k not in known and usable(k)]
         random.shuffle(virgin)
@@ -487,14 +494,14 @@ class Daemon:
 
     # ---- логин-слоты: только замена ноды (профиль и сессия не трогаются) ----
     def replacement_candidates(self, tried: set[str]) -> list[str]:
-        """Свободные ГОДНЫЕ ноды из запаса: не назначены слотам в proxy_accounts.env, нет в реестре
-        идентичностей (нетронутые), не плохие, прошли filter_nodes (если all_proxys.reddit_ok.txt есть).
+        """Свободные ГОДНЫЕ ноды из запаса: не назначены слотам в vless_accounts.env, нет в реестре
+        идентичностей (нетронутые), не плохие, прошли filter_nodes (если all_nodes.reddit_ok.txt есть).
         Чужие/забаненные идентичности не берём — у них свой отпечаток, а профиль слота постоянный."""
         known = {i["node_key"] for i in self.st["identities"].values()}
         assigned = {rot.node_key(l) for l in self.env.assigned.values()}
         out = [k for k in self.env.key2name
                if k not in known and k not in assigned and k not in tried and not self._bad(k)
-               and (self.ok_keys is None or k in self.ok_keys)]
+               and (self.ok_keys is None or k in self.ok_keys) and self._src_ok(k)]
         out.sort(key=lambda k: getattr(self, "ok_rank", {}).get(k, 1 << 30))   # самые быстрые первыми
         return out
 
@@ -592,7 +599,7 @@ class Daemon:
         rc = self.rc
         now = time.time()
         if name not in self.st["slots"]:
-            raise Reject("у слота нет ноды в proxy_accounts.env", now + 3600)
+            raise Reject("у слота нет ноды в vless_accounts.env", now + 3600)
         rots = [t for t in self.st["slots"][name].get("rotations", []) if now - t < 86400]
         if len(rots) >= rc["max_rotations_per_day"]:
             raise Reject(f"лимит {rc['max_rotations_per_day']} замен ноды в сутки", min(rots) + 86400)
@@ -676,7 +683,7 @@ class Daemon:
         if name not in rc["slots"] or name not in self.gcfg["guest_accounts"]:
             raise Reject("слот не в rotation.slots / guest_accounts", now + 3600)
         if name not in self.st["slots"]:
-            raise Reject("у слота нет ноды в proxy_accounts.env", now + 3600)
+            raise Reject("у слота нет ноды в vless_accounts.env", now + 3600)
 
         rots = [t for t in self.st["slots"][name].get("rotations", []) if now - t < 86400]
         if len(rots) >= rc["max_rotations_per_day"]:
@@ -776,7 +783,7 @@ def _print_fleet_status(st: dict) -> None:
         if ok_file.exists():
             good = {n.key for n in rot.load_pool(ok_file)}
             known = {i["node_key"] for i in st["identities"].values()}
-            assigned = {rot.node_key(l) for l in gmc.load_proxy_links().values()}
+            assigned = {rot.node_key(l) for l in gmc.load_vless_links().values()}
             spare = len(good - known - assigned)
             warn = "  <-- МАЛО, перепроверь пул: scripts/filter_nodes.py --write" if spare < fleet["reserve_nodes"] else ""
             print(f"\nЗАПАС ГОДНЫХ НОД: {spare} (fleet.reserve_nodes={fleet['reserve_nodes']}){warn}")

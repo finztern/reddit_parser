@@ -116,7 +116,7 @@ DEFAULT_CONFIG = {
         "timezone_id": "America/New_York",
         "viewport": {"width": 1920, "height": 1080},
     },
-    # гео = геолокация прокси аккаунта (см. proxy_accounts.env)
+    # гео = геолокация VLESS-ноды аккаунта (см. vless_accounts.env)
     "account_geo": {
         "account_1": {"locale": "sr-RS", "timezone_id": "Europe/Belgrade"},
         "account_2": {"locale": "bg-BG", "timezone_id": "Europe/Sofia"},
