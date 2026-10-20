@@ -16,7 +16,7 @@ scripts/add_login_slots.py — добирает ЛОГИН-слоты до чи�
   3. Ноды — только свободные: не назначены, нет в реестре демона
      (state/identities.json), не плохие; страны чередуются (round-robin).
   4. Пишет (бэкапы *.bak-addlogin-<время>):
-       vless_accounts.env              account_N = vless://...
+       vless_accounts.env              account_N = http://user:pass@host:port
        accounts.yaml                   enabled: false (до входа), login: true, cookie_file,
                                        storage_state, порт, locale, отпечаток
        scripts/refresh_cookies.yaml    login_accounts += N, account_geo[N] под ноду
@@ -64,8 +64,17 @@ def allocate_login_ports(used: set[int], n: int, check=ags.port_free, first: int
     return out
 
 
-def good_keys_from_file(path: Path) -> set[str]:
-    return {n.key for n in rot.load_pool(path)}
+def good_keys_from_file(path: Path, sources: list[str] | None = None) -> set[str]:
+    pool = rot.load_pool(path)
+    return {n.key for n in (rot.of_sources(pool, sources) if sources is not None else pool)}
+
+
+def good_ranks_from_file(path: Path, sources: list[str] | None = None) -> dict[str, int]:
+    """key -> место в файле (filter_nodes.py пишет самые быстрые первыми); только включённые источники."""
+    pool = rot.load_pool(path)
+    if sources is not None:
+        pool = rot.of_sources(pool, sources)
+    return {n.key: i for i, n in enumerate(pool)}
 
 
 def plan_counts(good: int, spare: int, have: int, missing: int, free: int) -> dict:
@@ -99,16 +108,19 @@ def run(p: lf.Paths, spare: int | None, apply: bool, probe: bool, nodes_file: st
 
     nf = Path(nodes_file or ropts["nodes_file"])
     nf = nf if nf.is_absolute() else p.root / nf
-    if not nf.exists():
-        out(f"ОШИБКА: нет пула нод {nf}")
+    if not rot.pools_exist(nf, ropts.get("proxies_file")):
+        out(f"ОШИБКА: нет пула нод {nf} (и {rot.proxies_path(nf, ropts.get('proxies_file')).name})")
         return 2
+    sources = rot.active_sources(p.root)
+    out(f"Источники узлов: {', '.join(sources)}")
     ok_file = nf.with_name(nf.stem + ".reddit_ok.txt")
 
     # --- годные ноды ---
-    pool = rot.load_pool(nf)
+    pool = rot.load_pools(nf, ropts.get("proxies_file"))
     if probe:
         names = rot.pool_names(pool, set(), set())
-        nodes = [ags.Free(n, names[n.key], ags.country_of(names[n.key])) for n in pool if names.get(n.key)]
+        nodes = [ags.Free(n, names[n.key], ags.country_of(names[n.key]))
+                 for n in rot.of_sources(pool, sources) if names.get(n.key)]
         try:
             ok, bad, absent = ags.probe_nodes(nodes, ropts["mihomo_api"], ropts.get("mihomo_secret", ""),
                                               ags.REDDIT_PROBE_URL, probe_timeout_ms, probe_workers, "200")
@@ -116,12 +128,14 @@ def run(p: lf.Paths, spare: int | None, apply: bool, probe: bool, nodes_file: st
             out(f"ОШИБКА: {e}\nЗапусти mihomo (docker compose up -d mihomo).")
             return 2
         good = {f.node.key for f in ok}
+        ranks = {}
         out(f"Проверка Reddit через mihomo: годных {len(ok)}, не пускает {len(bad)}, нет в mihomo {len(absent)}")
     else:
         if not ok_file.exists():
             out(f"ОШИБКА: нет {ok_file.name} — сначала `scripts/filter_nodes.py --write` (или запусти с --probe).")
             return 2
-        good = good_keys_from_file(ok_file)
+        ranks = good_ranks_from_file(ok_file, sources)
+        good = set(ranks)
         age_h = (time.time() - ok_file.stat().st_mtime) / 3600
         out(f"Годных нод (из {ok_file.name}, возраст {age_h:.1f}ч): {len(good)}")
         if age_h > 2 * fleet["node_check_interval_hours"]:
@@ -131,8 +145,14 @@ def run(p: lf.Paths, spare: int | None, apply: bool, probe: bool, nodes_file: st
 
     # --- свободные годные ноды ---
     # имена в mihomo строятся по ПОЛНОМУ пулу (как generate_mihomo_config), а не по подмножеству годных
-    free_all = ags.find_free_nodes(nf, links, ident)
+    free_all = ags.find_free_nodes(nf, links, ident, sources, ropts.get("proxies_file"))
     free = [f for f in free_all if f.node.key in good]
+    for f in free:
+        f.rank = ranks.get(f.node.key)
+    if probe:   # свежие задержки из probe_nodes лежат в ok-узлах
+        by_key = {f.node.key: f.delay for f in ok}
+        for f in free:
+            f.delay = by_key.get(f.node.key)
 
     have = sum(1 for a in accounts if a["name"] in links and a["name"] in login_names)
     missing = sorted((n for n in login_names if n in by_name and n not in links), key=lf.acc_num)
@@ -145,7 +165,7 @@ def run(p: lf.Paths, spare: int | None, apply: bool, probe: bool, nodes_file: st
         out("Изменений нет — выхожу.")
         return 0
 
-    chosen = ags.pick_diverse(free, c["take"], rng)
+    chosen = ags.pick_nodes(free, c["take"], rng)
     unknown_cc = sorted({f.country for f in chosen if f.country not in rot.COUNTRY_GEO})
     if unknown_cc:
         out(f"ВНИМАНИЕ: страны {', '.join(unknown_cc)} нет в COUNTRY_GEO (rotation.py) — гео будет en-US/New_York.")
@@ -165,7 +185,7 @@ def run(p: lf.Paths, spare: int | None, apply: bool, probe: bool, nodes_file: st
     taken_names = set()
     for acc, link in links.items():
         try:
-            taken_names.add(gmc.parse_vless(link, acc)["name"])
+            taken_names.add(gmc.parse_node(link, acc)["name"])
         except ValueError:
             taken_names.add(acc)
 
@@ -229,6 +249,7 @@ def run(p: lf.Paths, spare: int | None, apply: bool, probe: bool, nodes_file: st
         f.truncate()
     p.login.write_text(new_login, encoding="utf-8")
 
+    rot.sync_source_pauses(p.root)   # аккаунты узлов выключенного источника — на паузу
     out(f"\nOK: записано (бэкапы *.bak-addlogin-{stamp}): vless_accounts.env, accounts.yaml, scripts/refresh_cookies.yaml")
     out("\nДальше (из корня проекта):")
     out("  1) venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo")

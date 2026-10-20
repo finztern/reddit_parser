@@ -3,7 +3,7 @@
 scripts/rotation_daemon.py — демон ротации идентичностей гостевых слотов.
 Работает НА ХОСТЕ (рядом с mihomo и Playwright), не в контейнере.
 
-Идентичность = нода (VLESS) + отпечаток (impersonate/UA/engine/device) + гео.
+Идентичность = прокси + отпечаток (impersonate/UA/engine/device) + гео.
 Cookies в неё не входят — их харвестим заново при каждой смене.
 
 Поток:
@@ -87,6 +87,7 @@ DEFAULTS = {
     "enabled": True,
     "slots": [],
     "nodes_file": "all_nodes.txt",
+    "proxies_file": "all_proxys.txt",
     "mihomo_api": "http://127.0.0.1:9090",
     "mihomo_secret": "",
     "request_cooldown_seconds": 600,
@@ -212,14 +213,14 @@ class Daemon:
         key2name, key2uri, reserved_names = {}, {}, set()
         for acc, link in assigned.items():
             try:
-                pname = gmc.parse_vless(link, acc)["name"]
+                pname = gmc.parse_node(link, acc)["name"]
             except ValueError:
                 pname = acc
             k = rot.node_key(link)
             key2name[k], key2uri[k] = pname, link
             reserved_names.add(pname)
         nf = Path(self.rc["nodes_file"])
-        pool = rot.load_pool(nf if nf.is_absolute() else ROOT / nf)
+        pool = rot.load_pools(nf if nf.is_absolute() else ROOT / nf, self.rc.get("proxies_file"))
         names = rot.pool_names(pool, reserved_names, set(key2name))
         for n in pool:
             if n.key in names:
@@ -233,11 +234,20 @@ class Daemon:
         self.login_cfg = lf.load_yaml(SCRIPTS / "refresh_cookies.yaml")
         self.login_set = lf.login_account_names(self.login_cfg, list(self.accounts.values())) - guest
         self.ok_keys = None
+        self.ok_rank: dict[str, int] = {}
         if self.fleet.get("use_reddit_ok_file"):
             ok_file = nf.with_name(nf.stem + ".reddit_ok.txt") if nf.is_absolute() else \
                 (ROOT / nf).with_name(nf.stem + ".reddit_ok.txt")
             if ok_file.exists():
-                self.ok_keys = {n.key for n in rot.load_pool(ok_file)}
+                ok_pool = rot.load_pool(ok_file)
+                self.ok_keys = {n.key for n in ok_pool}
+                self.ok_rank = {n.key: i for i, n in enumerate(ok_pool)}   # быстрые первыми
+
+    def _src_ok(self, key: str) -> bool:
+        """Узел принадлежит включённому источнику (VLESS / прокси) — см. scripts/node_sources.py.
+        Перечитывается при каждом вызове: переключатель панели действует без рестарта демона."""
+        uri = self.env.key2uri.get(key)
+        return uri is None or gmc.link_kind(uri) in rot.active_sources(ROOT)
 
     def guest_names(self) -> list[str]:
         """Гостевые слоты — только при fleet.guest_enabled (иначе гостевой режим выключен)."""
@@ -354,7 +364,7 @@ class Daemon:
 
         def usable(key: str) -> bool:
             return (key in self.env.key2name and key not in self.reserved_keys
-                    and key not in tried and not self._bad(key))
+                    and key not in tried and not self._bad(key) and self._src_ok(key))
 
         virgin = [k for k in self.env.key2name if k not in known and usable(k)]
         random.shuffle(virgin)
@@ -491,8 +501,8 @@ class Daemon:
         assigned = {rot.node_key(l) for l in self.env.assigned.values()}
         out = [k for k in self.env.key2name
                if k not in known and k not in assigned and k not in tried and not self._bad(k)
-               and (self.ok_keys is None or k in self.ok_keys)]
-        random.shuffle(out)
+               and (self.ok_keys is None or k in self.ok_keys) and self._src_ok(k)]
+        out.sort(key=lambda k: getattr(self, "ok_rank", {}).get(k, 1 << 30))   # самые быстрые первыми
         return out
 
     def replace_node(self, name: str) -> bool:

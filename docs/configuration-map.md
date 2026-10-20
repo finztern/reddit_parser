@@ -215,6 +215,8 @@ rotation.empty_streak_trigger
 rotation.request_cooldown_seconds
 rotation.request_timeout_seconds
 rotation.nodes_file
+rotation.proxies_file
+rotation.node_sources
 rotation.mihomo_api
 rotation.mihomo_secret
 rotation.ban_cooldown_hours

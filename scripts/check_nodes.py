@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/check_nodes.py — жива ли цепочка mihomo -> VLESS-нода -> Reddit.
+scripts/check_nodes.py — жива ли цепочка mihomo -> узел (VLESS или прокси) -> Reddit.
 
     python3 scripts/check_nodes.py                    # все порты из mihomo_config.yaml
     python3 scripts/check_nodes.py --account account_5 --account account_10
@@ -9,7 +9,7 @@ scripts/check_nodes.py — жива ли цепочка mihomo -> VLESS-нода
 Слои (каждый локализует свою причину):
   0. напрямую с хоста (без прокси): интернет и Reddit с IP самого сервера
   1. локальные порты mihomo открыты?
-  2. VLESS-сервер достижим (TCP + TLS-рукопожатие с SNI)?
+  2. сервер узла достижим (VLESS: TCP + TLS с SNI; прокси: TCP)?
   3. через каждый порт: нейтральный сайт (Cloudflare trace) -> нода жива, выходной IP
   4. через каждый порт: Reddit (главная и comments.json без cookies)
   5. встроенный delay-тест mihomo (external-controller :9090), если доступен
@@ -80,6 +80,15 @@ def tcp_tls(server, port, sni, timeout=8):
         return False, f"TLS: {e}", time.time() - t0
     finally:
         s.close()
+
+
+def tcp_connect(server, port, timeout=8):
+    t0 = time.time()
+    try:
+        socket.create_connection((server, port), timeout=timeout).close()
+        return True, "TCP ok", time.time() - t0
+    except Exception as e:
+        return False, f"TCP: {e}", time.time() - t0
 
 
 def port_open(port, timeout=2):
@@ -156,18 +165,22 @@ def main() -> int:
     # ---- 2. upstream
     print()
     print("=" * 72)
-    print("2. VLESS-СЕРВЕР (TCP + TLS с SNI)")
+    print("2. СЕРВЕР УЗЛА (VLESS: TCP + TLS с SNI; прокси: TCP)")
     print("=" * 72)
     ups = {}
     for node in {n for _, _, n in rows}:
         p = proxies.get(node)
         if p:
-            ups[(p["server"], p["port"], p.get("servername", ""))] = None
+            ups[(p["server"], p["port"], p.get("servername", "") if p.get("type") == "vless" else None)] = None
     up_ok = {}
     for key in ups:
-        okk, msg, dt = tcp_tls(*key)
+        if key[2] is None:   # прокси: TLS нет
+            okk, msg, dt = tcp_connect(key[0], key[1])
+            print(f"  {key[0]}:{key[1]}  {msg} ({dt:.1f}s)")
+        else:
+            okk, msg, dt = tcp_tls(*key)
+            print(f"  {key[0]}:{key[1]} sni={key[2][:28]}…  {msg} ({dt:.1f}s)")
         up_ok[key] = okk
-        print(f"  {key[0]}:{key[1]} sni={key[2][:28]}…  {msg} ({dt:.1f}s)")
 
     # ---- 3-4. через каждый порт
     def probe(row):

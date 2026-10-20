@@ -19,6 +19,9 @@ share the writable state volume.
 | `state/slots/<account>.json` | `scripts/rotation_daemon.py` | Worker, guest-cookie harvester, profile/metrics tools | Currently active slot node/profile |
 | `state/identities.json` | `scripts/rotation_daemon.py` | Rotation daemon, `scripts/login_fleet.py`, status tools | Persistent node/identity registry and daemon-owned slot state |
 | `state/runtime_disabled.json` | `scripts/dashboard.py` | `scraper/scheduler.py`, dashboard | Operator pause list, separate from YAML configuration |
+| `state/node_sources.json` | `scripts/dashboard.py` (key `n`), `scripts/node_sources.py` | `scripts/node_sources.py`, `add_*_slots.py`, `rotation_daemon.py`, dashboard | Operator override of `rotation.node_sources` (`{"sources": ["vless", "proxy"]}`) |
+| `state/node_source_disabled.json` | `scripts/node_sources.py` | `scraper/scheduler.py` | Accounts whose node belongs to a disabled source (`{"disabled": [...]}`), paused like `runtime_disabled.json` |
+| `state/proxy_geo.json` | `scripts/filter_nodes.py` | `scripts/rotation.py` | Proxy name -> country from the real exit IP, used for slot locale/timezone |
 | `state/check_login/<account>` | `scripts/rotation_daemon.py` | `scripts/login_fleet.py`, dashboard, login jobs | Marker that a login session must be verified after node replacement |
 | `state/login_hub/status.json` | `scripts/login_hub.py` | `scripts/dashboard.py` | Current login-hub queue and browser-session status |
 | `state/human/<account>.json` | `scripts/human_session.py` | The same module | Per-account human-session schedule and last result |

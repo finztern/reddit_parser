@@ -14,17 +14,19 @@
 
     docker compose restart mihomo
 
-Формат vless_accounts.env — по одной ссылке на аккаунт:
+Формат vless_accounts.env — по одной ссылке на аккаунт (VLESS или прокси, можно вперемешку):
 
     account_1 = vless://uuid@host:port?...#name
-    account_2 = vless://uuid@host:port?...#name
+    account_2 = http://user:pass@host:port#имя
 
 Строки с "#" в начале и пустые строки игнорируются. Аккаунты, для
 которых в vless_accounts.env нет строки, не получат слушателя в mihomo —
 их воркер не сможет подключиться. Это касается и гостевых слотов
 account_11..25: пока для них нет ссылок, они должны быть enabled: false.
 
-Если рядом лежит all_nodes.txt, его ноды добавляются в proxies, а ВСЕ
+Пулы: all_nodes.txt (VLESS) и all_proxys.txt (HTTP(S)/SOCKS5-прокси, по одному в строке);
+какие из них подключать, решает rotation.node_sources / панель (см. scripts/node_sources.py).
+Если рядом лежит пул, его ноды добавляются в proxies, а ВСЕ
 ноды (пул + ноды других аккаунтов) — в КАЖДУЮ группу pg-account_N (после
 назначенной ноды) — тогда rotation_daemon.py сможет переключать ноду
 через API mihomo без рестарта. Какие ноды слот вправе брать, решает
@@ -81,10 +83,11 @@ def load_vless_links() -> dict[str, str]:
             print(f"ПРЕДУПРЕЖДЕНИЕ: не смог разобрать строку в vless_accounts.env: {raw_line!r}", file=sys.stderr)
             continue
         account, link = m.group(1), m.group(2)
-        if not link.startswith("vless://"):
-            print(f"ПРЕДУПРЕЖДЕНИЕ: {account} — ссылка не начинается с vless://, пропускаю", file=sys.stderr)
+        norm = normalize_link(link)
+        if not norm:
+            print(f"ПРЕДУПРЕЖДЕНИЕ: {account} — ни vless://, ни прокси (user:pass@host:port), пропускаю", file=sys.stderr)
             continue
-        links[account] = link
+        links[account] = norm
     return links
 
 
@@ -185,6 +188,98 @@ def parse_vless(uri: str, fallback_name: str) -> dict:
     return proxy
 
 
+PROXY_SCHEMES = ("http", "https", "socks5")
+
+
+def normalize_proxy(raw: str) -> str | None:
+    """Строка из all_nodes.txt -> каноничный URI `scheme://user:pass@host:port[#имя]`
+    или None, если строка не похожа на прокси. Понимает:
+      scheme://user:pass@host:port, user:pass@host:port, host:port:user:pass, host:port.
+    Без схемы считается http. Хвост `#имя` (необязательный) сохраняется."""
+    line = (raw or "").strip()
+    if not line or line.startswith("#"):
+        return None
+    line, _, frag = line.partition("#")
+    line = line.strip()
+    frag = frag.strip()
+    scheme = "http"
+    if "://" in line:
+        scheme, _, line = line.partition("://")
+        scheme = scheme.lower()
+        if scheme not in PROXY_SCHEMES:
+            return None
+    if "@" in line:
+        auth, _, hostport = line.rpartition("@")
+        user, _, pwd = auth.partition(":")
+    else:
+        parts = line.split(":")
+        if len(parts) == 2:
+            hostport, user, pwd = line, "", ""
+        elif len(parts) == 4:
+            hostport, user, pwd = f"{parts[0]}:{parts[1]}", parts[2], parts[3]
+        else:
+            return None
+    host, sep, port = hostport.rpartition(":")
+    if not sep or not host or not port.isdigit() or not (0 < int(port) < 65536):
+        return None
+    if any(c in host for c in " /?@"):
+        return None
+    cred = ""
+    if user or pwd:
+        cred = (urllib.parse.quote(urllib.parse.unquote(user), safe="")
+                + ":" + urllib.parse.quote(urllib.parse.unquote(pwd), safe="") + "@")
+    return f"{scheme}://{cred}{host}:{int(port)}" + (f"#{frag}" if frag else "")
+
+
+def proxy_name(uri: str) -> str:
+    """Имя прокси в mihomo: #фрагмент, иначе px-host-port (без учётных данных)."""
+    parsed = urllib.parse.urlsplit(uri)
+    frag = urllib.parse.unquote(parsed.fragment).strip()
+    return frag or f"px-{parsed.hostname}-{parsed.port}"
+
+
+def parse_proxy(uri: str, fallback_name: str = "") -> dict:
+    """Один URI прокси -> словарь для mihomo proxies[] (type http/socks5)."""
+    norm = normalize_proxy(uri)
+    if not norm:
+        raise ValueError("не прокси-ссылка (ожидаю user:pass@host:port)")
+    parsed = urllib.parse.urlsplit(norm)
+    name = proxy_name(norm) if parsed.fragment else (fallback_name or proxy_name(norm))
+    proxy: dict = {
+        "name": name,
+        "type": "socks5" if parsed.scheme == "socks5" else "http",
+        "server": parsed.hostname,
+        "port": int(parsed.port),
+    }
+    if parsed.username:
+        proxy["username"] = urllib.parse.unquote(parsed.username)
+        proxy["password"] = urllib.parse.unquote(parsed.password or "")
+    if parsed.scheme == "https":
+        proxy["tls"] = True
+    return proxy
+
+
+def link_kind(uri: str) -> str:
+    """'vless' для vless://, 'proxy' для HTTP(S)/SOCKS5-прокси."""
+    return "vless" if (uri or "").lstrip().lower().startswith("vless://") else "proxy"
+
+
+def normalize_link(raw: str) -> str | None:
+    """Строка из vless_accounts.env / пула -> каноничная ссылка узла (vless:// как есть,
+    прокси — через normalize_proxy) или None."""
+    s = (raw or "").strip()
+    if s.lower().startswith("vless://"):
+        return s
+    return normalize_proxy(s)
+
+
+def parse_node(uri: str, fallback_name: str = "") -> dict:
+    """vless:// или прокси-URI -> словарь для mihomo proxies[]."""
+    if link_kind(uri) == "vless":
+        return parse_vless(uri, fallback_name)
+    return parse_proxy(uri, fallback_name)
+
+
 def build_config(account_ports: dict[str, int], account_links: dict[str, str]) -> dict:
     proxies = []
     proxy_groups = []
@@ -197,7 +292,7 @@ def build_config(account_ports: dict[str, int], account_links: dict[str, str]) -
         link = account_links[account]
         port = account_ports[account]
         try:
-            proxy = parse_vless(link, fallback_name=account)
+            proxy = parse_node(link, fallback_name=account)
         except ValueError as e:
             print(f"ОШИБКА в ссылке для {account}: {e}", file=sys.stderr)
             continue

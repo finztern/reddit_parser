@@ -11,6 +11,8 @@ storage_state/
 state/
 vless_accounts.env
 all_nodes.txt
+all_nodes.reddit_ok.txt
+all_proxys.txt
 mihomo_config.yaml
 venv/
 .venv*/

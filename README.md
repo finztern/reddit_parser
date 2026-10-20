@@ -186,7 +186,7 @@ docker compose logs -f scraper
 | `storage_state/` | Playwright login state | Login jobs |
 | `state/` | Снимки метрик, события, профили, заявки, паузы, отчёты | Общий каталог контейнера и host tools |
 | `backups/` | Бэкапы сессий; по умолчанию `../backups` относительно проекта | Вне checkout |
-| `vless_accounts.env`, `all_nodes*.txt` | Секретные/операционные данные нод | Host tools и mihomo generator |
+| `vless_accounts.env`, `all_nodes*.txt`, `all_proxys*.txt` | Секретные/операционные данные нод | Host tools и mihomo generator |
 
 Перечисленные файлы и каталоги должны оставаться вне Git. Не публикуйте
 содержимое cookies, Playwright `storage_state`, пароли noVNC, VLESS URI или

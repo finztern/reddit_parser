@@ -25,7 +25,7 @@ scripts/add_guest_slots.py — добавляет гостевые слоты и
      слотов (account_{max+1}...) со свободными портами и уникальными
      отпечатками (impersonate берётся из установленного curl_cffi).
   5. Пишет (с бэкапами *.bak-addslots-<время>):
-       vless_accounts.env                  account_N = vless://...
+       vless_accounts.env                  account_N = http://user:pass@host:port
        accounts.yaml                       enabled: true, порт, locale, отпечаток
        scripts/refresh_guest_cookies.yaml  guest_accounts[N] (+geo под ноду)
        config.yaml                         rotation.slots += N
@@ -93,8 +93,7 @@ def acc_num(name: str) -> int:
 
 
 def country_of(node_name: str) -> str:
-    m = re.match(r"([a-z]{2})\d", node_name.strip().lower())
-    return m.group(1) if m else "??"
+    return rot.country_for(node_name)
 
 
 def read_json(path: Path) -> dict:
@@ -118,15 +117,18 @@ class Free:
     mihomo_name: str      # имя прокси в mihomo (как в сгенерированном конфиге)
     country: str
     delay: int | None = None
+    rank: int | None = None   # место в *.reddit_ok.txt (0 = самый быстрый), если задержку не мерили
 
 
-def find_free_nodes(pool_path: Path, assigned: dict[str, str], ident: dict) -> list[Free]:
-    pool = rot.load_pool(pool_path)
+def find_free_nodes(pool_path: Path, assigned: dict[str, str], ident: dict,
+                    sources: list[str] | None = None, proxies_file: str | None = None) -> list[Free]:
+    pool = rot.load_pools(pool_path, proxies_file)   # имена — по ПОЛНОМУ пулу, как в mihomo_config.yaml
+    allowed = {n.key for n in (rot.of_sources(pool, sources) if sources is not None else pool)}
     assigned_keys = {rot.node_key(l) for l in assigned.values()}
     reserved_names = set()
     for acc, link in assigned.items():
         try:
-            reserved_names.add(gmc.parse_vless(link, acc)["name"])
+            reserved_names.add(gmc.parse_node(link, acc)["name"])
         except ValueError:
             reserved_names.add(acc)
     names = rot.pool_names(pool, reserved_names, assigned_keys)
@@ -139,7 +141,7 @@ def find_free_nodes(pool_path: Path, assigned: dict[str, str], ident: dict) -> l
 
     out = []
     for n in pool:
-        if n.key in assigned_keys or n.key in known or n.key in bad:
+        if n.key not in allowed or n.key in assigned_keys or n.key in known or n.key in bad:
             continue
         name = names.get(n.key)
         if name:
@@ -183,6 +185,30 @@ def probe_nodes(free: list[Free], api: str, secret: str, url: str, timeout_ms: i
 # ---------------------------------------------------------------- #
 #  Выбор нод и сборка плана
 # ---------------------------------------------------------------- #
+
+def pick_fastest(cands: list[Free], n: int, rng: random.Random | None = None) -> list[Free]:
+    """n самых быстрых: по задержке (mihomo delay-API), без замера — по месту в
+    *.reddit_ok.txt (его пишет filter_nodes.py, быстрые первыми)."""
+    inf = float("inf")
+    ordered = sorted(cands, key=lambda c: (c.delay if c.delay is not None else inf,
+                                           c.rank if c.rank is not None else inf))
+    return ordered[:n]
+
+
+def pick_nodes(cands: list[Free], n: int, rng: random.Random) -> list[Free]:
+    """Выбор узлов для слотов. Прокси — самые быстрые первыми; VLESS — по странам (pick_diverse, как раньше).
+    Если свободны оба типа, берём пропорционально их числу."""
+    prox = [c for c in cands if gmc.link_kind(c.node.uri) == "proxy"]
+    vl = [c for c in cands if gmc.link_kind(c.node.uri) != "proxy"]
+    if not prox:
+        return pick_diverse(vl, n, rng)
+    if not vl:
+        return pick_fastest(prox, n, rng)
+    k = min(len(prox), round(n * len(prox) / (len(prox) + len(vl))))
+    k_v = min(len(vl), n - k)
+    k = min(len(prox), n - k_v)
+    return pick_fastest(prox, k, rng) + pick_diverse(vl, k_v, rng)
+
 
 def pick_diverse(cands: list[Free], n: int, rng: random.Random) -> list[Free]:
     """Round-robin по странам; ноды известных стран — раньше неизвестных."""
@@ -229,9 +255,9 @@ def allocate_ports(used: set[int], n: int, check=port_free) -> list[int]:
 
 
 def unique_link(uri: str, taken_names: set[str]) -> tuple[str, str]:
-    """Имя прокси в mihomo берётся из #фрагмента ссылки и обязано быть
+    """Имя прокси в mihomo берётся из #фрагмента ссылки (иначе px-host-port) и обязано быть
     уникальным — при коллизии дописываем ~N. -> (uri, имя)."""
-    base = urllib.parse.unquote(urllib.parse.urlsplit(uri).fragment).strip() or uri[-12:]
+    base = gmc.proxy_name(uri)
     name, i = base, 2
     while name in taken_names:
         name = f"{base}~{i}"
@@ -435,7 +461,7 @@ def main() -> int:
             if not link or slot not in by_name:
                 continue
             try:
-                pname = gmc.parse_vless(link, slot)["name"]
+                pname = gmc.parse_node(link, slot)["name"]
             except ValueError:
                 continue
             cand.append((slot, Free(None, pname, country_of(pname))))
@@ -462,9 +488,11 @@ def main() -> int:
     # --- свободные ноды ---
     nf = Path(args.nodes_file or ropts["nodes_file"])
     nf = nf if nf.is_absolute() else ROOT / nf
-    if want_total and not nf.exists():
-        sys.exit(f"ОШИБКА: нет пула нод {nf} (all_nodes.txt) — свободные ноды взять неоткуда.")
-    free = find_free_nodes(nf, links, ident) if want_total else []
+    if want_total and not rot.pools_exist(nf, ropts.get("proxies_file")):
+        sys.exit(f"ОШИБКА: нет пула нод {nf} (all_nodes.txt) и {rot.proxies_path(nf, ropts.get('proxies_file')).name} "
+                 "— свободные ноды взять неоткуда.")
+    free = (find_free_nodes(nf, links, ident, rot.active_sources(ROOT), ropts.get("proxies_file"))
+            if want_total else [])
     if want_total:
         print(f"Пул {nf.name}: свободных (не назначены, нет в реестре ротации, не плохие): {len(free)}")
 
@@ -497,7 +525,7 @@ def main() -> int:
     if want_total and take == 0:
         sys.exit("Свободных нод для новых слотов нет (или всё ушло в запас) — ничего не делаю.")
 
-    chosen = pick_diverse(alive, take, rng)
+    chosen = pick_nodes(alive, take, rng)
     unknown_cc = sorted({c.country for c in chosen if c.country not in rot.COUNTRY_GEO})
     if unknown_cc:
         print(f"ВНИМАНИЕ: страны нод {', '.join(unknown_cc)} нет в COUNTRY_GEO (rotation.py) — "
@@ -523,7 +551,7 @@ def main() -> int:
     taken_names = set()
     for acc, link in links.items():
         try:
-            taken_names.add(gmc.parse_vless(link, acc)["name"])
+            taken_names.add(gmc.parse_node(link, acc)["name"])
         except ValueError:
             taken_names.add(acc)
 
@@ -642,6 +670,7 @@ def main() -> int:
         return 1
     yaml.safe_load(GUEST_PATH.read_text(encoding="utf-8"))
 
+    rot.sync_source_pauses(ROOT)   # аккаунты узлов выключенного источника — на паузу
     print(f"\nOK: записано (бэкапы *.bak-addslots-{stamp}): vless_accounts.env, accounts.yaml, "
           "scripts/refresh_guest_cookies.yaml, config.yaml")
     print("\nДальше (из корня проекта):")
