@@ -199,8 +199,10 @@ venv/bin/python3 scripts/attach_proxies.py add --count 10        # план: 10 
 venv/bin/python3 scripts/attach_proxies.py add --count 10 --apply
 ```
 
-- **Скорость.** Каждый кандидат проверяется запросом на Reddit через сам прокси (нужны HTTP 200 и не
-  страница-капча); mihomo для этого не нужен. VLESS проверяются delay-API mihomo. Аккаунты получают
+- **Скорость.** Каждый кандидат проверяется запросом к `https://www.reddit.com/robots.txt` через сам
+  прокси (нужен HTTP 200); mihomo для этого не нужен. Главную и `.json` без cookies Reddit отдаёт анониму
+  с 403 даже через рабочий прокси, поэтому замер проверяет доступность и скорость, а пустит ли Reddit в
+  браузер, видно при входе через noVNC (дальше `replace`); другой URL — `--probe-url`. VLESS проверяются delay-API mihomo. Аккаунты получают
   узлы от самых быстрых к самым медленным, неизмеренные VLESS — в самом конце.
 - **Что создаётся.** Гостевой слот (порт, `accounts.yaml`, `refresh_guest_cookies.yaml`,
   `rotation.slots`), строка `account_N = ...` в `vless_accounts.env` и профиль устройства
@@ -211,7 +213,7 @@ venv/bin/python3 scripts/attach_proxies.py add --count 10 --apply
   ```bash
   venv/bin/python3 scripts/attach_proxies.py replace --accounts 12 13 --apply
   venv/bin/python3 scripts/attach_proxies.py replace --from-hub --apply   # у кого hub показал капчу
-  venv/bin/python3 scripts/attach_proxies.py replace --auto --apply       # проверить Reddit через текущие прокси
+  venv/bin/python3 scripts/attach_proxies.py replace --auto --apply       # проверить доступность Reddit через текущие прокси
   ```
 
   Для аккаунта берётся следующий по скорости свободный узел, генерируется другое устройство (старый
