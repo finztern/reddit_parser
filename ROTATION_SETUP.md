@@ -184,9 +184,12 @@ venv/bin/python3 scripts/rotation_daemon.py --status
   выходному IP (`state/proxy_geo.json`, `--no-geo` отключает) — по ней выбираются locale/timezone.
 - Один узел = один аккаунт (уникальный IP): уже назначенные узлы свободными не считаются.
 
-## Автопривязка прокси к гостевым аккаунтам (`attach_proxies.py`)
+## Автопривязка прокси к аккаунтам (`attach_proxies.py`)
 
-Отдельный скрипт для сценария «положил прокси в файл — аккаунты сами их получили». Прокси лежат в
+Отдельный скрипт для сценария «положил прокси в файл — аккаунты сами их получили». `--mode login` (по
+умолчанию) создаёт ЛОГИН-слоты: `login: true`, `enabled: false` до входа через noVNC, запись в
+`refresh_cookies.yaml`; `--mode guest` — гостевые слоты. Запись «всё или ничего»: файлы сначала
+формируются и проверяются в памяти. Прокси лежат в
 `all_proxies.txt` (по одному в строке, формат тот же, что у `all_proxys.txt`; файл секретный и в
 `.gitignore`/`.dockerignore`). Если его нет, берётся файл из `rotation.proxies_file`. VLESS-ноды из
 `all_nodes.txt` участвуют в подборе наравне с прокси (`--sources proxy` — только прокси). Без `--apply`
@@ -204,8 +207,8 @@ venv/bin/python3 scripts/attach_proxies.py add --count 10 --apply
   с 403 даже через рабочий прокси, поэтому замер проверяет доступность и скорость, а пустит ли Reddit в
   браузер, видно при входе через noVNC (дальше `replace`); другой URL — `--probe-url`. VLESS проверяются delay-API mihomo. Аккаунты получают
   узлы от самых быстрых к самым медленным, неизмеренные VLESS — в самом конце.
-- **Что создаётся.** Гостевой слот (порт, `accounts.yaml`, `refresh_guest_cookies.yaml`,
-  `rotation.slots`), строка `account_N = ...` в `vless_accounts.env` и профиль устройства
+- **Что создаётся.** Слот (порт, `accounts.yaml`; login — `refresh_cookies.yaml`, guest —
+  `refresh_guest_cookies.yaml` и `rotation.slots`), строка `account_N = ...` в `vless_accounts.env` и профиль устройства
   `state/profiles/account_N.json`; гео (locale/timezone) определяется по выходному IP прокси. Гостевым
   слотам без узла сначала достаётся узел, потом создаются новые аккаунты.
 - **Капча или Reddit недоступен** (после попытки входа через `login_hub.py --accounts ...`):
@@ -219,7 +222,8 @@ venv/bin/python3 scripts/attach_proxies.py add --count 10 --apply
   Для аккаунта берётся следующий по скорости свободный узел, генерируется другое устройство (старый
   профиль уходит в `state/profiles/.history/`), старый узел попадает в чёрный список
   (`state/proxy_attach.json` и `bad_nodes` реестра демона, по умолчанию на 72 ч, `--bad-ttl-hours`).
-  Только гостевые аккаунты; cookies после замены нужно получить заново.
+  В режиме login аккаунты с сохранённой сессией (`storage_state/`) пропускаются: замена сбросит вход
+  (`--force`, если так и надо). Cookies после замены нужно получить заново.
 - После `--apply`: `generate_mihomo_config.py` + `docker compose restart mihomo`, вход через
   `login_hub.py`, перезапуск `rotation-daemon` и `scraper` (скрипт печатает эти шаги).
 - Чтобы демон ротации и mihomo знали весь пул (а не только выданные прокси), укажите

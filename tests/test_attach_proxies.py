@@ -89,7 +89,8 @@ def make_project(tmp_path, monkeypatch, extra_proxies=()):
                       "CONFIG_PATH": tmp_path / "config.yaml", "ENV_PATH": tmp_path / "vless_accounts.env",
                       "GUEST_PATH": tmp_path / "guest.yaml", "STATE_DIR": st, "IDENT_PATH": st / "identities.json",
                       "PA_STATE_PATH": st / "proxy_attach.json", "GEO_CACHE_PATH": st / "proxy_geo.json",
-                      "HUB_STATUS_PATH": st / "login_hub" / "status.json"}.items():
+                      "HUB_STATUS_PATH": st / "login_hub" / "status.json",
+                      "LOGIN_PATH": tmp_path / "login.yaml", "STORAGE_DIR": tmp_path / "storage_state"}.items():
         monkeypatch.setattr(ap, attr, val)
     monkeypatch.setattr(rot, "STATE_FILE", st / "rotation_state.json")
     monkeypatch.setattr(rot, "STATE_DIR", st)
@@ -103,8 +104,52 @@ def make_project(tmp_path, monkeypatch, extra_proxies=()):
     return tmp_path
 
 
-def run(*argv):
-    return ap.main([*argv, "--no-geo", "--seed", "7"])
+def run(*argv, mode="guest"):
+    return ap.main([*argv, "--no-geo", "--seed", "7", "--mode", mode])
+
+
+LOGIN_ACCOUNTS = """\
+accounts:
+  - name: account_1
+    enabled: true
+    login: true
+    cookie_file: cookies/account_1.json
+    storage_state: storage_state/account_1.json
+    proxy_port: 7892
+    locale: en-US
+    impersonate: chrome131
+    user_agent: "UA1"
+
+  - name: account_2
+    enabled: false
+    login: true
+    cookie_file: cookies/account_2.json
+    storage_state: storage_state/account_2.json
+    proxy_port: 7893
+    locale: en-US
+    impersonate: chrome119
+    user_agent: "UA2"
+"""
+
+LOGIN_YAML = """\
+login_accounts:
+  - account_1
+  - account_2
+
+account_geo:
+  account_1: {locale: "en-US", timezone_id: "America/New_York"}
+  account_2: {locale: "en-US", timezone_id: "America/New_York"}
+"""
+
+
+def make_login_project(tmp_path, monkeypatch):
+    """Парк, где ВСЕ аккаунты логин-слоты (гостевых нет, refresh_guest_cookies.yaml не существует)."""
+    make_project(tmp_path, monkeypatch)
+    (tmp_path / "accounts.yaml").write_text(LOGIN_ACCOUNTS, encoding="utf-8")
+    (tmp_path / "login.yaml").write_text(LOGIN_YAML, encoding="utf-8")
+    (tmp_path / "guest.yaml").unlink()
+    (tmp_path / "vless_accounts.env").write_text(f"account_1 = {OLD_PROXY}\n", encoding="utf-8")
+    return tmp_path
 
 
 def test_judge_response():
@@ -268,7 +313,7 @@ def test_replace_rejects_login_accounts(tmp_path, monkeypatch):
     try:
         run("replace", "--accounts", "1", "--apply")
     except SystemExit as e:
-        assert "не гостевые" in str(e)
+        assert "не аккаунты режима guest" in str(e)
     else:
         raise AssertionError("логин-аккаунт заменять нельзя")
 
@@ -284,3 +329,59 @@ def test_replace_from_hub_uses_captcha_status(tmp_path, monkeypatch):
     assert OLD_PROXY.split("@")[1] not in env and "10.1.0.2" in env     # самый быстрый свободный
     assert time.time() - json.loads((tmp_path / "state" / "proxy_attach.json").read_text())["bad"][
         rot.node_key(OLD_PROXY)]["ts"] < 60
+
+
+def test_login_add_creates_login_slots_disabled(tmp_path, monkeypatch):
+    make_login_project(tmp_path, monkeypatch)
+    assert run("add", "--count", "1", "--apply", mode="login") == 0
+    accounts = {a["name"]: a for a in yaml.safe_load((tmp_path / "accounts.yaml").read_text())["accounts"]}
+    env = (tmp_path / "vless_accounts.env").read_text()
+    # account_2 — логин-слот без узла: получил самый быстрый; account_3 — новый, следующий
+    assert "10.1.0.2" in next(ln for ln in env.splitlines() if ln.startswith("account_2"))
+    assert "10.1.0.1" in next(ln for ln in env.splitlines() if ln.startswith("account_3"))
+    new = accounts["account_3"]
+    assert new["login"] is True and new["enabled"] is False            # включится только после входа
+    assert new["storage_state"] == "storage_state/account_3.json" and new["proxy_port"] >= 7916
+    assert accounts["account_2"]["enabled"] is False and accounts["account_1"]["enabled"] is True
+    login = yaml.safe_load((tmp_path / "login.yaml").read_text())
+    assert "account_3" in login["login_accounts"] and login["account_geo"]["account_3"]["locale"] == "en-US"
+    assert pg.load_profile("account_3", tmp_path / "state") and pg.load_profile("account_2", tmp_path / "state")
+    assert not (tmp_path / "guest.yaml").exists()                      # гостевые файлы не создаются
+    assert "rotation" in (tmp_path / "config.yaml").read_text() and "account_3" not in (tmp_path / "config.yaml").read_text()
+
+
+def test_login_replace_skips_accounts_with_session_unless_forced(tmp_path, monkeypatch):
+    make_login_project(tmp_path, monkeypatch)
+    assert run("add", "--count", "1", "--apply", mode="login") == 0
+    (tmp_path / "storage_state").mkdir()
+    (tmp_path / "storage_state" / "account_3.json").write_text("{}", encoding="utf-8")
+    before = (tmp_path / "vless_accounts.env").read_text()
+    assert run("replace", "--accounts", "3", "--apply", mode="login") == 0
+    assert (tmp_path / "vless_accounts.env").read_text() == before     # сессию не сбрасываем без --force
+    assert run("replace", "--accounts", "3", "--force", "--apply", mode="login") == 0
+    assert (tmp_path / "vless_accounts.env").read_text() != before
+    PROXIES["10.1.0.6"] = ("u:p@10.1.0.6:3129#us6", 400)               # свободные прокси к этому моменту кончились
+    with open(tmp_path / "all_proxies.txt", "a", encoding="utf-8") as fh:
+        fh.write(PROXIES["10.1.0.6"][0] + "\n")
+    try:
+        assert run("replace", "--accounts", "2", "--apply", mode="login") == 0   # без сессии — можно без --force
+    finally:
+        PROXIES.pop("10.1.0.6")
+    assert "10.1.0.6" in next(ln for ln in (tmp_path / "vless_accounts.env").read_text().splitlines()
+                              if ln.startswith("account_2"))
+
+
+def test_failed_render_writes_nothing(tmp_path, monkeypatch):
+    """Регрессия: в refresh_guest_cookies.yaml нет секции guest_accounts: — раньше env и accounts.yaml
+    успевали измениться до ошибки. Теперь всё формируется и проверяется до записи."""
+    make_project(tmp_path, monkeypatch)
+    (tmp_path / "guest.yaml").write_text("# пусто\nlogin_accounts: []\n", encoding="utf-8")
+    before = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.iterdir() if p.is_file()}
+    try:
+        run("add", "--count", "2", "--apply")
+    except SystemExit as e:
+        assert "guest_accounts" in str(e)
+    else:
+        raise AssertionError("ждали SystemExit")
+    after = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.iterdir() if p.is_file()}
+    assert after == before and not (tmp_path / "state" / "profiles").exists()

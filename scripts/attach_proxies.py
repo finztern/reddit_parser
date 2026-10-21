@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 """
-scripts/attach_proxies.py — гостевые аккаунты + автоподбор прокси/нод из файла all_proxies.txt.
+scripts/attach_proxies.py — аккаунты + автоподбор прокси/нод из файла all_proxies.txt.
+
+Режим --mode login (по умолчанию): ЛОГИН-слоты (login: true, enabled: false до входа через noVNC, запись в
+refresh_cookies.yaml:login_accounts/account_geo). --mode guest: гостевые слоты (guest_accounts, rotation.slots).
+Запись «всё или ничего»: все файлы формируются и проверяются в памяти, на диск пишется только после этого.
 
 Идея: ты кладёшь прокси (по одному в строке: user:pass@host:port, scheme://..., host:port:user:pass)
 в all_proxies.txt, а скрипт сам решает, какой аккаунт на каком прокси сидит. Жёсткая привязка руками
 не нужна. VLESS-ноды из all_nodes.txt участвуют в подборе наравне с прокси (--sources proxy — только
 прокси).
 
-  add      создаёт новые ГОСТЕВЫЕ аккаунты (и достаёт ноду гостевым слотам, у которых её нет), каждому
+  add      создаёт новые аккаунты (и достаёт узел слотам режима, у которых его нет), каждому
            цепляет прокси. Кандидаты сначала проверяются на доступность Reddit (robots.txt = 200) и сортируются
            по скорости: самые быстрые идут первыми аккаунтами, самые медленные остаются в конце очереди.
            Для каждого аккаунта создаётся профиль устройства (state/profiles), гео — по выходному IP
@@ -17,7 +21,8 @@ scripts/attach_proxies.py — гостевые аккаунты + автопод
            (другой отпечаток), старый прокси уходит в чёрный список (по умолчанию на 72 ч).
              --accounts 11 12 account_13   явный список
              --from-hub                    аккаунты, у которых login_hub показывает капчу
-             --auto                        проверить доступность Reddit через текущие прокси гостевых
+             --auto                        проверить доступность Reddit через текущие прокси
+             --force                       (login) заменять и аккаунты с сохранённой сессией — сессия слетит
   rank     только показать очередь «кто быстрее» (ничего не пишет).
 
 Как всегда в репозитории: без --apply печатается ТОЛЬКО план. Перед записью делаются бэкапы
@@ -56,6 +61,7 @@ sys.path.insert(0, str(ROOT))
 
 import add_guest_slots as ags  # noqa: E402
 import generate_mihomo_config as gmc  # noqa: E402
+import login_fleet as lf  # noqa: E402
 import rotation as rot  # noqa: E402
 from scraper import geoip, profile_gen as pg  # noqa: E402
 from scraper.identity import write_json_atomic  # noqa: E402
@@ -69,6 +75,8 @@ IDENT_PATH = STATE_DIR / "identities.json"
 PA_STATE_PATH = STATE_DIR / "proxy_attach.json"          # чёрный список прокси и история замен
 HUB_STATUS_PATH = STATE_DIR / "login_hub" / "status.json"
 GEO_CACHE_PATH = STATE_DIR / "proxy_geo.json"
+LOGIN_PATH = SCRIPTS / "refresh_cookies.yaml"           # login_accounts + account_geo
+STORAGE_DIR = ROOT / "storage_state"                    # сохранённые сессии входа
 
 DEFAULT_PROXIES_FILE = "all_proxies.txt"
 # robots.txt: Reddit отдаёт его анониму без cookies (главная и .json без cookies/браузерного отпечатка дают 403
@@ -432,78 +440,154 @@ def taken_names_of(links: dict[str, str]) -> set[str]:
     return names
 
 
-def print_plan(changes: list[Change], by_name: dict) -> None:
-    print(f"\n{'слот':<11} {'порт':<5} {'узел':<26} {'мс':<6} {'гео':<7} {'impersonate':<18} примечание")
+def print_plan(changes: list[Change], by_name: dict, mode: str = "login") -> None:
+    print(f"\nРежим: {mode}")
+    print(f"{'слот':<11} {'порт':<5} {'узел':<26} {'мс':<6} {'гео':<7} {'impersonate':<18} примечание")
     for c in changes:
         port = c.port or by_name.get(c.slot, {}).get("proxy_port")
         ms = c.node.delay if c.node.delay is not None else "?"
-        note = {"create": "НОВЫЙ слот" if c.is_new else "узел для существующего слота + новый профиль",
-                "reset": f"ЗАМЕНА профиля и прокси ({c.reason})", "geo": "узел для существующего слота (профиль прежний)"}[c.profile_op]
+        new_note = "НОВЫЙ логин-слот (enabled: false до входа)" if mode == "login" else "НОВЫЙ слот"
+        note = {"create": new_note if c.is_new else "узел для существующего слота + новый профиль",
+                "reset": f"ЗАМЕНА профиля и прокси ({c.reason})" if c.reason else "узел для слота + замена профиля",
+                "geo": "узел для существующего слота (профиль прежний)"}[c.profile_op]
         print(f"{c.slot:<11} {port!s:<5} {c.proxy_name[:26]:<26} {ms!s:<6} {c.geo['locale']:<7} "
               f"{c.profile['impersonate']:<18} {note}")
         for w in c.warnings:
             print(f"    ! {w}")
 
 
-def next_steps(changes: list[Change], replaced: bool) -> None:
+def next_steps(changes: list[Change], replaced: bool, mode: str) -> None:
     names = " ".join(c.slot for c in changes)
     print("\nДальше (из корня проекта):")
     print("  1) venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo")
     print(f"  2) venv/bin/python3 scripts/login_hub.py --accounts {names}   # зайти по noVNC"
           + ("  (старые окна этих аккаунтов закрой)" if replaced else ""))
-    print("     (если вход не нужен — cookies гостя: venv/bin/python3 scripts/refresh_guest_cookies.py "
-          + " ".join(f"--account {c.slot}" for c in changes) + ")")
+    if mode == "guest":
+        print("     (если вход не нужен — cookies гостя: venv/bin/python3 scripts/refresh_guest_cookies.py "
+              + " ".join(f"--account {c.slot}" for c in changes) + ")")
     print("  3) sudo systemctl restart rotation-daemon")
     print("  4) docker compose up -d --build scraper")
     print("  Капча / Reddit недоступен у какого-то аккаунта — "
           "venv/bin/python3 scripts/attach_proxies.py replace --accounts N --apply")
 
 
-def apply_changes(changes: list[Change], *, enabled: bool, accounts_text: str, guest_text: str,
-                  config_text: str, state_dir: Path, presets: dict, bad_ttl_hours: float,
-                  command: str) -> None:
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    for path in (ENV_PATH, ACCOUNTS_PATH, GUEST_PATH, CONFIG_PATH):
+# ---------------------------------------------------------------- #
+#  Состав парка и запись «всё или ничего»
+# ---------------------------------------------------------------- #
+
+@dataclass
+class Fleet:
+    """Файлы и состав режима (login | guest), прочитанные один раз за запуск."""
+    mode: str
+    accounts_text: str
+    accounts: list
+    by_name: dict
+    members: set            # слоты этого режима
+    mode_text: str          # refresh_cookies.yaml (login) | refresh_guest_cookies.yaml (guest)
+    config_text: str
+
+    @property
+    def mode_path(self) -> Path:
+        return LOGIN_PATH if self.mode == "login" else GUEST_PATH
+
+
+def load_fleet(mode: str) -> Fleet:
+    accounts_text = ACCOUNTS_PATH.read_text(encoding="utf-8")
+    accounts = (yaml.safe_load(accounts_text) or {}).get("accounts") or []
+    config_text = CONFIG_PATH.read_text(encoding="utf-8") if CONFIG_PATH.exists() else ""
+    path = LOGIN_PATH if mode == "login" else GUEST_PATH
+    if not path.exists():
+        sys.exit(f"ОШИБКА: нет {path.name} (режим --mode {mode}).")
+    text = path.read_text(encoding="utf-8")
+    cfg = yaml.safe_load(text) or {}
+    members = (lf.login_account_names(cfg, accounts) if mode == "login"
+               else set(cfg.get("guest_accounts") or {}))
+    return Fleet(mode, accounts_text, accounts, {a["name"]: a for a in accounts}, members, text, config_text)
+
+
+def has_session(slot: str) -> bool:
+    """Есть сохранённая сессия входа (storage_state) — замена прокси/профиля её сбросит."""
+    return (STORAGE_DIR / f"{slot}.json").exists()
+
+
+def fleet_problems(accounts: list, links: dict, mode: str, mode_text: str) -> set[str]:
+    cfg = yaml.safe_load(mode_text) or {}
+    if mode == "login":
+        return set(lf.validate_fleet(accounts, links, None, cfg))
+    return set(lf.validate_fleet(accounts, links, cfg.get("guest_accounts") or {}))
+
+
+@dataclass
+class Rendered:
+    env: str
+    accounts: str
+    mode_text: str
+    config: str | None      # None — config.yaml не меняется
+
+
+def render_changes(changes: list[Change], fleet: Fleet, links: dict[str, str], *, enabled: bool,
+                   stamp: str) -> Rendered:
+    """Все новые тексты и их проверка — БЕЗ записи на диск: при любой ошибке файлы остаются нетронутыми."""
+    env_old = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
+    env = set_env_links(env_old, {c.slot: c.uri for c in changes}, stamp)
+
+    accounts, appended = fleet.accounts_text, []
+    for c in changes:
+        if c.is_new:
+            appended.append(
+                lf.login_account_block(c.slot, c.port, c.geo["locale"], c.profile["impersonate"],
+                                       c.profile["user_agent"]) if fleet.mode == "login"
+                else account_block(c.slot, c.port, c.profile, c.geo["locale"], enabled))
+            continue
+        kv = {"locale": c.geo["locale"]}
+        if fleet.mode == "guest" and c.profile_op != "reset":
+            kv["enabled"] = enabled
+        if c.profile_op != "geo":
+            kv.update(impersonate=c.profile["impersonate"], user_agent=c.profile["user_agent"])
+        accounts = patch_account_keys(accounts, c.slot, kv)
+    if appended:
+        what = "логин-слоты, enabled: false до входа" if fleet.mode == "login" else "гостевые слоты"
+        accounts = (accounts.rstrip("\n") + f"\n\n  # --- добавлено scripts/attach_proxies.py {stamp} ({what}) ---\n\n"
+                    + "\n".join(appended))
+
+    config = None
+    if fleet.mode == "login":
+        geo_by = {c.slot: {"locale": c.geo["locale"], "timezone_id": c.geo["timezone_id"]} for c in changes}
+        try:
+            mode_text = lf.patch_login_yaml(fleet.mode_text, [c.slot for c in changes], geo_by,
+                                            {c.slot: c.proxy_name for c in changes},
+                                            overwrite_geo={c.slot for c in changes if not c.is_new})
+        except ValueError as e:
+            sys.exit(f"ОШИБКА: {e}")
+    else:
+        plans = [ags.SlotPlan(c.slot, c.node, c.uri, c.proxy_name,
+                              {"locale": c.geo["locale"], "timezone_id": c.geo["timezone_id"]}, c.is_new, c.port,
+                              guest_profile_view(c.profile) if c.profile_op != "geo" else None) for c in changes]
+        mode_text = ags.patch_guest_yaml(fleet.mode_text, plans)
+        new_slots = [c.slot for c in changes if c.is_new]
+        if new_slots:
+            new_config, not_written = ags.patch_config_slots(fleet.config_text, new_slots)
+            config = new_config if new_config != fleet.config_text else None
+            if not_written:
+                print(f"ВНИМАНИЕ: не смог вписать в rotation.slots (config.yaml нестандартного вида): "
+                      f"{', '.join(not_written)} — добавьте вручную.")
+
+    links2 = {**links, **{c.slot: c.uri for c in changes}}
+    acc2 = (yaml.safe_load(accounts) or {}).get("accounts") or []
+    new_problems = (fleet_problems(acc2, links2, fleet.mode, mode_text)
+                    - fleet_problems(fleet.accounts, links, fleet.mode, fleet.mode_text))
+    if new_problems:
+        sys.exit("ОШИБКА: результат не согласован — ничего не записываю:\n  " + "\n  ".join(sorted(new_problems)))
+    return Rendered(env, accounts, mode_text, config)
+
+
+def write_changes(changes: list[Change], fleet: Fleet, r: Rendered, *, state_dir: Path, presets: dict,
+                  bad_ttl_hours: float, command: str, stamp: str) -> None:
+    for path in (ENV_PATH, ACCOUNTS_PATH, fleet.mode_path, CONFIG_PATH):
         if path.exists():
             shutil.copy2(path, path.with_name(f"{path.name}.bak-attach-{stamp}"))
 
-    # vless_accounts.env
-    env_text = ENV_PATH.read_text(encoding="utf-8") if ENV_PATH.exists() else ""
-    ENV_PATH.write_text(set_env_links(env_text, {c.slot: c.uri for c in changes}, stamp), encoding="utf-8")
-
-    # accounts.yaml
-    new_accounts = accounts_text
-    appended = []
-    for c in changes:
-        if c.is_new:
-            appended.append(account_block(c.slot, c.port, c.profile, c.geo["locale"], enabled))
-            continue
-        kv = {"locale": c.geo["locale"], "enabled": enabled if c.profile_op != "reset" else None}
-        if c.profile_op != "geo":
-            kv.update(impersonate=c.profile["impersonate"], user_agent=c.profile["user_agent"])
-        new_accounts = patch_account_keys(new_accounts, c.slot, {k: v for k, v in kv.items() if v is not None})
-    if appended:
-        new_accounts = (new_accounts.rstrip("\n") + f"\n\n  # --- добавлено scripts/attach_proxies.py {stamp} ---\n\n"
-                        + "\n".join(appended))
-    ags.write_inplace(ACCOUNTS_PATH, new_accounts)
-
-    # refresh_guest_cookies.yaml
-    plans = [ags.SlotPlan(c.slot, c.node, c.uri, c.proxy_name,
-                          {"locale": c.geo["locale"], "timezone_id": c.geo["timezone_id"]}, c.is_new, c.port,
-                          guest_profile_view(c.profile) if c.profile_op != "geo" else None) for c in changes]
-    GUEST_PATH.write_text(ags.patch_guest_yaml(guest_text, plans), encoding="utf-8")
-
-    # config.yaml: rotation.slots
-    new_slots = [c.slot for c in changes if c.is_new]
-    if new_slots:
-        new_config, not_written = ags.patch_config_slots(config_text, new_slots)
-        if new_config != config_text:
-            ags.write_inplace(CONFIG_PATH, new_config)
-        if not_written:
-            print(f"ВНИМАНИЕ: не смог вписать в rotation.slots (config.yaml нестандартного вида): "
-                  f"{', '.join(not_written)} — добавьте вручную.")
-
-    # профили устройств (проверены в плане)
+    # профили устройств (проверены в плане) — первыми: если упадёт, текстовые файлы ещё не тронуты
     for c in changes:
         if c.profile_op == "create":
             pg.create_profile(c.profile, state_dir, presets)
@@ -511,6 +595,12 @@ def apply_changes(changes: list[Change], *, enabled: bool, accounts_text: str, g
             pg.reset_profile(c.slot, c.profile, state_dir, presets)
         else:
             pg.update_geo(c.slot, c.geo, state_dir, presets)
+
+    ENV_PATH.write_text(r.env, encoding="utf-8")
+    ags.write_inplace(ACCOUNTS_PATH, r.accounts)
+    fleet.mode_path.write_text(r.mode_text, encoding="utf-8")
+    if r.config is not None:
+        ags.write_inplace(CONFIG_PATH, r.config)
 
     # гео прокси -> кэш (rot.geo_for / демон берут страну отсюда)
     cache = ags.read_json(GEO_CACHE_PATH)
@@ -539,15 +629,17 @@ def apply_changes(changes: list[Change], *, enabled: bool, accounts_text: str, g
     if ident is not None:
         write_json_atomic(IDENT_PATH, ident)
 
-    # самопроверка файлов
-    chk = (yaml.safe_load(ACCOUNTS_PATH.read_text(encoding="utf-8")) or {}).get("accounts") or []
-    ports = [a["proxy_port"] for a in chk if a.get("proxy_port")]
-    if len(ports) != len(set(ports)):
-        sys.exit(f"ОШИБКА: после записи в accounts.yaml дубли proxy_port — восстановите из *.bak-attach-{stamp}")
-    yaml.safe_load(GUEST_PATH.read_text(encoding="utf-8"))
     rot.sync_source_pauses(ROOT)
     print(f"\nOK: записано (бэкапы *.bak-attach-{stamp}): vless_accounts.env, accounts.yaml, "
-          f"scripts/refresh_guest_cookies.yaml{', config.yaml' if new_slots else ''}, state/profiles/")
+          f"scripts/{fleet.mode_path.name}{', config.yaml' if r.config is not None else ''}, state/profiles/")
+
+
+def apply_changes(changes: list[Change], fleet: Fleet, links: dict[str, str], *, enabled: bool, presets: dict,
+                  bad_ttl_hours: float, command: str) -> None:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    rendered = render_changes(changes, fleet, links, enabled=enabled, stamp=stamp)   # ошибка здесь = ничего не записано
+    write_changes(changes, fleet, rendered, state_dir=STATE_DIR, presets=presets, bad_ttl_hours=bad_ttl_hours,
+                  command=command, stamp=stamp)
 
 
 # ---------------------------------------------------------------- #
@@ -608,18 +700,14 @@ def cmd_add(args) -> int:
     if args.count < 0:
         sys.exit("ОШИБКА: --count должен быть >= 0")
     ropts, pf, sources = load_context(args)
-    accounts_text = ACCOUNTS_PATH.read_text(encoding="utf-8")
-    guest_text = GUEST_PATH.read_text(encoding="utf-8")
-    config_text = CONFIG_PATH.read_text(encoding="utf-8")
-    accounts = (yaml.safe_load(accounts_text) or {}).get("accounts") or []
-    guest = (yaml.safe_load(guest_text) or {}).get("guest_accounts") or {}
-    by_name = {a["name"]: a for a in accounts}
+    fleet = load_fleet(args.mode)
+    accounts, by_name = fleet.accounts, fleet.by_name
     links, ident, pa = read_links(), ags.read_json(IDENT_PATH), load_pa_state()
 
-    missing = sorted((n for n in guest if n in by_name and n not in links), key=ags.acc_num)
+    missing = sorted((n for n in fleet.members if n in by_name and n not in links), key=ags.acc_num)
     want = len(missing) + args.count
     if not want:
-        print("Новых аккаунтов не нужно (--count 0, у всех гостевых слотов есть узел).")
+        print(f"Новых аккаунтов не нужно (--count 0, у всех слотов режима {args.mode} есть узел).")
         return 0
     alive = ranked_free(args, ropts, pf, sources, links, ident, pa)
     take = min(want, max(0, len(alive) - max(0, args.spare)))
@@ -643,30 +731,28 @@ def cmd_add(args) -> int:
     changes: list[Change] = []
     for i, (f, (geo, warn)) in enumerate(zip(chosen, geos)):
         if i < n_missing:
-            slot = missing[i]
-            cur = pg.load_profile(slot, STATE_DIR)
-            op = "geo" if cur else "create"
-            kw = {}
+            slot, kw = missing[i], {}
         else:
-            slot, op, cur = new_slots[i - n_missing], "create", None
-            kw = {"is_new": True, "port": ports[i - n_missing]}
+            slot, kw = new_slots[i - n_missing], {"is_new": True, "port": ports[i - n_missing]}
+        cur = pg.load_profile(slot, STATE_DIR)
+        # профиль уже есть: у существующего слота оставляем (обновляем гео), у нового (остатки) — заменяем
+        op = ("reset" if kw else "geo") if cur else "create"
         changes.append(build_change(slot, f, names, op, geo=geo, warn=warn, presets=presets, taken_fps=taken_fps,
                                     avoid_imps=used_imps, seed=seed, existing_profile=cur, **kw))
         used_imps.add(changes[-1].profile["impersonate"])
 
-    print_plan(changes, by_name)
+    print_plan(changes, by_name, args.mode)
     if not args.apply:
         print("\n[план] ничего не записано. Для записи добавь --apply")
         return 0
-    apply_changes(changes, enabled=not args.disabled, accounts_text=accounts_text, guest_text=guest_text,
-                  config_text=config_text, state_dir=STATE_DIR, presets=presets,
+    apply_changes(changes, fleet, links, enabled=not args.disabled, presets=presets,
                   bad_ttl_hours=DEFAULT_BAD_TTL_HOURS, command="add")
-    next_steps(changes, replaced=False)
+    next_steps(changes, replaced=False, mode=args.mode)
     return 0
 
 
 def auto_detect(targets_pool: list[str], links: dict[str, str], args) -> dict[str, str]:
-    """Гостевые аккаунты, у которых Reddit через ТЕКУЩИЙ прокси не отдаёт 200. -> {аккаунт: причина}."""
+    """Аккаунты, у которых Reddit через ТЕКУЩИЙ прокси недоступен. -> {аккаунт: причина}."""
     prox = [(a, links[a]) for a in targets_pool if a in links and gmc.link_kind(links[a]) == "proxy"]
     bad: dict[str, str] = {}
     with ThreadPoolExecutor(max(1, args.workers)) as ex:
@@ -682,12 +768,8 @@ def auto_detect(targets_pool: list[str], links: dict[str, str], args) -> dict[st
 
 def cmd_replace(args) -> int:
     ropts, pf, sources = load_context(args)
-    accounts_text = ACCOUNTS_PATH.read_text(encoding="utf-8")
-    guest_text = GUEST_PATH.read_text(encoding="utf-8")
-    config_text = CONFIG_PATH.read_text(encoding="utf-8")
-    accounts = (yaml.safe_load(accounts_text) or {}).get("accounts") or []
-    guest = (yaml.safe_load(guest_text) or {}).get("guest_accounts") or {}
-    by_name = {a["name"]: a for a in accounts}
+    fleet = load_fleet(args.mode)
+    by_name = fleet.by_name
     links, ident, pa = read_links(), ags.read_json(IDENT_PATH), load_pa_state()
     if not (args.accounts or args.from_hub or args.auto):
         sys.exit("ОШИБКА: укажите --accounts ..., --from-hub или --auto")
@@ -699,14 +781,23 @@ def cmd_replace(args) -> int:
         for a in hub_captcha_accounts():
             reasons.setdefault(a, "капча (login_hub)")
     if args.auto:
-        for a, why in auto_detect(sorted(guest, key=ags.acc_num), links, args).items():
+        for a, why in auto_detect(sorted(fleet.members, key=ags.acc_num), links, args).items():
             reasons.setdefault(a, why)
     targets = sorted(reasons, key=ags.acc_num)
-    not_guest = [a for a in targets if a not in guest]
-    if not_guest:
-        sys.exit(f"ОШИБКА: не гостевые аккаунты (их ноду меняет rotation-daemon): {', '.join(not_guest)}")
+    outsiders = [a for a in targets if a not in fleet.members]
+    if outsiders:
+        other = "guest" if args.mode == "login" else "login"
+        sys.exit(f"ОШИБКА: {', '.join(outsiders)} — не аккаунты режима {args.mode} "
+                 f"(для других попробуйте --mode {other}; гостевую ноду также меняет rotation-daemon)")
+    if args.mode == "login" and not args.force:
+        with_session = [a for a in targets if has_session(a)]
+        if with_session:
+            print(f"Пропущены (уже есть сохранённая сессия входа — замена прокси и профиля её сбросит): "
+                  f"{', '.join(with_session)}. Если это нужно — добавьте --force.")
+            targets = [a for a in targets if a not in with_session]
     if not targets:
-        print("Нечего заменять: ни один аккаунт не отмечен (капчи в login_hub нет, --auto ничего не нашёл).")
+        print("Нечего заменять: аккаунты не отмечены (капчи в login_hub нет, --auto ничего не нашёл) "
+              "или у них есть сессия.")
         return 0
     print(f"К замене: {', '.join(f'{a} ({reasons[a]})' for a in targets)}")
 
@@ -734,16 +825,14 @@ def cmd_replace(args) -> int:
             avoid_imps={old_imp} if old_imp else set(), seed=seed, existing_profile=cur,
             old_key=rot.node_key(old_link) if old_link else None, reason=reasons[slot]))
 
-    print_plan(changes, by_name)
+    print_plan(changes, by_name, args.mode)
     if not args.apply:
         print("\n[план] ничего не записано. Для записи добавь --apply")
         return 0
-    apply_changes(changes, enabled=True, accounts_text=accounts_text, guest_text=guest_text,
-                  config_text=config_text, state_dir=STATE_DIR, presets=presets,
+    apply_changes(changes, fleet, links, enabled=True, presets=presets,
                   bad_ttl_hours=args.bad_ttl_hours, command="replace")
-    print("Cookies этих аккаунтов остались от старого IP/устройства — войдите заново или получите гостевые "
-          "(refresh_guest_cookies.py).")
-    next_steps(changes, replaced=True)
+    print("Старые cookies остались от прежнего IP/устройства — войдите в аккаунт заново.")
+    next_steps(changes, replaced=True, mode=args.mode)
     return 0
 
 
@@ -752,6 +841,8 @@ def build_parser() -> argparse.ArgumentParser:
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     def common(p):
+        p.add_argument("--mode", choices=("login", "guest"), default="login",
+                       help="login (по умолчанию): логин-слоты, enabled: false до входа; guest: гостевые слоты")
         p.add_argument("--proxies-file", default=None, help=f"файл с прокси (по умолчанию {DEFAULT_PROXIES_FILE})")
         p.add_argument("--sources", default="proxy,vless", help="откуда брать узлы: proxy, vless или proxy,vless")
         p.add_argument("--probe-url", default=REDDIT_URL)
@@ -762,21 +853,23 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--seed", type=int, default=None, help="seed генератора профилей (по умолчанию — время)")
         p.add_argument("--apply", action="store_true", help="записать (без флага — только план)")
 
-    p_add = sub.add_parser("add", help="новые гостевые аккаунты + прокси")
+    p_add = sub.add_parser("add", help="новые аккаунты + прокси")
     common(p_add)
     p_add.add_argument("--count", type=int, default=1, help="сколько НОВЫХ аккаунтов создать")
     p_add.add_argument("--spare", type=int, default=0, help="сколько годных узлов оставить про запас")
-    p_add.add_argument("--disabled", action="store_true", help="создать аккаунты с enabled: false")
+    p_add.add_argument("--disabled", action="store_true", help="guest: создать аккаунты с enabled: false")
     p_add.set_defaults(fn=cmd_add)
 
     p_rep = sub.add_parser("replace", help="сменить профиль и прокси у аккаунтов с капчей/недоступным Reddit")
     common(p_rep)
     p_rep.add_argument("--accounts", nargs="*", help="account_11 | 11 | 11-15")
     p_rep.add_argument("--from-hub", action="store_true", help="аккаунты, у которых login_hub ждёт из-за капчи")
-    p_rep.add_argument("--auto", action="store_true", help="проверить Reddit через текущие прокси гостевых")
+    p_rep.add_argument("--auto", action="store_true", help="проверить доступность Reddit через текущие прокси")
     p_rep.add_argument("--reason", default="капча / Reddit недоступен (вручную)")
     p_rep.add_argument("--bad-ttl-hours", type=float, default=DEFAULT_BAD_TTL_HOURS,
                        help="на сколько часов старый прокси не выдавать снова")
+    p_rep.add_argument("--force", action="store_true",
+                       help="login: заменять и аккаунты с сохранённой сессией (сессия слетит)")
     p_rep.set_defaults(fn=cmd_replace)
 
     p_rank = sub.add_parser("rank", help="показать очередь прокси по скорости")
