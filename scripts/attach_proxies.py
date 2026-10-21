@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import argparse
 import collections
+import hashlib
 import json
 import re
 import shutil
@@ -78,6 +79,7 @@ IDENT_PATH = STATE_DIR / "identities.json"
 PA_STATE_PATH = STATE_DIR / "proxy_attach.json"          # чёрный список прокси и история замен
 HUB_STATUS_PATH = STATE_DIR / "login_hub" / "status.json"
 GEO_CACHE_PATH = STATE_DIR / "proxy_geo.json"
+SPEED_CACHE_PATH = STATE_DIR / "proxy_speed.json"        # кэш замеров скорости (ключи — хэши, без учётных данных)
 LOGIN_PATH = SCRIPTS / "refresh_cookies.yaml"           # login_accounts + account_geo
 STORAGE_DIR = ROOT / "storage_state"                    # сохранённые сессии входа
 
@@ -87,6 +89,7 @@ DEFAULT_PROXIES_FILE = "all_proxies.txt"
 # в браузер, выяснится при входе через noVNC (потом replace). Другой URL — --probe-url.
 REDDIT_URL = "https://www.reddit.com/robots.txt"
 DEFAULT_BAD_TTL_HOURS = 72
+DEFAULT_CACHE_MINUTES = 30
 # Короткая страница-заглушка с этими словами = капча/блокировка (настоящая главная Reddit — сотни КБ).
 CHALLENGE_MARKERS = ("captcha", "verify you are human", "are you a human", "prove you're not a robot",
                      "blocked by network security", "whoa there, pardner")
@@ -206,10 +209,33 @@ def rank_nodes(nodes: list["ags.Free"]) -> list["ags.Free"]:
     return sorted(nodes, key=lambda f: (f.delay is None, f.delay if f.delay is not None else 0, f.mihomo_name))
 
 
+def _cache_key(uri: str) -> str:
+    return hashlib.sha1(rot.node_key(uri).encode()).hexdigest()[:20]
+
+
+def load_speed_cache(url: str, minutes: float, now: float | None = None) -> dict:
+    """Свежие замеры {хэш: {ts, ms, why}} для того же URL; minutes <= 0 — кэш не используется."""
+    if minutes <= 0:
+        return {}
+    data = ags.read_json(SPEED_CACHE_PATH)
+    if data.get("url") != url:
+        return {}
+    now = time.time() if now is None else now
+    return {k: v for k, v in (data.get("items") or {}).items() if now - v.get("ts", 0) < minutes * 60}
+
+
+def save_speed_cache(url: str, fresh: dict, now: float | None = None) -> None:
+    now = time.time() if now is None else now
+    data = ags.read_json(SPEED_CACHE_PATH)
+    old = (data.get("items") or {}) if data.get("url") == url else {}
+    items = {k: v for k, v in {**old, **fresh}.items() if now - v.get("ts", 0) < 24 * 3600}
+    write_json_atomic(SPEED_CACHE_PATH, {"url": url, "items": items})
+
+
 def measure(free: list["ags.Free"], ropts: dict, url: str, timeout_ms: int, workers: int,
-            probe: bool = True) -> tuple[list["ags.Free"], dict]:
-    """Проверяет узлы на Reddit и ставит f.delay. Прокси — напрямую, VLESS — через delay-API mihomo.
-    -> (живые в порядке «быстрые первыми», статистика)."""
+            probe: bool = True, cache_minutes: float = DEFAULT_CACHE_MINUTES) -> tuple[list["ags.Free"], dict]:
+    """Проверяет узлы на Reddit и ставит f.delay. Прокси — напрямую (в потоках, с кэшем замеров),
+    VLESS — через delay-API mihomo. -> (живые в порядке «быстрые первыми», статистика)."""
     stats = {"total": len(free), "dead": collections.Counter(), "unmeasured": 0}
     if not probe:
         stats["unmeasured"] = len(free)
@@ -218,16 +244,43 @@ def measure(free: list["ags.Free"], ropts: dict, url: str, timeout_ms: int, work
     vless = [f for f in free if gmc.link_kind(f.node.uri) != "proxy"]
     alive: list[ags.Free] = []
 
+    cache = load_speed_cache(url, cache_minutes)
+    todo, cached = [], 0
+    for f in prox:
+        c = cache.get(_cache_key(f.node.uri))
+        if c is None:
+            todo.append(f)
+            continue
+        cached += 1
+        if c.get("ms") is None:
+            stats["dead"][c.get("why") or "?"] += 1
+        else:
+            f.delay = c["ms"]
+            alive.append(f)
+    if cached:
+        print(f"Замеры из кэша (моложе {cache_minutes:g} мин): {cached}; проверяю заново: {len(todo)}")
+
     def one(f):
         return f, probe_proxy(f.node.uri, url, timeout_ms / 1000)
 
+    fresh, done, step = {}, 0, max(1, len(todo) // 10)
+    now = time.time()
     with ThreadPoolExecutor(max(1, workers)) as ex:
-        for f, (ms, why) in ex.map(one, prox):
+        for f, (ms, why) in ex.map(one, todo):
+            fresh[_cache_key(f.node.uri)] = {"ts": now, "ms": ms, "why": why}
             if ms is None:
                 stats["dead"][why or "?"] += 1
             else:
                 f.delay = ms
                 alive.append(f)
+            done += 1
+            if done % step == 0 or done == len(todo):
+                print(f"  проверено {done}/{len(todo)}", flush=True)
+    if fresh and cache_minutes > 0:
+        try:
+            save_speed_cache(url, fresh)
+        except OSError as e:
+            print(f"ВНИМАНИЕ: кэш замеров не сохранён ({type(e).__name__})")
     if vless:
         try:
             ok, dead, absent = ags.probe_nodes(vless, ropts["mihomo_api"], ropts.get("mihomo_secret", ""),
@@ -665,7 +718,8 @@ def ranked_free(args, ropts: dict, pf: Path, sources: list[str], links: dict, id
     free = collect_free(pf, sources, links, ident, pa_state, ropts)
     print(f"Свободных узлов (не назначены, не в реестре ротации, не в чёрном списке): {len(free)}"
           f"  [{pf.name}; источники: {','.join(sources)}]")
-    alive, stats = measure(free, ropts, args.probe_url, args.timeout_ms, args.workers, probe=not args.no_probe)
+    alive, stats = measure(free, ropts, args.probe_url, args.timeout_ms, args.workers, probe=not args.no_probe,
+                           cache_minutes=args.cache_minutes)
     print_stats(stats, alive)
     return alive
 
@@ -955,8 +1009,10 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--proxies-file", default=None, help=f"файл с прокси (по умолчанию {DEFAULT_PROXIES_FILE})")
         p.add_argument("--sources", default="proxy,vless", help="откуда брать узлы: proxy, vless или proxy,vless")
         p.add_argument("--probe-url", default=REDDIT_URL)
-        p.add_argument("--timeout-ms", type=int, default=8000)
-        p.add_argument("--workers", type=int, default=32)
+        p.add_argument("--timeout-ms", type=int, default=6000, help="таймаут одной проверки; таймауты — главная трата времени")
+        p.add_argument("--workers", type=int, default=100, help="параллельных проверок")
+        p.add_argument("--cache-minutes", type=float, default=DEFAULT_CACHE_MINUTES,
+                       help="не мерить заново прокси, замеренные позже N минут назад (0 — без кэша)")
         p.add_argument("--no-probe", action="store_true", help="не проверять узлы (порядок как в файле)")
         p.add_argument("--no-geo", action="store_true", help="не определять страну по выходному IP прокси")
         p.add_argument("--seed", type=int, default=None, help="seed генератора профилей (по умолчанию — время)")

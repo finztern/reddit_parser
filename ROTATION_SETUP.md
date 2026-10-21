@@ -207,6 +207,10 @@ venv/bin/python3 scripts/attach_proxies.py add --count 10 --apply
   с 403 даже через рабочий прокси, поэтому замер проверяет доступность и скорость, а пустит ли Reddit в
   браузер, видно при входе через noVNC (дальше `replace`); другой URL — `--probe-url`. VLESS проверяются delay-API mihomo. Аккаунты получают
   узлы от самых быстрых к самым медленным, неизмеренные VLESS — в самом конце.
+- **Время проверки.** Прокси проверяются параллельно (`--workers`, по умолчанию 100) с таймаутом
+  `--timeout-ms` (6000): основная трата времени — прокси, которые не отвечают, поэтому таймаут короче =
+  быстрее. Замеры кэшируются на `--cache-minutes` (30; `0` — без кэша) в `state/proxy_speed.json`
+  (только хэши, без учётных данных), так что `replace` сразу после `add` почти не ждёт.
 - **Что создаётся.** Слот (порт, `accounts.yaml`; login — `refresh_cookies.yaml`, guest —
   `refresh_guest_cookies.yaml` и `rotation.slots`), строка `account_N = ...` в `vless_accounts.env` и профиль устройства
   `state/profiles/account_N.json`; гео (locale/timezone) определяется по выходному IP прокси. Гостевым

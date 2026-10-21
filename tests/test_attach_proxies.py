@@ -90,7 +90,7 @@ def make_project(tmp_path, monkeypatch, extra_proxies=()):
                       "GUEST_PATH": tmp_path / "guest.yaml", "STATE_DIR": st, "IDENT_PATH": st / "identities.json",
                       "PA_STATE_PATH": st / "proxy_attach.json", "GEO_CACHE_PATH": st / "proxy_geo.json",
                       "HUB_STATUS_PATH": st / "login_hub" / "status.json",
-                      "LOGIN_PATH": tmp_path / "login.yaml", "STORAGE_DIR": tmp_path / "storage_state"}.items():
+                      "SPEED_CACHE_PATH": st / "proxy_speed.json", "LOGIN_PATH": tmp_path / "login.yaml", "STORAGE_DIR": tmp_path / "storage_state"}.items():
         monkeypatch.setattr(ap, attr, val)
     monkeypatch.setattr(rot, "STATE_FILE", st / "rotation_state.json")
     monkeypatch.setattr(rot, "STATE_DIR", st)
@@ -452,3 +452,33 @@ def test_reprofile_mobile_to_desktop_keeps_proxy(tmp_path, monkeypatch):
     # десктопный профиль второй раз без --all не трогаем
     assert ap.main(["reprofile", "--accounts", "3", "--mode", "login", "--apply"]) == 0
     assert pg.load_profile("account_3", state) == new
+
+
+def test_measure_uses_cache_and_threads(tmp_path, monkeypatch):
+    make_project(tmp_path, monkeypatch)
+    calls = []
+
+    def probe(uri, url=None, timeout=8.0):
+        calls.append(uri)
+        return (100 + len(calls), None) if "dead" not in uri else (None, "Timeout")
+
+    monkeypatch.setattr(ap, "probe_proxy", probe)
+    mk = lambda h: ags_free(f"http://u:p@{h}:80")  # noqa: E731
+    nodes = [mk("a"), mk("b"), mk("dead")]
+    alive, stats = ap.measure(nodes, {}, "https://x/", 1000, 8, cache_minutes=30)
+    assert len(calls) == 3 and len(alive) == 2 and stats["dead"]["Timeout"] == 1
+    raw = (tmp_path / "state" / "proxy_speed.json").read_text()
+    assert "u:p" not in raw and "http" not in raw.split('"items"')[1]    # учётные данные в кэш не попадают
+    calls.clear()
+    alive2, stats2 = ap.measure([mk("a"), mk("b"), mk("dead"), mk("c")], {}, "https://x/", 1000, 8, cache_minutes=30)
+    assert len(calls) == 1 and len(alive2) == 3 and stats2["dead"]["Timeout"] == 1   # заново — только новый узел
+    calls.clear()
+    ap.measure([mk("a")], {}, "https://x/", 1000, 8, cache_minutes=0)                 # кэш выключен
+    assert len(calls) == 1
+    calls.clear()
+    ap.measure([mk("a")], {}, "https://OTHER/", 1000, 8, cache_minutes=30)            # другой URL — кэш не применяется
+    assert len(calls) == 1
+
+
+def ags_free(uri):
+    return ap.ags.Free(SimpleNamespace(uri=uri, key=uri), f"px-{uri}", "??")
