@@ -268,10 +268,11 @@ def geo_for_node(f: "ags.Free", live: bool = True) -> tuple[dict, str | None]:
     в имени узла; совсем неизвестно — en-US с пометкой geo_note. -> (geo, предупреждение|None)."""
     warn = None
     if live and gmc.link_kind(f.node.uri) == "proxy":
-        try:
-            return geoip.resolve_geo(rot.node_key(f.node.uri), fetch=curl_fetch), None
-        except Exception as e:  # noqa: BLE001
-            warn = f"{f.mihomo_name}: страна по выходному IP не определена ({type(e).__name__})"
+        for attempt in range(2):                      # сервис гео через прокси иногда отвечает не с первого раза
+            try:
+                return geoip.resolve_geo(rot.node_key(f.node.uri), fetch=curl_fetch), None
+            except Exception as e:  # noqa: BLE001
+                warn = f"{f.mihomo_name}: страна по выходному IP не определена ({type(e).__name__})"
     cc = rot.country_for(f.mihomo_name)
     if cc != "??":
         return _fill_geo_meta(geoip.geo_for_country(cc.upper()), "node-name"), warn
@@ -687,6 +688,30 @@ def geos_for(chosen: list["ags.Free"], live: bool, workers: int = 8) -> list[tup
         return list(ex.map(lambda f: geo_for_node(f, live), chosen))
 
 
+def pick_with_geo(alive: list["ags.Free"], need: int, live: bool, workers: int = 8):
+    """Первые `need` узлов очереди, у которых определилась страна. Без страны профиль не собрать
+    (locale/timezone должны совпадать с выходным IP), поэтому такие узлы пропускаются и берутся следующие
+    по скорости. -> (узлы, [(geo, предупреждение)])."""
+    chosen, geos, skipped, i = [], [], 0, 0
+    while len(chosen) < need and i < len(alive):
+        batch = alive[i:i + (need - len(chosen))]
+        i += len(batch)
+        for f, (geo, warn) in zip(batch, geos_for(batch, live, workers)):
+            if geo.get("country"):
+                chosen.append(f)
+                geos.append((geo, warn))
+            else:
+                skipped += 1
+    if skipped:
+        print(f"Пропущено прокси без определённой страны: {skipped} (запрос выходного IP через них не прошёл) — "
+              "взяты следующие по скорости.")
+    return chosen, geos
+
+
+NO_COUNTRY_MSG = ("Ни у одного прокси не удалось определить страну: проверьте, что через прокси открываются "
+                  "ipinfo.io / ip-api.com, либо задайте страну в имени строки (user:pass@host:port#us1).")
+
+
 def cmd_rank(args) -> int:
     ropts, pf, sources = load_context(args)
     links, ident, pa = read_links(), ags.read_json(IDENT_PATH), load_pa_state()
@@ -715,8 +740,10 @@ def cmd_add(args) -> int:
         print(f"ВНИМАНИЕ: нужно {want} узлов, доступно {take} — создаю {take}.")
     if take == 0:
         sys.exit("Свободных годных узлов нет — ничего не делаю.")
-    chosen = alive[:take]
-    geos = geos_for(chosen, not args.no_geo)
+    chosen, geos = pick_with_geo(alive, take, not args.no_geo)
+    take = len(chosen)
+    if take == 0:
+        sys.exit(NO_COUNTRY_MSG)
 
     n_missing = min(len(missing), take)
     new_start = max((ags.acc_num(a["name"]) for a in accounts), default=0) + 1
@@ -808,8 +835,10 @@ def cmd_replace(args) -> int:
     targets = targets[:len(alive)]
     if not targets:
         sys.exit("Свободных годных узлов нет — ничего не делаю.")
-    chosen = alive[:len(targets)]
-    geos = geos_for(chosen, not args.no_geo)
+    chosen, geos = pick_with_geo(alive, len(targets), not args.no_geo)
+    targets = targets[:len(chosen)]
+    if not targets:
+        sys.exit(NO_COUNTRY_MSG)
 
     presets = pg.load_presets()
     taken_fps = existing_fingerprints(STATE_DIR)       # включая старый профиль слота: устройство будет другим

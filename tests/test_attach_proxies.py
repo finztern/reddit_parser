@@ -385,3 +385,36 @@ def test_failed_render_writes_nothing(tmp_path, monkeypatch):
         raise AssertionError("ждали SystemExit")
     after = {p.name: p.read_text(encoding="utf-8") for p in tmp_path.iterdir() if p.is_file()}
     assert after == before and not (tmp_path / "state" / "profiles").exists()
+
+
+def test_pick_with_geo_skips_nodes_without_country(monkeypatch):
+    mk = lambda h: SimpleNamespace(mihomo_name=f"px-{h}-80", node=SimpleNamespace(uri=f"http://u:p@{h}:80"))  # noqa: E731
+    nodes = [mk("h1"), mk("h2"), mk("h3")]
+    us = {"country": "US", "locale": "en-US", "timezone_id": "America/New_York"}
+
+    def fake(url, fetch=None):
+        if "h1" in url:
+            raise RuntimeError("нет ответа")
+        return dict(us)
+
+    monkeypatch.setattr(ap.geoip, "resolve_geo", fake)
+    chosen, geos = ap.pick_with_geo(nodes, 2, True)
+    assert [f.mihomo_name for f in chosen] == ["px-h2-80", "px-h3-80"]      # h1 без страны пропущен, взят следующий
+    assert all(g["country"] == "US" for g, _ in geos)
+    none, _ = ap.pick_with_geo(nodes[:1], 1, True)
+    assert none == []
+
+
+def test_geo_for_node_retries_once(monkeypatch):
+    calls = []
+
+    def flaky(url, fetch=None):
+        calls.append(1)
+        if len(calls) == 1:
+            raise RuntimeError("сбой")
+        return {"country": "DE", "locale": "de-DE", "timezone_id": "Europe/Berlin"}
+
+    monkeypatch.setattr(ap.geoip, "resolve_geo", flaky)
+    f = SimpleNamespace(mihomo_name="px-1-80", node=SimpleNamespace(uri="http://u:p@1.2.3.4:80"))
+    geo, warn = ap.geo_for_node(f)
+    assert geo["country"] == "DE" and warn is None and len(calls) == 2
