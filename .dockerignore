@@ -13,6 +13,8 @@ vless_accounts.env
 all_nodes.txt
 all_nodes.reddit_ok.txt
 all_proxys.txt
+all_proxies.txt
+all_proxies.reddit_ok.txt
 mihomo_config.yaml
 venv/
 .venv*/
