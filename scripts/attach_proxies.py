@@ -23,7 +23,10 @@ refresh_cookies.yaml:login_accounts/account_geo). --mode guest: гостевые
              --from-hub                    аккаунты, у которых login_hub показывает капчу
              --auto                        проверить доступность Reddit через текущие прокси
              --force                       (login) заменять и аккаунты с сохранённой сессией — сессия слетит
+  reprofile пересоздаёт профиль устройства БЕЗ смены прокси (по умолчанию — только мобильные -> десктоп).
   rank     только показать очередь «кто быстрее» (ничего не пишет).
+
+Профили по умолчанию ТОЛЬКО десктопные (--allow-mobile разрешает Android/iOS).
 
 Как всегда в репозитории: без --apply печатается ТОЛЬКО план. Перед записью делаются бэкапы
 *.bak-attach-<время>. Остановите rotation-daemon на время запуска.
@@ -293,16 +296,18 @@ def existing_fingerprints(state_dir: Path, skip: str | None = None) -> set[str]:
 
 
 def fresh_profile(slot: str, geo: dict, presets: dict, taken: set[str], avoid_imps: set[str],
-                  base_seed: int) -> dict:
+                  base_seed: int, no_mobile: bool = True) -> dict:
     """Новое устройство: отпечаток не совпадает ни с одним из taken и (пока есть варианты) impersonate
-    не из avoid_imps. taken пополняется."""
+    не из avoid_imps; no_mobile — только десктоп (без Android/iOS). taken пополняется."""
     last = None
-    for attempt in range(60):
+    for attempt in range(80):
         p = pg.generate_profile(slot, pg.derive_seed(base_seed, slot, attempt), geo=geo, presets=presets)
         last = p
+        if no_mobile and p.get("mobile"):
+            continue
         if pg.fingerprint(p) in taken:
             continue
-        if p["impersonate"] in avoid_imps and attempt < 40:
+        if p["impersonate"] in avoid_imps and attempt < 50:
             continue
         taken.add(pg.fingerprint(p))
         return p
@@ -667,13 +672,13 @@ def ranked_free(args, ropts: dict, pf: Path, sources: list[str], links: dict, id
 
 def build_change(slot: str, f: "ags.Free", taken_names: set[str], profile_op: str, *, geo: dict, warn: str | None,
                  presets: dict, taken_fps: set[str], avoid_imps: set[str], seed: int,
-                 existing_profile: dict | None, **kw) -> Change:
+                 existing_profile: dict | None, no_mobile: bool = True, **kw) -> Change:
     uri, pname = ags.unique_link(f.node.uri, taken_names)
     ch_warn = [warn] if warn else []
     if profile_op == "geo":
         profile = profile_with_geo(existing_profile, geo)
     else:
-        profile = fresh_profile(slot, geo, presets, taken_fps, avoid_imps, seed)
+        profile = fresh_profile(slot, geo, presets, taken_fps, avoid_imps, seed, no_mobile)
     errs = pg.validate_profile(profile, presets)
     if errs:
         sys.exit(f"ОШИБКА: профиль {slot} не прошёл проверку: {'; '.join(errs)}")
@@ -765,7 +770,8 @@ def cmd_add(args) -> int:
         # профиль уже есть: у существующего слота оставляем (обновляем гео), у нового (остатки) — заменяем
         op = ("reset" if kw else "geo") if cur else "create"
         changes.append(build_change(slot, f, names, op, geo=geo, warn=warn, presets=presets, taken_fps=taken_fps,
-                                    avoid_imps=used_imps, seed=seed, existing_profile=cur, **kw))
+                                    avoid_imps=used_imps, seed=seed, existing_profile=cur,
+                                    no_mobile=not args.allow_mobile, **kw))
         used_imps.add(changes[-1].profile["impersonate"])
 
     print_plan(changes, by_name, args.mode)
@@ -851,7 +857,7 @@ def cmd_replace(args) -> int:
         old_imp = (cur or {}).get("impersonate") or by_name[slot].get("impersonate")
         changes.append(build_change(
             slot, f, names, "reset" if cur else "create", geo=geo, warn=warn, presets=presets, taken_fps=taken_fps,
-            avoid_imps={old_imp} if old_imp else set(), seed=seed, existing_profile=cur,
+            avoid_imps={old_imp} if old_imp else set(), seed=seed, existing_profile=cur, no_mobile=not args.allow_mobile,
             old_key=rot.node_key(old_link) if old_link else None, reason=reasons[slot]))
 
     print_plan(changes, by_name, args.mode)
@@ -862,6 +868,80 @@ def cmd_replace(args) -> int:
                   bad_ttl_hours=args.bad_ttl_hours, command="replace")
     print("Старые cookies остались от прежнего IP/устройства — войдите в аккаунт заново.")
     next_steps(changes, replaced=True, mode=args.mode)
+    return 0
+
+
+def cmd_reprofile(args) -> int:
+    """Пересоздать профиль устройства БЕЗ смены прокси (например, мобильный -> десктоп). Гео прежнее."""
+    fleet = load_fleet(args.mode)
+    targets = parse_accounts(args.accounts, list(fleet.by_name))
+    outsiders = [a for a in targets if a not in fleet.members]
+    if outsiders:
+        sys.exit(f"ОШИБКА: {', '.join(outsiders)} — не аккаунты режима {args.mode}")
+    if args.mode == "login" and not args.force:
+        with_session = [a for a in targets if has_session(a)]
+        if with_session:
+            print(f"Пропущены (есть сохранённая сессия входа — смена устройства её сбросит): "
+                  f"{', '.join(with_session)}. Если это нужно — добавьте --force.")
+            targets = [a for a in targets if a not in with_session]
+    presets = pg.load_presets()
+    taken_fps = existing_fingerprints(STATE_DIR)
+    seed = args.seed if args.seed is not None else int(time.time())
+    rows = []
+    for slot in targets:
+        cur = pg.load_profile(slot, STATE_DIR)
+        if cur is None:
+            print(f"{slot}: профиля устройства нет — пропуск (его создаёт add/replace или scripts/profile.py --create)")
+            continue
+        if not args.all and not (cur.get("mobile") and not args.allow_mobile):
+            print(f"{slot}: профиль уже подходит ({cur['os']}, {cur['impersonate']}) — пропуск (--all пересоздаст любой)")
+            continue
+        geo = {k: cur[k] for k in pg.GEO_FIELDS if k in cur}
+        new = fresh_profile(slot, geo, presets, taken_fps, {cur["impersonate"]}, seed, not args.allow_mobile)
+        errs = pg.validate_profile(new, presets)
+        if errs:
+            sys.exit(f"ОШИБКА: профиль {slot} не прошёл проверку: {'; '.join(errs)}")
+        rows.append((slot, cur, new))
+    if not rows:
+        print("Нечего пересоздавать.")
+        return 0
+    print(f"\nРежим: {args.mode}\n{'слот':<11} {'было':<26} {'станет':<26} гео")
+    for slot, cur, new in rows:
+        print(f"{slot:<11} {cur['os'] + ' ' + cur['impersonate']:<26} {new['os'] + ' ' + new['impersonate']:<26} "
+              f"{new['locale']} (прокси не меняется)")
+    if not args.apply:
+        print("\n[план] ничего не записано. Для записи добавь --apply")
+        return 0
+
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    accounts = fleet.accounts_text
+    for slot, cur, new in rows:
+        accounts = patch_account_keys(accounts, slot, {"impersonate": new["impersonate"], "user_agent": new["user_agent"]})
+    mode_text = fleet.mode_text
+    if fleet.mode == "guest":
+        plans = [ags.SlotPlan(slot, None, "", "", {"locale": new["locale"], "timezone_id": new["timezone_id"]},
+                              False, None, guest_profile_view(new)) for slot, _, new in rows]
+        mode_text = ags.patch_guest_yaml(fleet.mode_text, plans)       # SystemExit до любой записи
+    acc2 = (yaml.safe_load(accounts) or {}).get("accounts") or []
+    if len(acc2) != len(fleet.accounts):
+        sys.exit("ОШИБКА: после правки accounts.yaml число аккаунтов изменилось — ничего не записываю")
+    for path in (ACCOUNTS_PATH, fleet.mode_path):
+        shutil.copy2(path, path.with_name(f"{path.name}.bak-attach-{stamp}"))
+    for slot, _, new in rows:
+        pg.reset_profile(slot, new, STATE_DIR, presets)
+    ags.write_inplace(ACCOUNTS_PATH, accounts)
+    if mode_text != fleet.mode_text:
+        fleet.mode_path.write_text(mode_text, encoding="utf-8")
+    ident = ags.read_json(IDENT_PATH) if IDENT_PATH.exists() else None
+    if ident is not None:
+        for slot, _, _ in rows:
+            if slot in (ident.get("slots") or {}):
+                ident["slots"][slot]["active"] = None
+        write_json_atomic(IDENT_PATH, ident)
+    print(f"\nOK: профили пересозданы (бэкапы *.bak-attach-{stamp}; старые профили — state/profiles/.history/).")
+    print("Дальше: закройте старые окна этих аккаунтов в login_hub и запустите заново "
+          f"(venv/bin/python3 scripts/login_hub.py --accounts {' '.join(r[0] for r in rows)}); "
+          "для работающего скрапера — docker compose up -d --build scraper.")
     return 0
 
 
@@ -880,6 +960,8 @@ def build_parser() -> argparse.ArgumentParser:
         p.add_argument("--no-probe", action="store_true", help="не проверять узлы (порядок как в файле)")
         p.add_argument("--no-geo", action="store_true", help="не определять страну по выходному IP прокси")
         p.add_argument("--seed", type=int, default=None, help="seed генератора профилей (по умолчанию — время)")
+        p.add_argument("--allow-mobile", action="store_true",
+                       help="разрешить мобильные профили (Android/iOS); по умолчанию — только десктоп")
         p.add_argument("--apply", action="store_true", help="записать (без флага — только план)")
 
     p_add = sub.add_parser("add", help="новые аккаунты + прокси")
@@ -900,6 +982,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_rep.add_argument("--force", action="store_true",
                        help="login: заменять и аккаунты с сохранённой сессией (сессия слетит)")
     p_rep.set_defaults(fn=cmd_replace)
+
+    p_rep2 = sub.add_parser("reprofile", help="пересоздать профиль устройства без смены прокси")
+    common(p_rep2)
+    p_rep2.add_argument("--accounts", nargs="+", required=True, help="account_58 | 58 | 56-65")
+    p_rep2.add_argument("--all", action="store_true", help="пересоздать любой профиль (по умолчанию — только мобильные)")
+    p_rep2.add_argument("--force", action="store_true", help="login: и аккаунты с сохранённой сессией (сессия слетит)")
+    p_rep2.set_defaults(fn=cmd_reprofile)
 
     p_rank = sub.add_parser("rank", help="показать очередь прокси по скорости")
     common(p_rank)

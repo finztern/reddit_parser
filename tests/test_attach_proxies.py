@@ -418,3 +418,37 @@ def test_geo_for_node_retries_once(monkeypatch):
     f = SimpleNamespace(mihomo_name="px-1-80", node=SimpleNamespace(uri="http://u:p@1.2.3.4:80"))
     geo, warn = ap.geo_for_node(f)
     assert geo["country"] == "DE" and warn is None and len(calls) == 2
+
+
+def test_new_profiles_are_desktop_by_default(tmp_path, monkeypatch):
+    make_project(tmp_path, monkeypatch)
+    assert run("add", "--count", "1", "--apply") == 0
+    for n in ("account_12", "account_13"):
+        assert pg.load_profile(n, tmp_path / "state")["mobile"] is False
+
+
+def test_reprofile_mobile_to_desktop_keeps_proxy(tmp_path, monkeypatch):
+    make_login_project(tmp_path, monkeypatch)
+    assert run("add", "--count", "1", "--apply", mode="login", ) == 0
+    state = tmp_path / "state"
+    presets = pg.load_presets()
+    # подменяем профиль account_3 на мобильный (как у пользователя после первого запуска)
+    cur = pg.load_profile("account_3", state)
+    geo = {k: cur[k] for k in pg.GEO_FIELDS if k in cur}
+    mobile = ap.fresh_profile("account_3", geo, presets, set(), set(), 1, no_mobile=False)
+    for seed in range(2, 400):                                       # найти мобильный вариант
+        if mobile["mobile"]:
+            break
+        mobile = ap.fresh_profile("account_3", geo, presets, set(), set(), seed, no_mobile=False)
+    assert mobile["mobile"]
+    pg.reset_profile("account_3", mobile, state, presets)
+    env_before = (tmp_path / "vless_accounts.env").read_text()
+    assert ap.main(["reprofile", "--accounts", "3", "--mode", "login", "--apply"]) == 0
+    new = pg.load_profile("account_3", state)
+    assert new["mobile"] is False and new["locale"] == cur["locale"]
+    assert (tmp_path / "vless_accounts.env").read_text() == env_before        # прокси не менялся
+    acc = {a["name"]: a for a in yaml.safe_load((tmp_path / "accounts.yaml").read_text())["accounts"]}
+    assert acc["account_3"]["impersonate"] == new["impersonate"] and acc["account_3"]["login"] is True
+    # десктопный профиль второй раз без --all не трогаем
+    assert ap.main(["reprofile", "--accounts", "3", "--mode", "login", "--apply"]) == 0
+    assert pg.load_profile("account_3", state) == new

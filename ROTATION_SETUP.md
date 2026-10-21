@@ -224,6 +224,11 @@ venv/bin/python3 scripts/attach_proxies.py add --count 10 --apply
   (`state/proxy_attach.json` и `bad_nodes` реестра демона, по умолчанию на 72 ч, `--bad-ttl-hours`).
   В режиме login аккаунты с сохранённой сессией (`storage_state/`) пропускаются: замена сбросит вход
   (`--force`, если так и надо). Cookies после замены нужно получить заново.
+- **Профили только десктопные** (`--allow-mobile` разрешает Android/iOS). Профиль устройства
+  `state/profiles/account_N.json` главнее `accounts.yaml`: именно его берут `login_hub.py` и скрапер,
+  поэтому `rotate_fingerprints.py` на уже созданный профиль не влияет. Пересоздать профиль без смены
+  прокси: `attach_proxies.py reprofile --accounts 56-65 --apply` (по умолчанию только мобильные;
+  `--all` — любой; аккаунты с сохранённой сессией пропускаются без `--force`).
 - После `--apply`: `generate_mihomo_config.py` + `docker compose restart mihomo`, вход через
   `login_hub.py`, перезапуск `rotation-daemon` и `scraper` (скрипт печатает эти шаги).
 - Чтобы демон ротации и mihomo знали весь пул (а не только выданные прокси), укажите
