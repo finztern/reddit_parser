@@ -1,4 +1,5 @@
 import asyncio
+import html
 import json
 import time
 
@@ -16,6 +17,79 @@ def is_nsfw(data: dict, blocked_subs: frozenset[str] = frozenset()) -> bool:
     return bool(blocked_subs) and (data.get("subreddit") or "").lower() in blocked_subs
 
 
+def _clean(text) -> str:
+    """Reddit в JSON-ответе экранирует & < > как &amp; &lt; &gt; — без обратной замены ссылки с query-строкой
+    (…?a=1&b=2) портятся. Один html.unescape — точная обратная операция (буквальный «&amp;» от пользователя
+    приходит как «&amp;amp;» и возвращается в «&amp;»)."""
+    return html.unescape(text or "")
+
+
+_IMG_EXT = {"jpeg": "jpg"}
+
+
+def _media_url(media_id, meta) -> str:
+    """Оригинал картинки/гифки из media_metadata -> https://i.redd.it/<id>.<ext> (стабильная ссылка, в отличие
+    от preview.redd.it с подписью). Эмодзи/стикеры и невалидные записи пропускаются."""
+    if not media_id or not isinstance(meta, dict) or meta.get("status") != "valid":
+        return ""
+    if meta.get("e") not in ("Image", "AnimatedImage"):
+        return ""
+    ext = str(meta.get("m") or "").partition("/")[2].lower()
+    ext = _IMG_EXT.get(ext, ext)
+    return f"https://i.redd.it/{media_id}.{ext}" if ext.isalnum() else ""
+
+
+def _add_link(links: list[str], url) -> None:
+    u = _clean(url).strip()
+    if u.startswith(("http://", "https://")) and u not in links:
+        links.append(u)
+
+
+def comment_links(data: dict) -> list[str]:
+    """Ссылки комментария, которых нет в тексте: картинки/гифки из media_metadata (в body они — ![img](id))."""
+    links: list[str] = []
+    for mid, meta in (data.get("media_metadata") or {}).items():
+        _add_link(links, _media_url(mid, meta))
+    return links
+
+
+def post_links(data: dict) -> list[str]:
+    """Все ссылки поста, не входящие в selftext: целевая ссылка/картинка/видео (у не-self поста), галерея,
+    картинки внутри selftext, кроспост. Требование заказчика: все ссылки обязаны попасть в content."""
+    links: list[str] = []
+    if not data.get("is_self"):
+        _add_link(links, data.get("url_overridden_by_dest") or data.get("url"))
+    meta = data.get("media_metadata") or {}
+    gallery = (data.get("gallery_data") or {}).get("items") or []
+    for it in gallery:
+        _add_link(links, _media_url(it.get("media_id"), meta.get(it.get("media_id"))))
+    for mid, m in meta.items():
+        _add_link(links, _media_url(mid, m))
+    for key in ("secure_media", "media"):
+        _add_link(links, ((data.get(key) or {}).get("reddit_video") or {}).get("fallback_url"))
+    for cp in data.get("crosspost_parent_list") or []:
+        _add_link(links, cp.get("url_overridden_by_dest") or cp.get("url"))
+    return links
+
+
+def with_links(text: str, links: list[str]) -> str:
+    """text + ссылки, которых в нём ещё нет (по одной на строку); сам текст не меняется."""
+    missing = [u for u in links if u not in text]
+    if not missing:
+        return text
+    tail = "\n".join(missing)
+    return f"{text}\n\n{tail}" if text else tail
+
+
+def profile_url(author: str) -> str:
+    return f"https://www.reddit.com/user/{author}" if author and author not in ("[deleted]", "[removed]") else ""
+
+
+def _summary(d: dict) -> str:
+    """Компактная JSON-строка, как в образце схемы: {"score":"1","upvote_ratio":"",...} (без пробелов)."""
+    return json.dumps(d, separators=(",", ":"))
+
+
 def build_payload(comment_data: dict) -> dict | None:
     comment_id = comment_data.get("id")
     if not comment_id:
@@ -26,7 +100,7 @@ def build_payload(comment_data: dict) -> dict | None:
     if created_utc is None:
         return None
 
-    body = comment_data.get("body", "") or ""
+    body = with_links(_clean(comment_data.get("body", "")), comment_links(comment_data))
     author = comment_data.get("author", "") or ""
     permalink = comment_data.get("permalink", "")
     url = f"https://www.reddit.com{permalink}" if permalink else ""
@@ -50,7 +124,7 @@ def build_payload(comment_data: dict) -> dict | None:
     # upvote_ratio и num_comments у Reddit есть только у постов (t3_),
     # не у комментариев (t1_) — для комментария оставляем их пустыми,
     # а не подставляем выдуманные значения.
-    summary = json.dumps({
+    summary = _summary({
         "score": str(comment_data.get("score", "")),
         "upvote_ratio": "",
         "num_comments": "",
@@ -67,6 +141,7 @@ def build_payload(comment_data: dict) -> dict | None:
         "title": "",
         "author": author,
         "username": author,
+        "userprofile_url": profile_url(author),
         "external_parent_id": external_parent_id,
         "summary": summary,
         "_age_seconds": time.time() - created_utc,
@@ -78,7 +153,8 @@ def build_post_payload(post_data: dict) -> dict | None:
     """Пост (t3_) в том же формате, что и комментарий; summary.data_type="post".
 
     content — текст поста (selftext); у ссылочных/картиночных постов он пуст, тогда берём заголовок,
-    чтобы content не был пустым. title — заголовок. external_parent_id у поста пуст."""
+    чтобы content не был пустым. К content ДОБАВЛЯЮТСЯ все ссылки поста (целевой URL, картинки, галерея, видео),
+    которых нет в тексте. title — заголовок. external_parent_id у поста пуст."""
     post_id = post_data.get("id")
     if not post_id:
         return None
@@ -87,8 +163,8 @@ def build_post_payload(post_data: dict) -> dict | None:
         return None
 
     fullname = post_data.get("name") or f"t3_{post_id}"
-    title = post_data.get("title", "") or ""
-    selftext = post_data.get("selftext", "") or ""
+    title = _clean(post_data.get("title", ""))
+    selftext = _clean(post_data.get("selftext", ""))
     if selftext.strip() in ("[removed]", "[deleted]"):
         selftext = ""
     author = post_data.get("author", "") or ""
@@ -98,7 +174,7 @@ def build_post_payload(post_data: dict) -> dict | None:
     community_name = f"r/{subreddit}" if subreddit else ""
 
     ratio = post_data.get("upvote_ratio")
-    summary = json.dumps({
+    summary = _summary({
         "score": str(post_data.get("score", "")),
         "upvote_ratio": "" if ratio is None else str(ratio),
         "num_comments": str(post_data.get("num_comments", "")),
@@ -107,7 +183,7 @@ def build_post_payload(post_data: dict) -> dict | None:
     })
 
     return {
-        "content": selftext or title,
+        "content": with_links(selftext or title, post_links(post_data)),
         "external_id": fullname,
         "created_at": iso_utc(created_utc),
         "domain": "reddit.com",
@@ -115,6 +191,7 @@ def build_post_payload(post_data: dict) -> dict | None:
         "title": title,
         "author": author,
         "username": author,
+        "userprofile_url": profile_url(author),
         "external_parent_id": "",
         "summary": summary,
         "_age_seconds": time.time() - created_utc,

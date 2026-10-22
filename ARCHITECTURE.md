@@ -65,7 +65,7 @@ scraper проверяет обновления cookies и профилей. П�
 | `scraper/http_client.py` | `curl_cffi` session per account, headers/cookies, timeouts и Reddit pagination |
 | `scraper/state.py` | `SeenCache` с `try_claim → confirm/release` и локальное backoff-состояние |
 | `scraper/sender.py` | Буфер свежих элементов; чтение очереди и отправка батчей |
-| `scraper/pipeline.py` | Формирование payload и вызов `store_endpoint` |
+| `scraper/pipeline.py` | Формирование payload (в `content` попадают ВСЕ ссылки: текст раскодирован из HTML-сущностей Reddit, ссылки поста/галереи/видео/картинок комментария дописаны) и вызов `store_endpoint` |
 | `scraper/health.py` | Наблюдение за executor; замена пула при зависших потоках |
 | `scraper/identity.py` | Пути к `state/`, чтение заявок и профиля активной идентичности слота |
 | `scraper/config.py` | `ConfigStore`, чтение аккаунтов/cookies и `CookieFileWatcher` |
