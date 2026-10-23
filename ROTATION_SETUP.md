@@ -237,3 +237,25 @@ venv/bin/python3 scripts/attach_proxies.py add --count 10 --apply
   `login_hub.py`, перезапуск `rotation-daemon` и `scraper` (скрипт печатает эти шаги).
 - Чтобы демон ротации и mihomo знали весь пул (а не только выданные прокси), укажите
   `rotation.proxies_file: all_proxies.txt` в `config.yaml`.
+
+## Регистрация нового аккаунта: ник и пароль генерируются сами (`--register`)
+
+`login_hub.py` и `manual_login.py` принимают `--register`: для слота придумывается ник
+(`Adjective_Noun123`, 3–20 символов, проверка через `username_available` по прокси слота) и
+пароль (16 символов, без похожих `0/O/1/l`). Данные печатаются в консоль хаба один раз и
+сохраняются в `credentials/<account>.json` (каталог 0700, файл 0600; в `.gitignore` и
+`.dockerignore`; не в `state/`, не в логах и не в `status.json`). Окно открывается на
+`/register`, ник и пароль подставляются в пустые поля (best-effort).
+
+Почту, капчу, подтверждение почты и нажатие кнопки делаешь сам в noVNC. После
+обнаружения входа в файле обновляются фактический ник и статус `logged_in`.
+
+```bash
+python scripts/login_hub.py --register ...          # те же аргументы, что и без --register
+python scripts/manual_login.py account_60 --register
+python scripts/manual_login.py account_60 --register --new-creds   # сгенерировать заново
+```
+
+Повторный запуск для того же аккаунта берёт прежние данные (`--new-creds` — новые).
+Если ник занят или поля не подставились — возьми данные из консоли или из
+`credentials/<account>.json`.

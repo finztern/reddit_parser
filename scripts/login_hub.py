@@ -65,6 +65,7 @@ _SCRIPTS_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPTS_DIR))
 sys.path.insert(0, str(_SCRIPTS_DIR.parent))
 
+import account_creds as ac  # noqa: E402  (ник/пароль для --register)
 import human_session as hs  # noqa: E402  (модуль 04)
 import login_fleet as lf  # noqa: E402
 import manual_login as ml  # noqa: E402  (is_logged_in, verify_cookies, exit_ip, infer_profile, resolve_geo...)
@@ -576,9 +577,11 @@ class _Finished(Exception):
 
 
 class Options:
-    def __init__(self, timeout_minutes=30.0, post_login_wait=30.0, fresh=False, verify=True, force=False):
+    def __init__(self, timeout_minutes=30.0, post_login_wait=30.0, fresh=False, verify=True, force=False,
+                 register=False, new_creds=False):
         self.timeout_minutes, self.post_login_wait = timeout_minutes, post_login_wait
         self.fresh, self.verify, self.force = fresh, verify, force
+        self.register, self.new_creds = register, new_creds
 
 
 class Context:
@@ -609,6 +612,8 @@ class LoginSession:
         self.exit_ip: str | None = None
         self.user: str | None = None
         self.human_note = ""
+        self.creds: dict | None = None      # ник/пароль для --register (в status.json не попадают)
+        self._filled: set[str] = set()
         self.started = time.time()
         self.desktop: Desktop | None = None
         self.link = link_for(ctx.host, port)
@@ -652,6 +657,10 @@ class LoginSession:
         prof = resolve_profile(name, acc, ctx.guests, ctx.login_cfg, ctx.guest_cfg, tuple(ctx.cfg["screen"]))
         impersonate = prof.get("impersonate") or impersonate
         proxy_url = f"http://{PROXY_HOST}:{port}"
+        if opt.register:
+            self.creds, reused = ac.prepare(name, proxy_url, impersonate, new=opt.new_creds)
+            say(f"[{name}] регистрация: ник {self.creds['username']}   пароль {self.creds['password']}   "
+                f"({'прежние данные' if reused else 'сгенерировано'}; credentials/{name}.json, 0600)")
         base_url = ctx.login_cfg.get("reddit_base_url") or ctx.guest_cfg.get("reddit_base_url") or "https://www.reddit.com"
         cookie_file = BASE_DIR / acc.get("cookie_file", f"cookies/{name}.json")
         state_path = BASE_DIR / "storage_state" / f"{name}.json"
@@ -736,11 +745,12 @@ class LoginSession:
                     context.add_init_script(init)
                 page = context.new_page()
                 try:
-                    page.goto(base_url.rstrip("/") + "/login", timeout=45000, wait_until="domcontentloaded")
+                    page.goto(base_url.rstrip("/") + ("/register" if self.creds else "/login"), timeout=45000,
+                              wait_until="domcontentloaded")
                 except Exception:
                     pass  # человек откроет reddit.com/login сам
 
-                self.set(WAITING_LOGIN)
+                self.set(WAITING_LOGIN, f"регистрация: ник {self.creds['username']}" if self.creds else "")
                 tick = 0
                 while True:
                     self._check_cancel()
@@ -754,9 +764,13 @@ class LoginSession:
                     tick += 1
                     if tick % 3:
                         continue
+                    if self.creds:
+                        ac.prefill_signup(page, self.creds, self._filled)
                     ok, info = ml.is_logged_in(page, base_url)
                     if ok:
                         self.user = info
+                        if self.creds:
+                            ac.mark_logged_in(name, info)
                         break
                     self._update_waiting_user(page)
 
@@ -1033,6 +1047,10 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--post-login-wait", type=float, default=30,
                     help="сколько секунд ждать после входа (онбординг), по умолчанию 30")
     ap.add_argument("--fresh", action="store_true", help="чистая сессия, без сохранённых cookies/storage_state")
+    ap.add_argument("--register", action="store_true",
+                    help="регистрация нового аккаунта: придумать ник и пароль (credentials/<account>.json), открыть "
+                         "/register и подставить их в пустые поля; почту, капчу и отправку формы делаешь сам")
+    ap.add_argument("--new-creds", action="store_true", help="с --register: сгенерировать данные заново")
     ap.add_argument("--no-verify", action="store_true")
     ap.add_argument("--force", action="store_true", help="писать cookies, даже если верификация не прошла")
     args = ap.parse_args(argv)
@@ -1104,7 +1122,8 @@ def main(argv: list[str] | None = None) -> int:
         f.write(password + "\n")
 
     cancel = threading.Event()
-    options = Options(args.timeout_minutes, args.post_login_wait, args.fresh, not args.no_verify, args.force)
+    options = Options(args.timeout_minutes, args.post_login_wait, args.fresh, not args.no_verify, args.force,
+                      args.register, args.new_creds)
     ctx = Context(cfg=cfg, bind=str(bind_ip), networks=networks, vnc_password=password, passwd_file=passwd_file,
                   novnc_dir=novnc_dir, ports=PortPool(cfg["port_base"], cfg["max_parallel"] + PORT_RANGE_SLACK),
                   displays=DisplayPool(), log_dir=tmp / "logs", options=options, cancel=cancel,

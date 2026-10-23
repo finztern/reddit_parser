@@ -64,6 +64,7 @@ from refresh_cookies import (  # noqa: E402
     cookie_editor_to_playwright,
     playwright_to_cookie_editor,
 )
+import account_creds as ac  # noqa: E402  (ник/пароль для --register)
 import login_fleet as lf  # noqa: E402
 from scraper.config import ACCOUNTS_PATH, load_accounts  # noqa: E402
 from scraper.constants import BASE_DIR, PROXY_HOST, log  # noqa: E402
@@ -239,6 +240,10 @@ def main() -> int:
                     help="сколько секунд ждать после обнаружения логина/регистрации, "
                          "чтобы успеть закончить онбординг (по умолчанию 30)")
     ap.add_argument("--fresh", action="store_true", help="чистая сессия, без сохранённых cookies/storage_state")
+    ap.add_argument("--register", action="store_true",
+                    help="регистрация нового аккаунта: придумать ник и пароль (credentials/<account>.json), открыть "
+                         "/register и подставить их в пустые поля; почту, капчу и отправку формы делаешь сам")
+    ap.add_argument("--new-creds", action="store_true", help="с --register: сгенерировать данные заново")
     ap.add_argument("--no-verify", action="store_true")
     ap.add_argument("--force", action="store_true", help="писать cookies, даже если верификация не прошла")
     args = ap.parse_args()
@@ -297,6 +302,11 @@ def main() -> int:
     state_path = BASE_DIR / "storage_state" / f"{name}.json"
 
     print(f"[{name}] прокси {proxy_url}, выходной IP: {exit_ip(proxy_url)}")
+    creds, filled = None, set()
+    if args.register:
+        creds, reused = ac.prepare(name, proxy_url, impersonate, new=args.new_creds)
+        print(f"[{name}] регистрация: ник {creds['username']}   пароль {creds['password']}   "
+              f"({'прежние данные' if reused else 'сгенерировано'}; credentials/{name}.json, 0600)")
     print(f"[{name}] engine={engine} channel={channel} device={device} "
           f"locale={geo['locale']} tz={geo['timezone_id']}\n[{name}] UA: {user_agent}")
 
@@ -370,7 +380,8 @@ def main() -> int:
                     context.add_init_script(profile_gen.init_script(ident))
                 page = context.new_page()
                 try:
-                    page.goto(base_url.rstrip("/") + "/login", timeout=45000, wait_until="domcontentloaded")
+                    page.goto(base_url.rstrip("/") + ("/register" if creds else "/login"), timeout=45000,
+                              wait_until="domcontentloaded")
                 except Exception as e:
                     print(f"[!] страница логина не открылась сразу ({e}) — открой reddit.com/login в окне сам")
 
@@ -382,9 +393,13 @@ def main() -> int:
                     except Exception:
                         print(f"[{name}] браузер закрыт до завершения логина — ничего не сохранено")
                         return 1
+                    if creds:
+                        ac.prefill_signup(page, creds, filled)
                     ok, info = is_logged_in(page, base_url)
                     if ok:
                         logged_user = info
+                        if creds:
+                            ac.mark_logged_in(name, info)
                         break
                     if time.monotonic() - last_note > 30:
                         last_note = time.monotonic()
