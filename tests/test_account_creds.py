@@ -63,46 +63,35 @@ def test_mark_logged_in(tmp_path, monkeypatch):
     assert cur["username"] == "RealName" and cur["status"] == "logged_in"
 
 
-class FakeLoc:
-    def __init__(self, page, sel):
-        self.page, self.sel = page, sel
+def test_hook_runner_is_safe_and_disables(monkeypatch):
+    import registration_hook as rh
+    logs = []
+    ctx = rh.RegCtx("a", "u", "p", "https://x", "http://p", "chrome", log=logs.append)
+    calls = {"ready": 0, "tick": 0}
 
-    @property
-    def first(self):
-        return self
+    def ready(page, c):
+        calls["ready"] += 1
+        raise RuntimeError("boom")
 
-    def count(self):
-        return 1 if self.sel in self.page.fields else 0
-
-    def is_visible(self):
-        return True
-
-    def input_value(self):
-        return self.page.fields[self.sel]
-
-    def fill(self, v):
-        self.page.fields[self.sel] = v
-
-
-class FakePage:
-    def __init__(self, url, fields):
-        self.url, self.fields = url, fields
-
-    def locator(self, sel):
-        return FakeLoc(self, sel)
+    def tick(page, c):
+        calls["tick"] += 1
+        raise ValueError("bad")
+    ready.__name__, tick.__name__ = "on_page_ready", "on_tick"
+    monkeypatch.setattr(rh, "on_page_ready", ready)
+    monkeypatch.setattr(rh, "on_tick", tick)
+    r = rh.HookRunner(ctx)
+    r.page_ready(None)
+    r.page_ready(None)
+    assert calls["ready"] == 1
+    for _ in range(40):
+        r.tick(None)
+    assert calls["tick"] == rh.HookRunner.MAX_TICK_FAILS
+    assert sum("on_tick:" in m for m in logs) == 1 and any("отключён" in m for m in logs)
 
 
-def test_prefill_only_empty_fields_once():
-    creds = {"username": "U", "password": "P"}
-    page = FakePage("https://www.reddit.com/register/", {'input[name="username"]': "", 'input[name="password"]': "mine"})
-    filled = set()
-    assert ac.prefill_signup(page, creds, filled) == ["username"]
-    assert page.fields['input[name="password"]'] == "mine" and filled == {"username", "password"}
-    page.fields['input[name="username"]'] = ""
-    assert ac.prefill_signup(page, creds, filled) == []  # человек стёр — не лезем повторно
-
-
-def test_prefill_ignored_outside_register():
-    page = FakePage("https://www.reddit.com/login", {'input[name="username"]': ""})
-    assert ac.prefill_signup(page, {"username": "U", "password": "P"}, set()) == []
-    assert page.fields['input[name="username"]'] == ""
+def test_hook_default_is_noop():
+    import registration_hook as rh
+    ctx = rh.RegCtx("a", "u", "p", "https://x", "http://p", "chrome", log=lambda m: None)
+    r = rh.HookRunner(ctx)
+    r.page_ready(object())
+    r.tick(object())

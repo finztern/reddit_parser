@@ -8,8 +8,7 @@ scripts/account_creds.py — ник и пароль для РУЧНОЙ реги
     удалась — ник берётся без неё);
   * сохраняет пару в credentials/<account>.json (каталог 0700, файл 0600, атомарно): повторный запуск для того
     же аккаунта берёт ТЕ ЖЕ данные, чтобы регистрация не ушла в никуда после обрыва окна;
-  * в окне регистрации (/register) подставляет ник и пароль в пустые поля — best-effort, разметка Reddit
-    меняется; не получилось — данные напечатаны в консоли хаба.
+  * заполнение формы здесь НЕ делается — это твоя логика в scripts/registration_hook.py.
 
 Чего НЕ делает: не нажимает «зарегистрироваться», не вводит почту, не решает капчу и не подтверждает почту —
 это делает человек в окне noVNC. Пароль печатается один раз в консоль оператора и лежит в credentials/ (не
@@ -146,37 +145,3 @@ def mark_logged_in(account: str, reddit_name: str, base: Path | None = None) -> 
     cur.update(username=reddit_name or cur["username"], status="logged_in", logged_in_at=int(time.time()))
     save_credentials(account, cur, base)
 
-
-FIELD_SELECTORS = {
-    "username": ('input[name="username"]', "#register-username", 'faceplate-text-input[name="username"] input'),
-    "password": ('input[name="password"]', "#register-password", 'faceplate-text-input[name="password"] input'),
-}
-
-
-def prefill_signup(page, creds: dict, filled: set[str]) -> list[str]:
-    """Подставляет ник/пароль в ПУСТЫЕ видимые поля формы регистрации (только на /register; каждое поле — один
-    раз, чтобы не мешать человеку). Ничего не отправляет. -> какие поля заполнены в этот вызов."""
-    done: list[str] = []
-    try:
-        if "/register" not in (page.url or ""):
-            return done
-    except Exception:  # noqa: BLE001
-        return done
-    for field, selectors in FIELD_SELECTORS.items():
-        if field in filled:
-            continue
-        for sel in selectors:
-            try:
-                loc = page.locator(sel).first
-                if loc.count() == 0 or not loc.is_visible():
-                    continue
-                if loc.input_value():
-                    filled.add(field)
-                else:
-                    loc.fill(creds[field])
-                    filled.add(field)
-                    done.append(field)
-                break
-            except Exception:  # noqa: BLE001 — разметка менялась/поле исчезло: пробуем следующий селектор
-                continue
-    return done

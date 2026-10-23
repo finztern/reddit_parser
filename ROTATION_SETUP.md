@@ -238,24 +238,25 @@ venv/bin/python3 scripts/attach_proxies.py add --count 10 --apply
 - Чтобы демон ротации и mihomo знали весь пул (а не только выданные прокси), укажите
   `rotation.proxies_file: all_proxies.txt` в `config.yaml`.
 
-## Регистрация нового аккаунта: ник и пароль генерируются сами (`--register`)
+## Регистрация нового аккаунта: ник/пароль и твоя логика (`--register`)
 
-`login_hub.py` и `manual_login.py` принимают `--register`: для слота придумывается ник
-(`Adjective_Noun123`, 3–20 символов, проверка через `username_available` по прокси слота) и
-пароль (16 символов, без похожих `0/O/1/l`). Данные печатаются в консоль хаба один раз и
-сохраняются в `credentials/<account>.json` (каталог 0700, файл 0600; в `.gitignore` и
-`.dockerignore`; не в `state/`, не в логах и не в `status.json`). Окно открывается на
-`/register`, ник и пароль подставляются в пустые поля (best-effort).
+`login_hub.py` и `manual_login.py` принимают `--register`. Хаб/скрипт сам делает всё «вокруг»:
+браузер с профилем слота через прокси слота, генерация ника и пароля, открытие `/register`,
+проверка входа каждые ~3 с, сохранение cookies/`storage_state`, включение слота.
 
-Почту, капчу, подтверждение почты и нажатие кнопки делаешь сам в noVNC. После
-обнаружения входа в файле обновляются фактический ник и статус `logged_in`.
+Ник (`Adjective_Noun123`, проверка `username_available` по прокси слота) и пароль (16 символов)
+печатаются в консоль один раз и лежат в `credentials/<account>.json` (каталог 0700, файл 0600;
+в `.gitignore`/`.dockerignore`; не в `state/`, логах и `status.json`). Повторный запуск для того же
+аккаунта берёт прежние данные, `--new-creds` — генерирует новые.
+
+**Заполнение формы — твоя логика в `scripts/registration_hook.py`:**
+`on_page_ready(page, ctx)` — один раз после открытия `/register`; `on_tick(page, ctx)` — каждые ~3 с
+до обнаружения входа. В `ctx`: `username`, `password`, `account`, `base_url`, `proxy_url`,
+`state` (хранилище шагов между тиками), `log()`, `save_creds(email=...)`. Исключения хука не роняют
+сессию (после 20 подряд ошибок `on_tick` отключается). Пока функции пустые, всё делается руками в noVNC.
 
 ```bash
 python scripts/login_hub.py --register ...          # те же аргументы, что и без --register
 python scripts/manual_login.py account_60 --register
-python scripts/manual_login.py account_60 --register --new-creds   # сгенерировать заново
+python scripts/manual_login.py account_60 --register --new-creds
 ```
-
-Повторный запуск для того же аккаунта берёт прежние данные (`--new-creds` — новые).
-Если ник занят или поля не подставились — возьми данные из консоли или из
-`credentials/<account>.json`.

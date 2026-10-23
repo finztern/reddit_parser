@@ -65,6 +65,7 @@ from refresh_cookies import (  # noqa: E402
     playwright_to_cookie_editor,
 )
 import account_creds as ac  # noqa: E402  (ник/пароль для --register)
+import registration_hook as rh  # noqa: E402  (твоя логика авторегистрации)
 import login_fleet as lf  # noqa: E402
 from scraper.config import ACCOUNTS_PATH, load_accounts  # noqa: E402
 from scraper.constants import BASE_DIR, PROXY_HOST, log  # noqa: E402
@@ -242,7 +243,7 @@ def main() -> int:
     ap.add_argument("--fresh", action="store_true", help="чистая сессия, без сохранённых cookies/storage_state")
     ap.add_argument("--register", action="store_true",
                     help="регистрация нового аккаунта: придумать ник и пароль (credentials/<account>.json), открыть "
-                         "/register и подставить их в пустые поля; почту, капчу и отправку формы делаешь сам")
+                         "/register и вызвать scripts/registration_hook.py (твоя логика заполнения формы)")
     ap.add_argument("--new-creds", action="store_true", help="с --register: сгенерировать данные заново")
     ap.add_argument("--no-verify", action="store_true")
     ap.add_argument("--force", action="store_true", help="писать cookies, даже если верификация не прошла")
@@ -302,9 +303,11 @@ def main() -> int:
     state_path = BASE_DIR / "storage_state" / f"{name}.json"
 
     print(f"[{name}] прокси {proxy_url}, выходной IP: {exit_ip(proxy_url)}")
-    creds, filled = None, set()
+    creds, hook = None, None
     if args.register:
         creds, reused = ac.prepare(name, proxy_url, impersonate, new=args.new_creds)
+        hook = rh.HookRunner(rh.RegCtx(name, creds["username"], creds["password"], base_url, proxy_url,
+                                       impersonate))
         print(f"[{name}] регистрация: ник {creds['username']}   пароль {creds['password']}   "
               f"({'прежние данные' if reused else 'сгенерировано'}; credentials/{name}.json, 0600)")
     print(f"[{name}] engine={engine} channel={channel} device={device} "
@@ -384,6 +387,8 @@ def main() -> int:
                               wait_until="domcontentloaded")
                 except Exception as e:
                     print(f"[!] страница логина не открылась сразу ({e}) — открой reddit.com/login в окне сам")
+                if hook:
+                    hook.page_ready(page)
 
                 print(f"[{name}] Жду логин до {args.timeout_minutes:.0f} мин (окно браузера не закрывай)...")
                 last_note = 0.0
@@ -393,8 +398,8 @@ def main() -> int:
                     except Exception:
                         print(f"[{name}] браузер закрыт до завершения логина — ничего не сохранено")
                         return 1
-                    if creds:
-                        ac.prefill_signup(page, creds, filled)
+                    if hook:
+                        hook.tick(page)
                     ok, info = is_logged_in(page, base_url)
                     if ok:
                         logged_user = info
