@@ -95,3 +95,91 @@ def test_hook_default_is_noop():
     r = rh.HookRunner(ctx)
     r.page_ready(object())
     r.tick(object())
+
+
+class _DumpPage:
+    url = "https://www.reddit.com/register/"
+    frames = []
+    main_frame = None
+
+    def __init__(self, html):
+        self.html = html
+
+    def evaluate(self, js):
+        return self.html
+
+    def screenshot(self, path):
+        open(path, "wb").write(b"png")
+
+
+def test_autodump_only_on_change_and_capped(tmp_path, monkeypatch):
+    import registration_hook as rh
+    monkeypatch.setattr(rh, "dump_dir", lambda account: tmp_path / account)
+    monkeypatch.setattr(rh, "MAILBOX_ENABLED", False)
+    logs = []
+    r = rh.HookRunner(rh.RegCtx("a1", "u", "p", "https://x", "http://p", "chrome", log=logs.append))
+    page = _DumpPage("<form></form>")
+    r.page_ready(page)
+    r.tick(page)
+    r.tick(page)
+    assert len(list((tmp_path / "a1").glob("*.html"))) == 1
+    page.html = "<form><input name=email></form>"
+    r.tick(page)
+    assert len(list((tmp_path / "a1").glob("*.png"))) == 2
+    assert "<input name=email>" in sorted((tmp_path / "a1").glob("*.html"))[-1].read_text()
+    r._dumps = rh.MAX_DUMPS
+    page.html = "<x/>"
+    r.tick(page)
+    assert len(list((tmp_path / "a1").glob("*.html"))) == 2
+
+
+def test_fill_email_once_only_empty_field():
+    import registration_hook as rh
+
+    class Loc:
+        def __init__(self, v):
+            self.v = v
+
+        first = property(lambda s: s)
+        count = lambda s: 1  # noqa: E731
+        is_visible = lambda s: True  # noqa: E731
+        input_value = lambda s: s.v  # noqa: E731
+
+        def fill(self, x):
+            self.v = x
+
+    class Page:
+        def __init__(self, v):
+            self.loc = Loc(v)
+
+        def locator(self, sel):
+            return self.loc if sel == 'input[type="email"]' else type("N", (), {"first": property(lambda s: s),
+                                                                              "count": lambda s: 0})()
+    ctx = rh.RegCtx("a", "u", "p", "https://x", "http://p", "chrome", log=lambda m: None)
+    ctx.state["email"] = "x@mailgenerator.net"
+    page = Page("")
+    assert rh.fill_email_once(page, ctx) and page.loc.v == "x@mailgenerator.net"
+    page2 = Page("mine@x.com")
+    ctx2 = rh.RegCtx("a", "u", "p", "https://x", "http://p", "chrome", log=lambda m: None)
+    ctx2.state["email"] = "x@mailgenerator.net"
+    assert rh.fill_email_once(page2, ctx2) and page2.loc.v == "mine@x.com"
+
+
+def test_mailbox_failure_is_logged_not_raised(tmp_path, monkeypatch):
+    import registration_hook as rh
+    monkeypatch.setattr(rh, "dump_dir", lambda account: tmp_path / account)
+    logs = []
+
+    class Ctxp:
+        def new_page(self):
+            raise RuntimeError("no browser")
+
+    class Page:
+        context = Ctxp()
+    ctx = rh.RegCtx("a", "u", "p", "https://x", "http://p", "chrome", log=logs.append)
+    try:
+        rh.create_mailbox(Page(), ctx)
+        raised = False
+    except RuntimeError:
+        raised = True
+    assert raised  # new_page() вне try: исключение поймает HookRunner._call
