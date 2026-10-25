@@ -41,8 +41,21 @@ def _load():
     return rc
 
 
+class _FakePw:
+    def __enter__(self):
+        return object()
+
+    def __exit__(self, *a):
+        return False
+
+
+def _fake(rc):
+    rc.sync_playwright = lambda: _FakePw()   # без запуска настоящего драйвера Playwright
+    return rc
+
+
 def test_parallel_runs_concurrently_keeps_order_and_isolates_errors():
-    rc = _load()
+    rc = _fake(_load())
     accounts = [{"name": f"a{i}"} for i in range(6)]
     cur, peak, lock = [0], [0], threading.Lock()
 
@@ -67,7 +80,7 @@ def test_parallel_runs_concurrently_keeps_order_and_isolates_errors():
 
 
 def test_sequential_when_one_worker():
-    rc = _load()
+    rc = _fake(_load())
     seen = []
     res = rc.run_accounts([{"name": "x"}, {"name": "y"}], {}, False, None, 1, {},
                           process=lambda pw, a, *r: seen.append(a["name"]) or rc.AccountResult(a["name"], True, ""))
@@ -75,7 +88,7 @@ def test_sequential_when_one_worker():
 
 
 def test_offsets_delay_start():
-    rc = _load()
+    rc = _fake(_load())
     starts = {}
     t0 = time.monotonic()
 
@@ -87,7 +100,7 @@ def test_offsets_delay_start():
 
 
 def test_plan_offsets():
-    rc = _load()
+    rc = _fake(_load())
     assert rc.plan_offsets(["a", "b", "c"], False, 10) == {"a": 0, "b": 10, "c": 20}
     assert rc.plan_offsets(["a", "b"], False, 0) == {"a": 0.0, "b": 0.0}
     out = rc.plan_offsets(["a", "b", "c"], True, 10)
