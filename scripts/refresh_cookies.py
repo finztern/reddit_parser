@@ -65,6 +65,7 @@ import os
 import random
 import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -108,6 +109,7 @@ DEFAULT_CONFIG = {
     "headless": True,
     "login_check_timeout_seconds": 20,
     "stagger_seconds": 45,
+    "workers": 4,
     "storage_state_dir": "storage_state",
     "reddit_base_url": "https://www.reddit.com",
     "login_check_path": "/api/me.json",
@@ -534,6 +536,40 @@ def select_accounts(cfg: dict, only: list[str] | None) -> list[dict]:
     return accounts
 
 
+def plan_offsets(names: list[str], human_enabled: bool, gap: float) -> dict[str, float]:
+    """Планируемое смещение старта каждого аккаунта (с от начала прогона)."""
+    if gap <= 0 or len(names) < 2:
+        return {n: 0.0 for n in names}
+    if human_enabled:
+        return hs.plan_start_offsets(names, random.Random(), mean_gap=gap)
+    return {n: i * gap for i, n in enumerate(names)}
+
+
+def run_accounts(accounts: list[dict], cfg: dict, dry_run: bool, human_cfg: dict | None, workers: int,
+                 offsets: dict[str, float], process=None) -> list[AccountResult]:
+    """Обновляет аккаунты в `workers` потоках. У каждого аккаунта свой sync_playwright (его объект нельзя
+    делить между потоками); файлы аккаунтов разные, запись атомарная. Порядок результатов = порядок accounts."""
+    process = process or process_account
+    t_start = time.monotonic()
+
+    def job(account: dict) -> AccountResult:
+        name = account["name"]
+        wait = offsets.get(name, 0.0) - (time.monotonic() - t_start)
+        if wait > 0:
+            time.sleep(wait)
+        try:
+            with sync_playwright() as pw:
+                return process(pw, account, cfg, dry_run, human_cfg)
+        except Exception as e:  # noqa: BLE001
+            log.exception("[%s] неожиданная ошибка обработки аккаунта", name)
+            return AccountResult(name, False, f"необработанное исключение: {e}")
+
+    if workers <= 1:
+        return [job(a) for a in accounts]
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="refresh") as ex:
+        return [f.result() for f in [ex.submit(job, a) for a in accounts]]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--account", action="append", help="Только этот(и) аккаунт(ы) (флаг можно повторять).")
@@ -541,6 +577,12 @@ def main() -> int:
     parser.add_argument("--no-headless", dest="headless", action="store_false")
     parser.add_argument("--dry-run", action="store_true", help="Ничего не записывать в cookies/storage_state.")
     parser.add_argument("--no-human", action="store_true", help="Не запускать «живую» сессию (human.enabled=false на этот прогон).")
+    parser.add_argument("--workers", type=int, default=None,
+                        help="Сколько аккаунтов обновлять параллельно (по умолчанию workers из refresh_cookies.yaml, 4). "
+                             "1 — как раньше, по очереди.")
+    parser.add_argument("--stagger", type=float, default=None,
+                        help="Средняя пауза между стартами аккаунтов, с (по умолчанию stagger_seconds из конфига; "
+                             "при workers>1 делится на число потоков).")
     parser.add_argument(
         "--config", default=None,
         help="Путь к refresh_cookies.yaml (по умолчанию: scripts/refresh_cookies.yaml, "
@@ -557,6 +599,9 @@ def main() -> int:
     cfg = load_refresh_config(config_path)
     if args.headless is not None:
         cfg["headless"] = args.headless
+    if args.stagger is not None:
+        cfg["stagger_seconds"] = max(0.0, args.stagger)
+    workers = max(1, int(args.workers if args.workers is not None else cfg.get("workers") or 1))
 
     accounts = select_accounts(cfg, args.account)
     if not accounts:
@@ -572,27 +617,15 @@ def main() -> int:
     human_cfg = hs.load_human_cfg()
     if args.no_human:
         human_cfg["enabled"] = False
-    offsets: dict[str, float] = {}
-    if human_cfg["enabled"] and len(accounts) > 1 and cfg["stagger_seconds"] > 0:
-        # старты аккаунтов разнесены лог-нормальным jitter, порядок перемешан — не «все сразу и по номерам»
-        offsets = hs.plan_start_offsets([a["name"] for a in accounts], random.Random(),
-                                        mean_gap=float(cfg["stagger_seconds"]))
-        accounts.sort(key=lambda a: offsets[a["name"]])
+    workers = min(workers, len(accounts))
+    # Старты разнесены, чтобы аккаунты не логинились залпом: при N потоках средняя пауза делится на N —
+    # иначе одна только пауза между стартами (stagger × число аккаунтов) съедает всё выигрыш.
+    gap = float(cfg["stagger_seconds"]) / workers
+    offsets = plan_offsets([a["name"] for a in accounts], human_cfg["enabled"], gap)
+    accounts.sort(key=lambda a: offsets[a["name"]])
+    log.info("refresh_cookies: потоков=%d, средняя пауза между стартами %.1fс", workers, gap)
 
-    results: list[AccountResult] = []
-    t_start = time.monotonic()
-    with sync_playwright() as pw:
-        for i, account in enumerate(accounts):
-            if offsets:
-                time.sleep(max(0.0, offsets[account["name"]] - (time.monotonic() - t_start)))
-            elif i > 0 and cfg["stagger_seconds"] > 0:
-                time.sleep(cfg["stagger_seconds"])
-            try:
-                result = process_account(pw, account, cfg, args.dry_run, human_cfg)
-            except Exception as e:
-                log.exception("[%s] неожиданная ошибка обработки аккаунта", account["name"])
-                result = AccountResult(account["name"], False, f"необработанное исключение: {e}")
-            results.append(result)
+    results = run_accounts(accounts, cfg, args.dry_run, human_cfg, workers, offsets)
 
     ok = [r for r in results if r.ok]
     failed = [r for r in results if not r.ok]

@@ -260,3 +260,14 @@ python scripts/login_hub.py --register ...          # те же аргумент
 python scripts/manual_login.py account_60 --register
 python scripts/manual_login.py account_60 --register --new-creds
 ```
+
+### Обновление куков логин-аккаунтов в несколько потоков
+
+`scripts/refresh_cookies.py` обновляет аккаунты параллельно: `workers: 4` в
+`scripts/refresh_cookies.yaml` или `--workers N` (1 — по очереди, как раньше). Каждый аккаунт
+получает свой браузер; при N потоках средняя пауза между стартами (`stagger_seconds`, `--stagger`)
+делится на N. Ориентир по памяти: ~300–500 МБ на headless-браузер.
+
+```bash
+python scripts/refresh_cookies.py --workers 8 --stagger 20
+```

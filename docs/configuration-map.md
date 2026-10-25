@@ -96,7 +96,7 @@ are separately configured in `scripts/refresh_cookies.yaml` and
 ### `scripts/refresh_cookies.yaml`
 
 - `login_accounts`: explicit login job membership; separate from `enabled`.
-- `headless`, `login_check_timeout_seconds`, `stagger_seconds`,
+- `headless`, `login_check_timeout_seconds`, `stagger_seconds`, `workers`,
   `storage_state_dir`, `reddit_base_url`, `login_check_path`: browser launch,
   timing, login verification, and storage settings.
 - `geo_defaults` and `account_geo`: locale/timezone defaults and per-account
