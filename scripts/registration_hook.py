@@ -371,7 +371,7 @@ def on_page_ready(page, ctx: RegCtx) -> None:
     """Вызывается ОДИН раз после page.goto(<base_url>/register).
 
     Встроенная часть: адрес ящика с mailgenerator.net (вторая вкладка), возврат на вкладку
-    регистрации. Ниже — место для твоей логики.
+    регистрации. Ниже - место для твоей логики.
     """
     if MAILBOX_ENABLED:
         email = get_mailbox(page, ctx)
