@@ -9,7 +9,7 @@ scripts/registration_hook.py — ТВОЯ логика автоматическ�
   * каждые ~3 с проверяют, залогинен ли аккаунт; как только вход обнаружен — сохраняют cookies
     и storage_state, включают слот, обновляют credentials/<account>.json (status=logged_in).
 
-Встроенная часть: адрес ящика с mailgenerator.net (вторая вкладка), автозаполнение шагов формы и снимки каждого шага (HTML + скриншот в
+Встроенная часть: адрес ящика с mailgenerator.net (вторая вкладка), автозаполнение шагов формы и снимки каждого шага (H[...]
 state/registration_dump/<account>/) — по ним пишутся селекторы. Капчу и код из письма вводишь сам в noVNC.
 Свою логику пиши в местах «ТВОЙ КОД».
 
@@ -22,7 +22,7 @@ state/registration_dump/<account>/) — по ним пишутся селект�
   * Не блокируй надолго: on_tick вызывается в том же потоке, что и ожидание входа; пока он работает,
     вход не проверяется. Долгие шаги дроби на тики (храни прогресс в ctx.state).
   * Исключения не роняют сессию: они логируются (один раз на тип), после 20 подряд упавших
-    on_tick хук отключается до конца сессии.
+    on_tick х��к отключается до конца сессии.
   * Не пиши пароль и куки в логи: ctx.log() идёт в консоль оператора.
 """
 
@@ -316,9 +316,9 @@ def read_mail_code(ctx: RegCtx) -> str | None:
 
 
 def signup_step(page, ctx: RegCtx) -> str | None:
-    """Определяет текущий шаг формы Reddit и делает безопасное автозаполнение. Селекторы взяты из снимков
+    """Определяет т��кущий шаг формы Reddit и делает безопасное автозаполнение. Селекторы взяты из снимков
     реальной регистрации (shadow DOM пробивается селекторами Playwright, привязка к slot/id, не к тексту).
-    Код из письма хук ПОДСТАВЛЯЕТ в поле и печатает одну строку со ссылкой на окно — Enter нажимаешь ты; капчу тоже ты. -> имя шага или None."""
+    Код из письма хук ПОДСТАВЛЯЕТ в поле и печатает одну строку со ссылкой на окно — Enter нажимаешь ты; капчу т[...]
     if ctx.state.get("replace_identity"):
         return "email_failed"
     dismiss_cookies(page, ctx)
@@ -329,10 +329,19 @@ def signup_step(page, ctx: RegCtx) -> str | None:
             ctx.state["code_printed"] = code
             if not code_input.input_value():
                 code_input.fill(code)
+            else:
+                code_input.fill(code)
             page.bring_to_front()
             code_input.click()
+            try:
+                code_input.press("Enter")
+            except Exception:  # noqa: BLE001
+                try:
+                    page.keyboard.press("Enter")
+                except Exception:  # noqa: BLE001
+                    pass
             where = f"  {ctx.link}" if ctx.link else ""
-            ctx.log(f">>> {ctx.account}: код подставлен ({code}) — открой окно и нажми Enter{where}")
+            ctx.log(f">>> {ctx.account}: код подставлен ({code}) — регистрация продолжается автоматически{where}")
         return "code"
     name = _shown(page, USERNAME_INPUT)
     if name is not None:
