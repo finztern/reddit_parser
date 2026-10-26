@@ -160,6 +160,9 @@ class _Loc:
     def click(self, **kw):
         self._el()["clicks"] = self._el().get("clicks", 0) + 1
 
+    def press(self, key):
+        self._el().setdefault("pressed", []).append(key)
+
 
 class _FPage:
     def __init__(self, els):
@@ -225,7 +228,7 @@ class _Mail:
         return L()
 
 
-def test_step_code_fills_prints_link_and_never_overwrites(tmp_path, monkeypatch):
+def test_step_code_fills_presses_enter_and_prints_link(tmp_path, monkeypatch):
     rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
     logs = []
     ctx.log = logs.append
@@ -239,12 +242,13 @@ def test_step_code_fills_prints_link_and_never_overwrites(tmp_path, monkeypatch)
     assert not front and not logs
     mail.lst = "Reddit  482913 is your Reddit verification code"
     assert rh.signup_step(page, ctx) == "code" and rh.signup_step(page, ctx) == "code"
-    assert sum("482913" in m and "нажми Enter" in m and "http://h:1/vnc" in m for m in logs) == 1 and front == [1]
+    assert sum("482913" in m and "регистрация продолжается" in m and "http://h:1/vnc" in m for m in logs) == 1 and front == [1]
     assert page.els[rh.CODE_INPUT]["v"] == "482913" and page.els[rh.CODE_INPUT]["clicks"] == 1
-    mail.lst = "Reddit  111222 is your Reddit verification code"      # повторная отправка
-    page.els[rh.CODE_INPUT]["v"] = "12"                               # человек уже начал вводить — не перетираем
+    assert page.els[rh.CODE_INPUT]["pressed"] == ["Enter"]
+    mail.lst = "Reddit  111222 is your Reddit verification code"      # повторная отправка: новый код вместо старого
     rh.signup_step(page, ctx)
-    assert any("111222" in m for m in logs) and page.els[rh.CODE_INPUT]["v"] == "12"
+    assert any("111222" in m for m in logs) and page.els[rh.CODE_INPUT]["v"] == "111222"
+    assert page.els[rh.CODE_INPUT]["pressed"] == ["Enter", "Enter"]
 
 
 def test_read_mail_code_opens_message_when_list_has_no_code(tmp_path, monkeypatch):
