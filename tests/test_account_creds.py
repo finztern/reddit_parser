@@ -383,7 +383,11 @@ class _EPage(_FPage):
         return _Loc(self, "text:error")
 
     def get_by_role(self, role, name=None):
-        return _Loc(self, "role:cookies")
+        for key, text in (("role:cookies", "Optionale Cookies ablehnen"), ("role:login", "Log In"),
+                          ("role:signup", "Sign up")):
+            if name is not None and name.search(text):
+                return _Loc(self, key)
+        return _Loc(self, "role:none")
 
 
 def test_email_send_error_retries_three_times_then_requests_new_identity(tmp_path, monkeypatch):
@@ -459,3 +463,32 @@ def test_cookie_banner_is_rejected_once_in_a_while(tmp_path, monkeypatch):
     assert rh.dismiss_cookies(page, ctx) and page.els["role:cookies"]["clicks"] == 2
     assert not rh.dismiss_cookies(_EPage({}), ctx)
     assert rh.COOKIE_BTN_RE.search("Optionale Cookies ablehnen")
+
+
+def test_open_signup_from_home_login_then_signup_then_form(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
+    t = [100.0]
+    monkeypatch.setattr(rh, "_now", lambda: t[0])
+    page = _EPage({"role:login": {}})                         # главная: синяя кнопка Log In
+    assert rh.signup_step(page, ctx) == "open_login" and page.els["role:login"]["clicks"] == 1
+    assert not ctx.state.get("form_seen")
+    page.els["role:signup"] = {}                              # открылось окно входа со ссылкой Sign up
+    assert rh.signup_step(page, ctx) is None                  # пауза 5 с между попытками
+    t[0] += 6
+    assert rh.signup_step(page, ctx) == "open_signup" and page.els["role:signup"]["clicks"] == 1
+    page.els[rh.EMAIL_INPUT] = {"v": ""}
+    page.els[rh.EMAIL_SUBMIT] = {}
+    t[0] += 6
+    assert rh.signup_step(page, ctx) == "email" and ctx.state["form_seen"]
+    t[0] += 60
+    page.els.pop(rh.EMAIL_INPUT)                              # форма видна не всегда: Log In больше не жмём
+    rh.signup_step(page, ctx)
+    assert page.els["role:login"]["clicks"] == 1
+
+
+def test_open_signup_without_login_button_goes_straight_to_signup(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
+    page = _EPage({"role:signup": {}})
+    assert rh.signup_step(page, ctx) == "open_signup" and page.els["role:signup"]["clicks"] == 1
+    assert rh.LOGIN_BTN_RE.search("Log In") and not rh.LOGIN_BTN_RE.search("Log in with Google")
+    assert rh.SIGNUP_BTN_RE.search("Sign Up") and not rh.SIGNUP_BTN_RE.search("Sign up with Apple")

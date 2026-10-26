@@ -274,6 +274,36 @@ def dismiss_cookies(page, ctx: RegCtx) -> bool:
         return False
 
 
+LOGIN_BTN_RE = re.compile(r"^\s*(Log ?In|Anmelden|Einloggen|Войти)\s*$", re.I)
+SIGNUP_BTN_RE = re.compile(r"^\s*(Sign ?up|Registrieren|Zarejestruj się|Зарегистрироваться)\s*$", re.I)
+
+
+def _click_named(page, rx) -> bool:
+    for role in ("button", "link"):
+        try:
+            loc = page.get_by_role(role, name=rx).first
+            if _visible(loc):
+                loc.click(timeout=3000)
+                return True
+        except Exception:  # noqa: BLE001
+            pass
+    return False
+
+
+def open_signup(page, ctx: RegCtx) -> str | None:
+    """Путь к форме регистрации с главной reddit.com: синяя кнопка «Log In» (если есть) -> в окне входа
+    «Sign up». Не чаще раза в 5 с; работает, пока форма регистрации ещё не появилась."""
+    now = _now()
+    if now - ctx.state.get("open_try", -1e9) < 5.0:
+        return None
+    ctx.state["open_try"] = now
+    if _click_named(page, SIGNUP_BTN_RE):
+        return "open_signup"
+    if _click_named(page, LOGIN_BTN_RE):
+        return "open_login"
+    return None
+
+
 def make_birthdate(rng=None) -> dict:
     """Случайная взрослая дата рождения (возраст 22–38, день ≤ 28 — подходит любому месяцу)."""
     import secrets
@@ -323,6 +353,13 @@ def signup_step(page, ctx: RegCtx) -> str | None:
     if ctx.state.get("replace_identity"):
         return "email_failed"
     dismiss_cookies(page, ctx)
+    step = _signup_step(page, ctx)
+    if step and not step.startswith("open_"):
+        ctx.state["form_seen"] = True
+    return step
+
+
+def _signup_step(page, ctx: RegCtx) -> str | None:
     code_input = _shown(page, CODE_INPUT)
     if code_input is not None:
         code = read_mail_code(ctx)
@@ -362,11 +399,13 @@ def signup_step(page, ctx: RegCtx) -> str | None:
         if not ctx.state.get("email"):
             return "email_wait"
         return email_step(page, ctx, email)
+    if not ctx.state.get("form_seen"):
+        return open_signup(page, ctx)
     return None
 
 
 def on_page_ready(page, ctx: RegCtx) -> None:
-    """Вызывается ОДИН раз после page.goto(<base_url>/register).
+    """Вызывается ОДИН раз после page.goto(<base_url>/) (главная; к форме регистрации хук проходит сам).
 
     Встроенная часть: адрес ящика с mailgenerator.net (вторая вкладка), возврат на вкладку
     регистрации. Ниже - место для твоей логики.

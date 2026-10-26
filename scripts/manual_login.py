@@ -392,7 +392,7 @@ def _main() -> int:
                     context.add_init_script(profile_gen.init_script(ident))
                 page = context.new_page()
                 try:
-                    page.goto(base_url.rstrip("/") + ("/register" if creds else "/login"), timeout=45000,
+                    page.goto(base_url.rstrip("/") + ("/" if creds else "/login"), timeout=45000,
                               wait_until="domcontentloaded")
                 except Exception as e:
                     print(f"[!] страница логина не открылась сразу ({e}) — открой reddit.com/login в окне сам")

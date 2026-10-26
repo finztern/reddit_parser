@@ -794,7 +794,7 @@ class LoginSession:
                     context.add_init_script(init)
                 page = context.new_page()
                 try:
-                    page.goto(base_url.rstrip("/") + ("/register" if self.creds else "/login"), timeout=45000,
+                    page.goto(base_url.rstrip("/") + ("/" if self.creds else "/login"), timeout=45000,
                               wait_until="domcontentloaded")
                 except Exception:
                     pass  # человек откроет reddit.com/login сам
