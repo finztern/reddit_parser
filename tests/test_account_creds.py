@@ -378,6 +378,9 @@ class _EPage(_FPage):
     def get_by_text(self, rx):
         return _Loc(self, "text:error")
 
+    def get_by_role(self, role, name=None):
+        return _Loc(self, "role:cookies")
+
 
 def test_email_send_error_retries_three_times_then_requests_new_identity(tmp_path, monkeypatch):
     rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
@@ -423,3 +426,32 @@ def test_send_error_regex_matches_german_message():
     import registration_hook as rh
     assert rh.SEND_ERROR_RE.search("Beim Senden des Verifizierungscodes ist etwas schiefgelaufen.")
     assert not rh.SEND_ERROR_RE.search("Gib deine E-Mail-Adresse ein")
+
+
+def test_email_step_stuck_without_recognized_error_still_counts_and_swaps(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
+    t = [100.0]
+    monkeypatch.setattr(rh, "_now", lambda: t[0])
+    page = _EPage({rh.EMAIL_INPUT: {"v": ""}, rh.EMAIL_SUBMIT: {}})       # ни баннера, ни текста ошибки
+    rh.signup_step(page, ctx)
+    for _ in range(3):
+        t[0] += rh.STUCK_S
+        rh.signup_step(page, ctx)
+    assert ctx.state["replace_identity"] and page.els[rh.EMAIL_SUBMIT]["clicks"] == 3
+    clicks = page.els[rh.EMAIL_SUBMIT]["clicks"]
+    t[0] += 1000
+    rh.signup_step(page, ctx)
+    assert page.els[rh.EMAIL_SUBMIT]["clicks"] == clicks                   # больше не жмём
+
+
+def test_cookie_banner_is_rejected_once_in_a_while(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
+    t = [100.0]
+    monkeypatch.setattr(rh, "_now", lambda: t[0])
+    page = _EPage({"role:cookies": {}})
+    assert rh.dismiss_cookies(page, ctx) and page.els["role:cookies"]["clicks"] == 1
+    assert not rh.dismiss_cookies(page, ctx)                               # пауза 10 с
+    t[0] += 11
+    assert rh.dismiss_cookies(page, ctx) and page.els["role:cookies"]["clicks"] == 2
+    assert not rh.dismiss_cookies(_EPage({}), ctx)
+    assert rh.COOKIE_BTN_RE.search("Optionale Cookies ablehnen")

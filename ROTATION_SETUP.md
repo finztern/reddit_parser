@@ -268,7 +268,8 @@ http://…/vnc.html…` со ссылкой noVNC этого аккаунта; E
 пароль в консоль не печатается (он в `credentials/<account>.json`).
 
 **Ошибка отправки кода и смена ноды/профиля.** Если после «Продолжить» Reddit пишет «Beim Senden des
-Verifizierungscodes ist etwas schiefgelaufen» (баннер под формой e-mail), хук через ~6 с жмёт кнопку снова;
+Verifizierungscodes ist etwas schiefgelaufen» (баннер под формой e-mail) или форма почты не сменилась на шаг кода
+за 15 с после клика, хук жмёт кнопку снова;
 после 3 неудач подряд хаб (и `manual_login.py --register`) закрывает браузер и вызывает
 `scripts/reidentify.py`: свободная годная нода из `all_nodes.reddit_ok.txt` (проверяется живость через mihomo),
 новый impersonate/user-agent/locale, старая нода уходит в `bad`. Правятся `vless_accounts.env`, `accounts.yaml`,
@@ -276,6 +277,8 @@ Verifizierungscodes ist etwas schiefgelaufen» (баннер под формой
 Регистрация стартует заново с теми же ником и паролем (новый ящик на mailgenerator.net), максимум 3 замены,
 потом слот останавливается. Вручную: `python scripts/reidentify.py account_96` (план) и `--apply` (запись).
 Если запущен `rotation-daemon`, после замены перезапусти его — иначе он по реестру вернёт старую ноду.
+
+Баннер cookies («Optionale Cookies ablehnen» / «Reject non-essential») хук отклоняет сам.
 
 **Снимки шагов.** Хук автоматически сохраняет каждый новый шаг формы в
 `state/registration_dump/<account>/NN-*.html` (DOM с shadow DOM и iframe, без значений полей и

@@ -109,10 +109,11 @@ PASSWORD_INPUT = "#register-password input"
 USERNAME_SUBMIT = 'auth-flow-modal[slot="register_username_and_password"] button[type="submit"]'
 # Ошибка «Beim Senden des Verifizierungscodes ist etwas schiefgelaufen» после «Продолжить»: баннер внутри
 # модалки шага почты (язык-независимо) либо текст по словам (de/en/ru).
-EMAIL_ERROR_BANNER = 'auth-flow-modal[slot="register_email"] rpl-info-banner'
+EMAIL_ERROR_BANNER = ('auth-flow-modal[slot="register_email"] :is(rpl-info-banner, inline-banner, [role="alert"])')
 SEND_ERROR_RE = re.compile(r"Verifizierungscode|verification code|код подтверждения|schiefgelaufen|went wrong|"
                            r"что-то пошло не так", re.I)
 EMAIL_MAX_TRIES = 3               # попыток отправить код (первая + повторы), потом смена ноды и профиля
+STUCK_S = 15.0                    # форма почты не сменилась на «код» за столько секунд после клика = неудача
 ERROR_WAIT_S = 6.0                # через сколько секунд после «Продолжить» ошибку считаем ответом на ЭТУ попытку
 AGE_INPUTS = {k: f'faceplate-text-input[name="{k}"] input' for k in ("day", "month", "year")}
 AGE_SUBMIT = "#age-collect-submit-btn"
@@ -234,19 +235,43 @@ def email_step(page, ctx: RegCtx, email_input) -> str:
     _fill_empty(email_input, ctx.state["email"])
     t = _now()
     last = ctx.state.get("email_click_at")
-    if last is not None and t - last >= ERROR_WAIT_S and send_error_visible(page):
+    # неудача = ошибка на экране через ERROR_WAIT_S ИЛИ форма почты всё ещё на месте через STUCK_S после клика
+    # (на случай, если текст/баннер ошибки не распознан: код приходит за секунды, шаг сменяется на «код»)
+    failed = last is not None and (t - last >= STUCK_S or (t - last >= ERROR_WAIT_S and send_error_visible(page)))
+    if failed:
         ctx.state["email_fails"] = ctx.state.get("email_fails", 0) + 1
         n = ctx.state["email_fails"]
         if n >= EMAIL_MAX_TRIES:
             ctx.state["replace_identity"] = "reddit не отправляет код (ошибка после %d попыток)" % n
-            ctx.log(f"[{ctx.account}] ошибка отправки кода {n} раз подряд — меняю ноду и профиль")
+            ctx.log(f"[{ctx.account}] код не отправлен {n} раз подряд — меняю ноду и профиль")
             return "email_failed"
-        ctx.log(f"[{ctx.account}] ошибка отправки кода (попытка {n} из {EMAIL_MAX_TRIES}) — пробую ещё раз")
+        ctx.log(f"[{ctx.account}] код не отправлен (попытка {n} из {EMAIL_MAX_TRIES}) — пробую ещё раз")
         ctx.state.setdefault("clicked", {}).pop("email", None)       # разрешить немедленный повтор
         ctx.state["email_click_at"] = None
     if _click_once(page, ctx, "email", EMAIL_SUBMIT):
         ctx.state["email_click_at"] = _now()
     return "email"
+
+
+COOKIE_BTN_RE = re.compile(r"Optionale Cookies|Nicht (unbedingt )?notwendige|Reject non-essential|Reject optional|"
+                           r"Отклонить необязательные", re.I)
+
+
+def dismiss_cookies(page, ctx: RegCtx) -> bool:
+    """Баннер cookies («Optionale Cookies ablehnen» / «Reject non-essential») — отклоняем необязательные,
+    чтобы он не перекрывал форму и «живую» сессию. Не чаще раза в 10 с."""
+    now = _now()
+    if now - ctx.state.get("cookie_try", -1e9) < 10.0:
+        return False
+    try:
+        btn = page.get_by_role("button", name=COOKIE_BTN_RE).first
+        if not _visible(btn):
+            return False
+        ctx.state["cookie_try"] = now
+        btn.click(timeout=3000)
+        return True
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def make_birthdate(rng=None) -> dict:
@@ -296,6 +321,7 @@ def signup_step(page, ctx: RegCtx) -> str | None:
     Код из письма хук ПОДСТАВЛЯЕТ в поле и печатает одну строку со ссылкой на окно — Enter нажимаешь ты; капчу тоже ты. -> имя шага или None."""
     if ctx.state.get("replace_identity"):
         return "email_failed"
+    dismiss_cookies(page, ctx)
     code_input = _shown(page, CODE_INPUT)
     if code_input is not None:
         code = read_mail_code(ctx)
