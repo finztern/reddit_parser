@@ -457,3 +457,20 @@ def test_hub_status_file_has_ports_and_no_vnc_password():
     finally:
         ctx.cancel.set()
         th.join(timeout=10)
+
+
+def test_light_snapshot_uses_cookies_only_and_keeps_origins():
+    import manual_login as ml
+
+    class Ctx:
+        def cookies(self):
+            return [{"name": "reddit_session", "value": "x"}]
+
+        def storage_state(self):
+            raise AssertionError("storage_state открывает временные страницы — в цикле ожидания не звать")
+    first = ml.light_snapshot(Ctx())
+    assert first == {"cookies": [{"name": "reddit_session", "value": "x"}], "origins": []}
+    prev = {"cookies": [], "origins": [{"origin": "https://www.reddit.com", "localStorage": []}]}
+    again = ml.light_snapshot(Ctx(), prev)
+    assert again["origins"] == prev["origins"] and again["cookies"][0]["name"] == "reddit_session"
+    assert prev["cookies"] == []          # исходный снимок не мутируется

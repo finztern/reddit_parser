@@ -578,7 +578,7 @@ class _Finished(Exception):
 
 
 class Options:
-    def __init__(self, timeout_minutes=30.0, post_login_wait=30.0, fresh=False, verify=True, force=False,
+    def __init__(self, timeout_minutes=30.0, post_login_wait=0.0, fresh=False, verify=True, force=False,
                  register=False, new_creds=False):
         self.timeout_minutes, self.post_login_wait = timeout_minutes, post_login_wait
         self.fresh, self.verify, self.force = fresh, verify, force
@@ -787,7 +787,7 @@ class LoginSession:
                     self._check_cancel()
                     try:
                         page.wait_for_timeout(1000)
-                        last_snapshot = context.storage_state()
+                        last_snapshot = ml.light_snapshot(context, last_snapshot)
                     except Exception:
                         break  # окно закрыли — берём последний снимок
                 self._human_after_login(context, page, base_url, name)
@@ -1050,8 +1050,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--vnc-password", default=os.environ.get("LOGIN_HUB_VNC_PASSWORD"),
                     help="пароль VNC (по умолчанию генерируется и печатается); не короче 1 символа, значимы первые 8")
     ap.add_argument("--timeout-minutes", type=float, default=30)
-    ap.add_argument("--post-login-wait", type=float, default=30,
-                    help="сколько секунд ждать после входа (онбординг), по умолчанию 30")
+    ap.add_argument("--post-login-wait", type=float, default=0,
+                    help="сколько секунд ждать после входа (онбординг); по умолчанию 0: «живая» сессия идёт сразу")
     ap.add_argument("--fresh", action="store_true", help="чистая сессия, без сохранённых cookies/storage_state")
     ap.add_argument("--register", action="store_true",
                     help="регистрация нового аккаунта: придумать ник и пароль (credentials/<account>.json), открыть "

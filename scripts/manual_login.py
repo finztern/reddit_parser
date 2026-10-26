@@ -207,6 +207,15 @@ def is_logged_in(page, base_url: str) -> tuple[bool, str]:
         return False, str(e)
 
 
+def light_snapshot(context, last: dict | None = None) -> dict:
+    """Лёгкий снимок сессии на случай закрытия окна: только cookies (context.cookies()). Полный
+    context.storage_state() Playwright делает через ВРЕМЕННУЮ страницу на каждый origin с localStorage — она
+    мигает в окне и отбирает фокус, поэтому в цикле ожидания его не зовём (одно полное снятие — в конце)."""
+    state = dict(last) if last else {"cookies": [], "origins": []}
+    state["cookies"] = context.cookies()
+    return state
+
+
 def verify_cookies(rows: list[dict], impersonate: str, proxy_url: str, base_url: str) -> tuple[bool, str]:
     if cffi_requests is None:
         return True, "curl_cffi не установлен — верификацию пропустил"
@@ -237,9 +246,9 @@ def main() -> int:
     ap.add_argument("--width", type=int, default=1400)
     ap.add_argument("--height", type=int, default=900)
     ap.add_argument("--timeout-minutes", type=float, default=30)
-    ap.add_argument("--post-login-wait", type=float, default=30,
-                    help="сколько секунд ждать после обнаружения логина/регистрации, "
-                         "чтобы успеть закончить онбординг (по умолчанию 30)")
+    ap.add_argument("--post-login-wait", type=float, default=0,
+                    help="сколько секунд ждать после обнаружения логина/регистрации, чтобы успеть закончить "
+                         "онбординг (по умолчанию 0: «живая» сессия идёт сразу после входа)")
     ap.add_argument("--fresh", action="store_true", help="чистая сессия, без сохранённых cookies/storage_state")
     ap.add_argument("--register", action="store_true",
                     help="регистрация нового аккаунта: придумать ник и пароль (credentials/<account>.json), открыть "
@@ -431,7 +440,7 @@ def main() -> int:
                         next_note = left - 10
                     try:
                         page.wait_for_timeout(min(3000, max(100, int(left * 1000))))
-                        last_snapshot = context.storage_state()
+                        last_snapshot = light_snapshot(context, last_snapshot)
                     except Exception:
                         print(f"[{name}] окно закрыто во время ожидания — беру последний снимок сессии")
                         break
