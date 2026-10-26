@@ -9,13 +9,13 @@ scripts/registration_hook.py — ТВОЯ логика автоматическ�
   * каждые ~3 с проверяют, залогинен ли аккаунт; как только вход обнаружен — сохраняют cookies
     и storage_state, включают слот, обновляют credentials/<account>.json (status=logged_in).
 
-Встроенная часть: ящик на mailgenerator.net (вторая вкладка) и снимки каждого шага (HTML + скриншот в
+Встроенная часть: адрес ящика с mailgenerator.net (вторая вкладка), автозаполнение шагов формы и снимки каждого шага (HTML + скриншот в
 state/registration_dump/<account>/) — по ним пишутся селекторы. Капчу и код из письма вводишь сам в noVNC.
 Свою логику пиши в местах «ТВОЙ КОД».
 
 Дамп шагов: каждый новый шаг формы автоматически сохраняется в state/registration_dump/<account>/
-(.html без значений полей и скриптов + .png) — пройди регистрацию руками и пришли эти файлы,
-по ним пишутся селекторы. Перед отправкой посмотри .png: на скриншоте может быть твоя почта.
+(.html без значений полей и скриптов + .png) — по ним пишутся и чинятся селекторы.
+Перед отправкой посмотри .png: на скриншоте может быть твоя почта.
 
 Правила:
   * `page` — синхронный Playwright Page. Не закрывай page/context/browser — это делает хаб.
@@ -95,7 +95,19 @@ class RegCtx:
 MAILBOX_ENABLED = True            # создавать ящик на mailgenerator.net во второй вкладке
 MAILBOX_URL = "https://mailgenerator.net"
 MAX_DUMPS = 40                    # сколько автоснимков шагов сохранять за сессию
-EMAIL_SELECTORS = ('input[type="email"]', 'input[name="email"]', "#register-email")
+CLICK_RETRY_S = 20.0              # повтор нажатия одной и той же кнопки не чаще (кнопка может ждать капчу)
+_now = time.monotonic
+
+# Селекторы шагов формы Reddit (из снимков реальной регистрации; shadow DOM пробивается автоматически).
+EMAIL_INPUT = 'faceplate-text-input[name="email"] input'
+EMAIL_SUBMIT = 'auth-flow-modal[slot="register_email"] [slot="primaryButton"] button'
+CODE_INPUT = 'faceplate-text-input[name="code"] input'
+USERNAME_INPUT = "#register-username input"
+PASSWORD_INPUT = "#register-password input"
+USERNAME_SUBMIT = 'auth-flow-modal[slot="register_username_and_password"] button[type="submit"]'
+AGE_INPUTS = {k: f'faceplate-text-input[name="{k}"] input' for k in ("day", "month", "year")}
+AGE_SUBMIT = "#age-collect-submit-btn"
+AGE_CONFIRM = 'auth-flow-modal[slot="onboarding_age_confirmation"] button[type="submit"]'
 
 
 def dump_dir(account: str) -> Path:
@@ -128,45 +140,40 @@ def dump_step(page, account: str, label: str = "step") -> Path | None:
         return None
 
 
-def create_mailbox(page, ctx: RegCtx) -> str | None:
-    """Создаёт ящик на mailgenerator.net во ВТОРОЙ вкладке (тот же браузер и прокси слота). Публичного API у
-    сервиса нет, поэтому через интерфейс; разметка не проверялась на живом сайте — при неудаче снимки
-    `mailbox-*` в registration_dump покажут, что поправить. Код из письма вводишь сам (читаешь во второй вкладке)."""
-    local = f"{ctx.username}{int(time.time()) % 1000}".lower().replace("-", "_")[:30]
-    mailbox_pw = ac.make_password(14)
+def get_mailbox(page, ctx: RegCtx) -> str | None:
+    """Читает адрес ящика с mailgenerator.net во ВТОРОЙ вкладке (тот же браузер и прокси слота). Сайт сам
+    создаёт ящик при заходе — ничего создавать не нужно: адрес лежит в `#activeEmail`, пароль ящика (для
+    возврата в него позже) — в `#loginWrap` («Password: …»). Вкладку не закрываем: в ней приходят письма,
+    код из письма ты вводишь сам. При неудаче снимок `mailbox-failed` в registration_dump."""
     mp = page.context.new_page()
     try:
         mp.goto(MAILBOX_URL, timeout=45000, wait_until="domcontentloaded")
-        mp.wait_for_timeout(1500)
-        for label in ("Accept", "Reject"):      # баннер cookies
-            try:
-                mp.get_by_role("button", name=re.compile(f"^{label}$", re.I)).first.click(timeout=1500)
+        try:
+            mp.locator("#cookieRejectBtn").click(timeout=2500)      # баннер cookies
+        except Exception:  # noqa: BLE001
+            pass
+        email = ""
+        for _ in range(40):                                            # адрес появляется скриптом, до ~20 с
+            email = (mp.locator("#activeEmail").first.text_content() or "").strip()
+            if "@" in email:
                 break
-            except Exception:  # noqa: BLE001
-                pass
-        ctx.dump(mp, "mailbox-home")
-        create_btn = mp.get_by_role("button", name=re.compile("create inbox", re.I)).first
-        if not _visible(create_btn):
-            opener = mp.get_by_text(re.compile(r"(new|create|get).{0,20}(mailbox|inbox|address)", re.I)).first
-            opener.click(timeout=5000)
-            mp.wait_for_timeout(800)
-        create_btn.wait_for(state="visible", timeout=8000)
-        box = create_btn.locator("xpath=ancestor::*[self::form or @role='dialog' or contains(@class,'modal')][1]")
-        scope = box if box.count() else mp
-        scope.locator("input:not([type=password]):not([type=hidden]):not([type=checkbox])").first.fill(local)
-        scope.locator("input[type=password]").first.fill(mailbox_pw)
-        ctx.dump(mp, "mailbox-filled")
-        create_btn.click()
-        create_btn.wait_for(state="hidden", timeout=15000)
-        mp.wait_for_timeout(1000)
-        ctx.dump(mp, "mailbox-created")
+            mp.wait_for_timeout(500)
+        if "@" not in email:
+            raise RuntimeError("адрес не появился в #activeEmail")
+        ctx.dump(mp, "mailbox")
+        fields = {"email": email}
+        try:
+            m = re.search(r"Password:\s*(\S+)", mp.locator("#loginWrap").first.text_content(timeout=2000) or "")
+            if m:
+                fields["mailbox_password"] = m.group(1)
+        except Exception:  # noqa: BLE001
+            pass
+        ctx.save_creds(**fields)
+        return email
     except Exception as e:  # noqa: BLE001
         ctx.dump(mp, "mailbox-failed")
-        ctx.log(f"[{ctx.account}] ящик на mailgenerator.net не создан автоматически: {type(e).__name__}: {e}")
+        ctx.log(f"[{ctx.account}] почта с mailgenerator.net не прочитана: {type(e).__name__}: {e}")
         return None
-    email = f"{local}@mailgenerator.net"
-    ctx.save_creds(email=email, mailbox_password=mailbox_pw)
-    return email
 
 
 def _visible(loc) -> bool:
@@ -176,29 +183,81 @@ def _visible(loc) -> bool:
         return False
 
 
-def fill_email_once(page, ctx: RegCtx) -> bool:
-    """Подставляет почту в ПУСТОЕ видимое поле e-mail формы Reddit (один раз)."""
-    email = ctx.state.get("email")
-    if not email or ctx.state.get("email_filled"):
+def _shown(page, sel):
+    loc = page.locator(sel).first
+    return loc if _visible(loc) else None
+
+
+def _fill_empty(loc, value: str) -> None:
+    if not loc.input_value():
+        loc.fill(value)
+
+
+def _click_once(page, ctx: RegCtx, key: str, sel: str) -> bool:
+    """Нажимает кнопку, если она видна и активна; повтор не чаще раза в CLICK_RETRY_S (кнопка может ждать капчу)."""
+    btn = _shown(page, sel)
+    if btn is None or not btn.is_enabled():
         return False
-    for sel in EMAIL_SELECTORS:
-        loc = page.locator(sel).first
-        if _visible(loc):
-            if not loc.input_value():
-                loc.fill(email)
-            ctx.state["email_filled"] = True
-            return True
-    return False
+    clicked = ctx.state.setdefault("clicked", {})
+    now = _now()
+    if now - clicked.get(key, -1e9) < CLICK_RETRY_S:
+        return False
+    clicked[key] = now
+    btn.click()
+    return True
+
+
+def make_birthdate(rng=None) -> dict:
+    """Случайная взрослая дата рождения (возраст 22–38, день ≤ 28 — подходит любому месяцу)."""
+    import secrets
+    rng = rng or secrets.SystemRandom()
+    year = time.gmtime().tm_year - rng.randint(22, 38)
+    return {"day": rng.randint(1, 28), "month": rng.randint(1, 12), "year": year}
+
+
+def signup_step(page, ctx: RegCtx) -> str | None:
+    """Определяет текущий шаг формы Reddit и делает безопасное автозаполнение. Селекторы взяты из снимков
+    реальной регистрации (shadow DOM пробивается селекторами Playwright, привязка к slot/id, не к тексту).
+    Код из письма и капчу вводишь ты. -> имя шага или None."""
+    if _shown(page, CODE_INPUT):
+        if not ctx.state.get("code_hint"):
+            ctx.state["code_hint"] = True
+            ctx.log(f"[{ctx.account}] введи КОД из письма (вторая вкладка с почтой) и пройди капчу, если появится")
+        return "code"
+    name = _shown(page, USERNAME_INPUT)
+    if name is not None:
+        _fill_empty(name, ctx.username)
+        _fill_empty(page.locator(PASSWORD_INPUT).first, ctx.password)
+        _click_once(page, ctx, "username_password", USERNAME_SUBMIT)
+        return "username_password"
+    day = _shown(page, AGE_INPUTS["day"])
+    if day is not None:
+        bd = ctx.state.get("birthdate") or ctx.state.setdefault("birthdate", make_birthdate())
+        ctx.save_creds(birthdate=bd)
+        for key in ("day", "month", "year"):
+            _fill_empty(page.locator(AGE_INPUTS[key]).first, str(bd[key]))
+        _click_once(page, ctx, "age", AGE_SUBMIT)
+        return "age"
+    if _click_once(page, ctx, "age_confirm", AGE_CONFIRM):
+        return "age_confirm"
+    email = _shown(page, EMAIL_INPUT)
+    if email is not None:
+        if not ctx.state.get("email"):
+            return "email_wait"
+        _fill_empty(email, ctx.state["email"])
+        _click_once(page, ctx, "email", EMAIL_SUBMIT)
+        return "email"
+    return None
 
 
 def on_page_ready(page, ctx: RegCtx) -> None:
     """Вызывается ОДИН раз после page.goto(<base_url>/register).
 
-    Встроенная часть: ящик на mailgenerator.net (вторая вкладка), возврат на вкладку
+    Встроенная часть: адрес ящика с mailgenerator.net (вторая вкладка), возврат на вкладку
     регистрации. Ниже — место для твоей логики.
     """
     if MAILBOX_ENABLED:
-        email = create_mailbox(page, ctx)
+        email = get_mailbox(page, ctx)
         page.bring_to_front()
         if email:
             ctx.state["email"] = email
@@ -213,10 +272,13 @@ def on_page_ready(page, ctx: RegCtx) -> None:
 def on_tick(page, ctx: RegCtx) -> None:
     """Вызывается каждые ~3 с, пока вход не обнаружен (после on_page_ready).
 
-    Встроенная часть: подстановка почты в пустое поле e-mail.
-    Для многошаговых форм храни прогресс в ctx.state (`ctx.state["step"] = 2`).
+    Встроенная часть: signup_step — почта → (код: вручную) → ник/пароль → дата рождения. Последующие
+    шаги (пол, интересы, капча) — вручную. Для своих шагов храни прогресс в ctx.state.
     """
-    fill_email_once(page, ctx)
+    step = signup_step(page, ctx)
+    if step and step != ctx.state.get("last_step"):
+        ctx.state["last_step"] = step
+        ctx.log(f"[{ctx.account}] шаг регистрации: {step}")
     # ============================ ТВОЙ КОД: начало ============================
     # Сюда — логика шагов (ник/пароль: ctx.username / ctx.password), вызывается каждые ~3 с.
     # ============================= ТВОЙ КОД: конец ============================

@@ -2,6 +2,7 @@ import json
 import os
 import stat
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
@@ -133,42 +134,172 @@ def test_autodump_only_on_change_and_capped(tmp_path, monkeypatch):
     assert len(list((tmp_path / "a1").glob("*.html"))) == 2
 
 
-def test_fill_email_once_only_empty_field():
+class _Loc:
+    def __init__(self, page, sel):
+        self.page, self.sel = page, sel
+        self.first = self
+
+    def _el(self):
+        return self.page.els.get(self.sel)
+
+    def count(self):
+        return 1 if self._el() is not None else 0
+
+    def is_visible(self):
+        return self._el() is not None
+
+    def is_enabled(self):
+        return self._el().get("enabled", True)
+
+    def input_value(self):
+        return self._el().get("v", "")
+
+    def fill(self, x):
+        self._el()["v"] = x
+
+    def click(self, **kw):
+        self._el()["clicks"] = self._el().get("clicks", 0) + 1
+
+
+class _FPage:
+    def __init__(self, els):
+        self.els = els
+
+    def locator(self, sel):
+        return _Loc(self, sel)
+
+
+def _ctx(tmp_path, monkeypatch, **state):
     import registration_hook as rh
+    monkeypatch.setattr(ac, "CREDS_DIR", tmp_path)
+    ctx = rh.RegCtx("a1", "Quiet_Owl1", "Pw-123", "https://x", "http://p", "chrome", log=lambda m: None)
+    ctx.state.update(state)
+    return rh, ctx
 
-    class Loc:
-        def __init__(self, v):
-            self.v = v
 
-        first = property(lambda s: s)
-        count = lambda s: 1  # noqa: E731
-        is_visible = lambda s: True  # noqa: E731
-        input_value = lambda s: s.v  # noqa: E731
+def test_step_email_fills_and_clicks_once(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch, email="x@mailgenerator.net")
+    page = _FPage({rh.EMAIL_INPUT: {"v": ""}, rh.EMAIL_SUBMIT: {}})
+    assert rh.signup_step(page, ctx) == "email"
+    assert page.els[rh.EMAIL_INPUT]["v"] == "x@mailgenerator.net" and page.els[rh.EMAIL_SUBMIT]["clicks"] == 1
+    rh.signup_step(page, ctx)
+    assert page.els[rh.EMAIL_SUBMIT]["clicks"] == 1          # повтор не раньше CLICK_RETRY_S
+    page.els[rh.EMAIL_INPUT]["v"] = "mine@x.com"
+    rh.signup_step(page, ctx)
+    assert page.els[rh.EMAIL_INPUT]["v"] == "mine@x.com"      # чужое значение не перетираем
 
-        def fill(self, x):
-            self.v = x
+
+def test_step_email_waits_without_mailbox_and_disabled_button(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
+    page = _FPage({rh.EMAIL_INPUT: {"v": ""}, rh.EMAIL_SUBMIT: {}})
+    assert rh.signup_step(page, ctx) == "email_wait" and page.els[rh.EMAIL_INPUT]["v"] == ""
+    ctx.state["email"] = "x@y.z"
+    page.els[rh.EMAIL_SUBMIT]["enabled"] = False
+    rh.signup_step(page, ctx)
+    assert "clicks" not in page.els[rh.EMAIL_SUBMIT]
+
+
+def test_step_code_is_manual(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
+    logs = []
+    ctx.log = logs.append
+    page = _FPage({rh.CODE_INPUT: {"v": ""}, rh.EMAIL_INPUT: {"v": ""}})
+    assert rh.signup_step(page, ctx) == "code" and rh.signup_step(page, ctx) == "code"
+    assert page.els[rh.CODE_INPUT]["v"] == "" and len(logs) == 1
+
+
+def test_step_username_password(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
+    page = _FPage({rh.USERNAME_INPUT: {"v": ""}, rh.PASSWORD_INPUT: {"v": ""}, rh.USERNAME_SUBMIT: {}})
+    assert rh.signup_step(page, ctx) == "username_password"
+    assert page.els[rh.USERNAME_INPUT]["v"] == "Quiet_Owl1" and page.els[rh.PASSWORD_INPUT]["v"] == "Pw-123"
+    assert page.els[rh.USERNAME_SUBMIT]["clicks"] == 1
+
+
+def test_step_age_saves_birthdate_and_confirms(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
+    els = {rh.AGE_INPUTS[k]: {"v": ""} for k in ("day", "month", "year")}
+    els[rh.AGE_SUBMIT] = {}
+    page = _FPage(els)
+    assert rh.signup_step(page, ctx) == "age"
+    bd = ctx.state["birthdate"]
+    assert 1 <= bd["day"] <= 28 and 1 <= bd["month"] <= 12
+    assert els[rh.AGE_INPUTS["year"]]["v"] == str(bd["year"]) and els[rh.AGE_SUBMIT]["clicks"] == 1
+    page2 = _FPage({rh.AGE_CONFIRM: {}})
+    assert rh.signup_step(page2, ctx) == "age_confirm" and page2.els[rh.AGE_CONFIRM]["clicks"] == 1
+    assert rh.signup_step(_FPage({}), ctx) is None
+
+
+def test_birthdate_is_adult():
+    import registration_hook as rh
+    for _ in range(50):
+        bd = rh.make_birthdate()
+        assert time.gmtime().tm_year - bd["year"] >= 22 and bd["day"] <= 28
+
+
+class _MPage:
+    def __init__(self, email, loginwrap):
+        self.email, self.loginwrap = email, loginwrap
+        self.url = "https://mailgenerator.net"
+        self.frames = []
+
+    def goto(self, *a, **k):
+        pass
+
+    def wait_for_timeout(self, ms):
+        pass
+
+    def evaluate(self, js):
+        return "<x/>"
+
+    def screenshot(self, path):
+        pass
+
+    def locator(self, sel):
+        outer = self
+
+        class L:
+            first = property(lambda s: s)
+
+            def click(s, **k):
+                if sel != "#cookieRejectBtn":
+                    raise AssertionError(sel)
+
+            def text_content(s, **k):
+                return {"#activeEmail": outer.email, "#loginWrap": outer.loginwrap}[sel]
+        return L()
+
+
+def _mailbox_page(mp):
+    class Ctxp:
+        def new_page(self):
+            return mp
 
     class Page:
-        def __init__(self, v):
-            self.loc = Loc(v)
-
-        def locator(self, sel):
-            return self.loc if sel == 'input[type="email"]' else type("N", (), {"first": property(lambda s: s),
-                                                                              "count": lambda s: 0})()
-    ctx = rh.RegCtx("a", "u", "p", "https://x", "http://p", "chrome", log=lambda m: None)
-    ctx.state["email"] = "x@mailgenerator.net"
-    page = Page("")
-    assert rh.fill_email_once(page, ctx) and page.loc.v == "x@mailgenerator.net"
-    page2 = Page("mine@x.com")
-    ctx2 = rh.RegCtx("a", "u", "p", "https://x", "http://p", "chrome", log=lambda m: None)
-    ctx2.state["email"] = "x@mailgenerator.net"
-    assert rh.fill_email_once(page2, ctx2) and page2.loc.v == "mine@x.com"
+        context = Ctxp()
+    return Page()
 
 
-def test_mailbox_failure_is_logged_not_raised(tmp_path, monkeypatch):
-    import registration_hook as rh
-    monkeypatch.setattr(rh, "dump_dir", lambda account: tmp_path / account)
+def test_get_mailbox_reads_address_and_password(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
+    monkeypatch.setattr(rh, "dump_dir", lambda account: tmp_path / "d" / account)
+    mp = _MPage(" abc123@mailgenerator.net ", "Login Email: x Password: s3cret!Z more")
+    assert rh.get_mailbox(_mailbox_page(mp), ctx) == "abc123@mailgenerator.net"
+    saved = json.loads(ac.creds_path("a1", tmp_path).read_text())
+    assert saved["email"] == "abc123@mailgenerator.net" and saved["mailbox_password"] == "s3cret!Z"
+
+
+def test_get_mailbox_failure_returns_none(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
+    monkeypatch.setattr(rh, "dump_dir", lambda account: tmp_path / "d" / account)
     logs = []
+    ctx.log = logs.append
+    assert rh.get_mailbox(_mailbox_page(_MPage("", "")), ctx) is None
+    assert any("не прочитана" in m for m in logs)
+
+
+def test_new_page_failure_propagates_to_runner(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
 
     class Ctxp:
         def new_page(self):
@@ -176,10 +307,9 @@ def test_mailbox_failure_is_logged_not_raised(tmp_path, monkeypatch):
 
     class Page:
         context = Ctxp()
-    ctx = rh.RegCtx("a", "u", "p", "https://x", "http://p", "chrome", log=logs.append)
     try:
-        rh.create_mailbox(Page(), ctx)
+        rh.get_mailbox(Page(), ctx)
         raised = False
     except RuntimeError:
         raised = True
-    assert raised  # new_page() вне try: исключение поймает HookRunner._call
+    assert raised  # исключение поймает HookRunner._call
