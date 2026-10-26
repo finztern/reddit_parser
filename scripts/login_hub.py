@@ -578,6 +578,7 @@ class _ReIdentify(Exception):
 
 
 MAX_IDENTITY_SWAPS = 3
+VERBOSE_REGISTER = False     # True — печатать ник при старте каждой регистрации (пароль в консоль не выводится)
 
 
 class _Finished(Exception):
@@ -672,8 +673,10 @@ class LoginSession:
             self._hook = rh.HookRunner(rh.RegCtx(name, self.creds["username"], self.creds["password"],
                                                  ctx.login_cfg.get("reddit_base_url") or "https://www.reddit.com",
                                                  proxy_url, impersonate, log=say))
-            say(f"[{name}] регистрация: ник {self.creds['username']}   пароль {self.creds['password']}   "
-                f"({'прежние данные' if reused else 'сгенерировано'}; credentials/{name}.json, 0600)")
+            self._hook.ctx.link = self.link
+            if VERBOSE_REGISTER:
+                say(f"[{name}] регистрация: ник {self.creds['username']} "
+                    f"({'прежние данные' if reused else 'сгенерировано'}; credentials/{name}.json, 0600)")
         return prof, impersonate, proxy_url
 
     def _swap_identity(self, reason: str) -> None:

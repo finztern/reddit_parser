@@ -317,7 +317,7 @@ def _main() -> int:
         creds, reused = ac.prepare(name, proxy_url, impersonate, new=args.new_creds)
         hook = rh.HookRunner(rh.RegCtx(name, creds["username"], creds["password"], base_url, proxy_url,
                                        impersonate))
-        print(f"[{name}] регистрация: ник {creds['username']}   пароль {creds['password']}   "
+        print(f"[{name}] регистрация: ник {creds['username']}   "
               f"({'прежние данные' if reused else 'сгенерировано'}; credentials/{name}.json, 0600)")
     print(f"[{name}] engine={engine} channel={channel} device={device} "
           f"locale={geo['locale']} tz={geo['timezone_id']}\n[{name}] UA: {user_agent}")

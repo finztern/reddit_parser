@@ -225,24 +225,26 @@ class _Mail:
         return L()
 
 
-def test_step_code_prints_and_focuses_never_types(tmp_path, monkeypatch):
+def test_step_code_fills_prints_link_and_never_overwrites(tmp_path, monkeypatch):
     rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
     logs = []
     ctx.log = logs.append
     mail = _Mail()
     ctx.state["mail_page"] = mail
+    ctx.link = "http://h:1/vnc.html"
     front = []
     page = _FPage({rh.CODE_INPUT: {"v": ""}, rh.EMAIL_INPUT: {"v": ""}})
     page.bring_to_front = lambda: front.append(1)
     assert rh.signup_step(page, ctx) == "code"            # письма ещё нет
-    assert not front and not any("КОД" in m for m in logs)
+    assert not front and not logs
     mail.lst = "Reddit  482913 is your Reddit verification code"
     assert rh.signup_step(page, ctx) == "code" and rh.signup_step(page, ctx) == "code"
-    assert sum("КОД ИЗ ПИСЬМА: 482913" in m for m in logs) == 1 and front == [1]
-    assert page.els[rh.CODE_INPUT]["v"] == "" and page.els[rh.CODE_INPUT]["clicks"] == 1
+    assert sum("482913" in m and "нажми Enter" in m and "http://h:1/vnc" in m for m in logs) == 1 and front == [1]
+    assert page.els[rh.CODE_INPUT]["v"] == "482913" and page.els[rh.CODE_INPUT]["clicks"] == 1
     mail.lst = "Reddit  111222 is your Reddit verification code"      # повторная отправка
+    page.els[rh.CODE_INPUT]["v"] = "12"                               # человек уже начал вводить — не перетираем
     rh.signup_step(page, ctx)
-    assert any("111222" in m for m in logs)
+    assert any("111222" in m for m in logs) and page.els[rh.CODE_INPUT]["v"] == "12"
 
 
 def test_read_mail_code_opens_message_when_list_has_no_code(tmp_path, monkeypatch):

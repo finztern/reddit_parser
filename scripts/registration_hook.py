@@ -78,6 +78,7 @@ class RegCtx:
     impersonate: str        # curl_cffi-профиль слота (если нужны запросы вне браузера)
     log: Callable[[str], None] = print
     state: dict = field(default_factory=dict)   # свободное хранилище между вызовами (шаги, флаги)
+    link: str = ""          # ссылка noVNC этого аккаунта (хаб): печатается, когда нужно твоё нажатие Enter
 
     def dump(self, page, label: str = "step") -> Path | None:
         """Снимок текущего шага в state/registration_dump/<account>/ (.html без значений полей + .png)."""
@@ -94,6 +95,7 @@ class RegCtx:
 # --- настройки встроенной части --------------------------------------------------------------
 MAILBOX_ENABLED = True            # создавать ящик на mailgenerator.net во второй вкладке
 MAILBOX_URL = "https://mailgenerator.net"
+VERBOSE = False                   # True — печатать каждый снимок и смену шага (по умолчанию в консоли только важное)
 MAX_DUMPS = 40                    # сколько автоснимков шагов сохранять за сессию
 CLICK_RETRY_S = 20.0              # повтор нажатия одной и той же кнопки не чаще (кнопка может ждать капчу)
 _now = time.monotonic
@@ -291,20 +293,20 @@ def read_mail_code(ctx: RegCtx) -> str | None:
 def signup_step(page, ctx: RegCtx) -> str | None:
     """Определяет текущий шаг формы Reddit и делает безопасное автозаполнение. Селекторы взяты из снимков
     реальной регистрации (shadow DOM пробивается селекторами Playwright, привязка к slot/id, не к тексту).
-    Код из письма хук только ПЕЧАТАЕТ в консоль и фокусирует поле — вводишь ты; капчу тоже ты. -> имя шага или None."""
+    Код из письма хук ПОДСТАВЛЯЕТ в поле и печатает одну строку со ссылкой на окно — Enter нажимаешь ты; капчу тоже ты. -> имя шага или None."""
     if ctx.state.get("replace_identity"):
         return "email_failed"
     code_input = _shown(page, CODE_INPUT)
     if code_input is not None:
-        if not ctx.state.get("code_hint"):
-            ctx.state["code_hint"] = True
-            ctx.log(f"[{ctx.account}] жду письмо с кодом на {ctx.state.get('email') or 'почту'}…")
         code = read_mail_code(ctx)
         if code and code != ctx.state.get("code_printed"):
             ctx.state["code_printed"] = code
-            ctx.log(f"[{ctx.account}] КОД ИЗ ПИСЬМА: {code}  — введи его в открывшейся вкладке Reddit и нажми Enter")
+            if not code_input.input_value():
+                code_input.fill(code)
             page.bring_to_front()
             code_input.click()
+            where = f"  {ctx.link}" if ctx.link else ""
+            ctx.log(f">>> {ctx.account}: код подставлен ({code}) — открой окно и нажми Enter{where}")
         return "code"
     name = _shown(page, USERNAME_INPUT)
     if name is not None:
@@ -358,7 +360,8 @@ def on_tick(page, ctx: RegCtx) -> None:
     step = signup_step(page, ctx)
     if step and step != ctx.state.get("last_step"):
         ctx.state["last_step"] = step
-        ctx.log(f"[{ctx.account}] шаг регистрации: {step}")
+        if VERBOSE:
+            ctx.log(f"[{ctx.account}] шаг регистрации: {step}")
     # ============================ ТВОЙ КОД: начало ============================
     # Сюда — логика шагов (ник/пароль: ctx.username / ctx.password), вызывается каждые ~3 с.
     # ============================= ТВОЙ КОД: конец ============================
@@ -388,7 +391,7 @@ class HookRunner:
             return
         self._sig, self._dumps = sig, self._dumps + 1
         path = dump_step(page, self.ctx.account, label)
-        if path:
+        if path and VERBOSE:
             self.ctx.log(f"[{self.ctx.account}] снимок шага: {path}")
 
     def _call(self, fn, page) -> bool:
