@@ -275,7 +275,8 @@ def dismiss_cookies(page, ctx: RegCtx) -> bool:
 
 
 LOGIN_BTN_RE = re.compile(r"^\s*(Log ?In|Anmelden|Einloggen|Войти)\s*$", re.I)
-SIGNUP_BTN_RE = re.compile(r"^\s*(Sign ?up|Registrieren|Zarejestruj się|Зарегистрироваться)\s*$", re.I)
+SIGNUP_BTN_RE = re.compile(r"^\s*(Sign ?up|Registrieren|Zarejestruj się|Зарегистрироваться)\s*$|"
+                           r"Hier geht.{1,2}s zur Registrierung|Jetzt registrieren", re.I)   # de: «Hier geht’s zur Registrierung»
 
 
 def _click_named(page, rx) -> bool:

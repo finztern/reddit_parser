@@ -492,3 +492,10 @@ def test_open_signup_without_login_button_goes_straight_to_signup(tmp_path, monk
     assert rh.signup_step(page, ctx) == "open_signup" and page.els["role:signup"]["clicks"] == 1
     assert rh.LOGIN_BTN_RE.search("Log In") and not rh.LOGIN_BTN_RE.search("Log in with Google")
     assert rh.SIGNUP_BTN_RE.search("Sign Up") and not rh.SIGNUP_BTN_RE.search("Sign up with Apple")
+
+
+def test_signup_link_german_text():
+    import registration_hook as rh
+    for txt in ("Hier geht’s zur Registrierung", "Hier geht's zur Registrierung", "Neu bei Reddit? Hier geht’s zur Registrierung"):
+        assert rh.SIGNUP_BTN_RE.search(txt), txt
+    assert not rh.SIGNUP_BTN_RE.search("Anmelden")
