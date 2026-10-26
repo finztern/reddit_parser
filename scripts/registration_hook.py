@@ -146,6 +146,7 @@ def get_mailbox(page, ctx: RegCtx) -> str | None:
     возврата в него позже) — в `#loginWrap` («Password: …»). Вкладку не закрываем: в ней приходят письма,
     код из письма ты вводишь сам. При неудаче снимок `mailbox-failed` в registration_dump."""
     mp = page.context.new_page()
+    ctx.state["mail_page"] = mp
     try:
         mp.goto(MAILBOX_URL, timeout=45000, wait_until="domcontentloaded")
         try:
@@ -215,14 +216,54 @@ def make_birthdate(rng=None) -> dict:
     return {"day": rng.randint(1, 28), "month": rng.randint(1, 12), "year": year}
 
 
+CODE_RE = re.compile(r"(?<!\d)(\d{6})(?!\d)")
+MAIL_RELOAD_S = 20.0              # как часто перезагружать вкладку почты, если письма всё нет
+
+
+def read_mail_code(ctx: RegCtx) -> str | None:
+    """Ищет 6-значный код в письме от Reddit во вкладке mailgenerator.net (список `#messageList`; если код не
+    виден в списке — открывает письмо и читает `#modalBody`). Ничего не вводит: код печатается оператору."""
+    mp = ctx.state.get("mail_page")
+    if mp is None:
+        return None
+    try:
+        lst = (mp.locator("#messageList").first.inner_text(timeout=2000) or "")
+        m = CODE_RE.search(lst)
+        if m:
+            return m.group(1)
+        if "reddit" in lst.lower():
+            mp.locator("#messageList").get_by_text(re.compile("reddit", re.I)).first.click(timeout=2000)
+            body = mp.locator("#modalBody").first.inner_text(timeout=3000) or ""
+            try:
+                mp.locator("#modalClose").first.click(timeout=1500)
+            except Exception:  # noqa: BLE001
+                pass
+            m = CODE_RE.search(body)
+            return m.group(1) if m else None
+        now = _now()
+        if now - ctx.state.setdefault("mail_reload", now) >= MAIL_RELOAD_S:
+            ctx.state["mail_reload"] = now
+            mp.reload(wait_until="domcontentloaded", timeout=20000)
+    except Exception:  # noqa: BLE001 — письмо ещё не пришло / вкладка перерисовывается: повторим на след. тике
+        pass
+    return None
+
+
 def signup_step(page, ctx: RegCtx) -> str | None:
     """Определяет текущий шаг формы Reddit и делает безопасное автозаполнение. Селекторы взяты из снимков
     реальной регистрации (shadow DOM пробивается селекторами Playwright, привязка к slot/id, не к тексту).
-    Код из письма и капчу вводишь ты. -> имя шага или None."""
-    if _shown(page, CODE_INPUT):
+    Код из письма хук только ПЕЧАТАЕТ в консоль и фокусирует поле — вводишь ты; капчу тоже ты. -> имя шага или None."""
+    code_input = _shown(page, CODE_INPUT)
+    if code_input is not None:
         if not ctx.state.get("code_hint"):
             ctx.state["code_hint"] = True
-            ctx.log(f"[{ctx.account}] введи КОД из письма (вторая вкладка с почтой) и пройди капчу, если появится")
+            ctx.log(f"[{ctx.account}] жду письмо с кодом на {ctx.state.get('email') or 'почту'}…")
+        code = read_mail_code(ctx)
+        if code and code != ctx.state.get("code_printed"):
+            ctx.state["code_printed"] = code
+            ctx.log(f"[{ctx.account}] КОД ИЗ ПИСЬМА: {code}  — введи его в открывшейся вкладке Reddit и нажми Enter")
+            page.bring_to_front()
+            code_input.click()
         return "code"
     name = _shown(page, USERNAME_INPUT)
     if name is not None:

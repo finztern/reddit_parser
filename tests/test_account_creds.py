@@ -199,13 +199,68 @@ def test_step_email_waits_without_mailbox_and_disabled_button(tmp_path, monkeypa
     assert "clicks" not in page.els[rh.EMAIL_SUBMIT]
 
 
-def test_step_code_is_manual(tmp_path, monkeypatch):
+class _Mail:
+    """Вкладка почты: текст списка, текст письма, счётчик перезагрузок."""
+    def __init__(self, lst="Your inbox is waiting", body=""):
+        self.lst, self.body, self.reloads, self.opened = lst, body, 0, 0
+
+    def reload(self, **k):
+        self.reloads += 1
+
+    def locator(self, sel):
+        outer = self
+
+        class L:
+            first = property(lambda s: s)
+
+            def inner_text(s, **k):
+                return outer.lst if sel == "#messageList" else outer.body
+
+            def get_by_text(s, rx):
+                return s
+
+            def click(s, **k):
+                if sel == "#messageList":
+                    outer.opened += 1
+        return L()
+
+
+def test_step_code_prints_and_focuses_never_types(tmp_path, monkeypatch):
     rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
     logs = []
     ctx.log = logs.append
+    mail = _Mail()
+    ctx.state["mail_page"] = mail
+    front = []
     page = _FPage({rh.CODE_INPUT: {"v": ""}, rh.EMAIL_INPUT: {"v": ""}})
+    page.bring_to_front = lambda: front.append(1)
+    assert rh.signup_step(page, ctx) == "code"            # письма ещё нет
+    assert not front and not any("КОД" in m for m in logs)
+    mail.lst = "Reddit  482913 is your Reddit verification code"
     assert rh.signup_step(page, ctx) == "code" and rh.signup_step(page, ctx) == "code"
-    assert page.els[rh.CODE_INPUT]["v"] == "" and len(logs) == 1
+    assert sum("КОД ИЗ ПИСЬМА: 482913" in m for m in logs) == 1 and front == [1]
+    assert page.els[rh.CODE_INPUT]["v"] == "" and page.els[rh.CODE_INPUT]["clicks"] == 1
+    mail.lst = "Reddit  111222 is your Reddit verification code"      # повторная отправка
+    rh.signup_step(page, ctx)
+    assert any("111222" in m for m in logs)
+
+
+def test_read_mail_code_opens_message_when_list_has_no_code(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
+    ctx.state["mail_page"] = _Mail(lst="Reddit  Verify your email", body="Your code: 654321. Order 1234567")
+    assert rh.read_mail_code(ctx) == "654321" and ctx.state["mail_page"].opened == 1
+    assert rh.read_mail_code(rh.RegCtx("a", "u", "p", "x", "y", "c")) is None
+
+
+def test_read_mail_code_reloads_tab_periodically(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch)
+    mail = ctx.state["mail_page"] = _Mail()
+    t = [1000.0]
+    monkeypatch.setattr(rh, "_now", lambda: t[0])
+    assert rh.read_mail_code(ctx) is None and mail.reloads == 0
+    t[0] += rh.MAIL_RELOAD_S + 1
+    rh.read_mail_code(ctx)
+    assert mail.reloads == 1
 
 
 def test_step_username_password(tmp_path, monkeypatch):
@@ -285,6 +340,7 @@ def test_get_mailbox_reads_address_and_password(tmp_path, monkeypatch):
     monkeypatch.setattr(rh, "dump_dir", lambda account: tmp_path / "d" / account)
     mp = _MPage(" abc123@mailgenerator.net ", "Login Email: x Password: s3cret!Z more")
     assert rh.get_mailbox(_mailbox_page(mp), ctx) == "abc123@mailgenerator.net"
+    assert ctx.state["mail_page"] is mp
     saved = json.loads(ac.creds_path("a1", tmp_path).read_text())
     assert saved["email"] == "abc123@mailgenerator.net" and saved["mailbox_password"] == "s3cret!Z"
 
