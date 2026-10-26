@@ -369,3 +369,55 @@ def test_new_page_failure_propagates_to_runner(tmp_path, monkeypatch):
     except RuntimeError:
         raised = True
     assert raised  # исключение поймает HookRunner._call
+
+
+class _EPage(_FPage):
+    """Страница шага почты; get_by_text(...) видит ошибку, если в els есть ключ "text:error"."""
+    def get_by_text(self, rx):
+        return _Loc(self, "text:error")
+
+
+def test_email_send_error_retries_three_times_then_requests_new_identity(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
+    logs = []
+    ctx.log = logs.append
+    t = [100.0]
+    monkeypatch.setattr(rh, "_now", lambda: t[0])
+    page = _EPage({rh.EMAIL_INPUT: {"v": ""}, rh.EMAIL_SUBMIT: {}})
+    assert rh.signup_step(page, ctx) == "email" and page.els[rh.EMAIL_SUBMIT]["clicks"] == 1
+
+    page.els[rh.EMAIL_ERROR_BANNER] = {}                    # Reddit ответил ошибкой отправки кода
+    t[0] += 3
+    rh.signup_step(page, ctx)
+    assert page.els[rh.EMAIL_SUBMIT]["clicks"] == 1         # рано: ответ на ЭТУ попытку ещё не пришёл
+    for expected in (2, 3):
+        t[0] += rh.ERROR_WAIT_S
+        assert rh.signup_step(page, ctx) == "email"
+        assert page.els[rh.EMAIL_SUBMIT]["clicks"] == expected
+        assert not ctx.state.get("replace_identity")
+    t[0] += rh.ERROR_WAIT_S                                  # третья попытка тоже с ошибкой
+    assert rh.signup_step(page, ctx) == "email_failed"
+    assert ctx.state["replace_identity"] and page.els[rh.EMAIL_SUBMIT]["clicks"] == 3
+    t[0] += 100
+    assert rh.signup_step(page, ctx) == "email_failed" and page.els[rh.EMAIL_SUBMIT]["clicks"] == 3
+    assert sum("пробую ещё раз" in m for m in logs) == 2 and any("меняю ноду и профиль" in m for m in logs)
+
+
+def test_email_error_found_by_text_and_no_error_means_no_retry(tmp_path, monkeypatch):
+    rh, ctx = _ctx(tmp_path, monkeypatch, email="x@y.z")
+    t = [100.0]
+    monkeypatch.setattr(rh, "_now", lambda: t[0])
+    page = _EPage({rh.EMAIL_INPUT: {"v": ""}, rh.EMAIL_SUBMIT: {}})
+    rh.signup_step(page, ctx)
+    t[0] += rh.ERROR_WAIT_S + 1                              # ошибки нет — повтор только по таймеру CLICK_RETRY_S
+    rh.signup_step(page, ctx)
+    assert page.els[rh.EMAIL_SUBMIT]["clicks"] == 1 and "email_fails" not in ctx.state
+    page.els["text:error"] = {}                              # ошибка без баннера: нашлась по тексту
+    rh.signup_step(page, ctx)
+    assert ctx.state["email_fails"] == 1 and page.els[rh.EMAIL_SUBMIT]["clicks"] == 2
+
+
+def test_send_error_regex_matches_german_message():
+    import registration_hook as rh
+    assert rh.SEND_ERROR_RE.search("Beim Senden des Verifizierungscodes ist etwas schiefgelaufen.")
+    assert not rh.SEND_ERROR_RE.search("Gib deine E-Mail-Adresse ein")

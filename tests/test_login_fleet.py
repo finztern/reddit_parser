@@ -497,3 +497,91 @@ def test_filter_nodes_report():
         assert json.loads(path.read_text(encoding="utf-8"))["good"] == 12
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
+
+
+class _Stubs:
+    """curl_cffi-заглушка проекта-фикстуры на время in-process вызова (список impersonate-таргетов)."""
+    def __init__(self, tmp):
+        self.path = str(tmp / "stubs")
+
+    def __enter__(self):
+        self.saved = {k: v for k, v in sys.modules.items() if k == "curl_cffi" or k.startswith("curl_cffi.")}
+        for k in self.saved:
+            del sys.modules[k]
+        sys.path.insert(0, self.path)
+
+    def __exit__(self, *a):
+        sys.path.remove(self.path)
+        for k in [k for k in sys.modules if k == "curl_cffi" or k.startswith("curl_cffi.")]:
+            del sys.modules[k]
+        sys.modules.update(self.saved)
+
+
+class _FakeMihomo:
+    def __init__(self):
+        self.selected, self.closed = [], []
+
+    def select(self, group, node):
+        self.selected.append((group, node))
+
+    def close_inbound(self, port):
+        self.closed.append(port)
+
+
+def test_reidentify_swaps_node_and_profile_and_marks_old_bad():
+    import reidentify as ri
+    tmp = _project(trim=True)
+    try:
+        assert _run(tmp, "convert_to_login.py", "--all", "--apply").returncode == 0
+        _write_ok_file(tmp, 36)
+        slot = "account_20"
+        links0 = lf.load_links(lf.Paths(tmp))
+        by0 = {a["name"]: a for a in _load(tmp)[0]}
+        mh, bad, logs = _FakeMihomo(), [], []
+        # план: ничего не пишет и mihomo не трогает
+        with _Stubs(tmp):
+            plan = ri.swap_identity(slot, root=tmp, apply=False, mihomo=mh, mark_bad=lambda *a: bad.append(a),
+                                    out=logs.append)
+        assert plan and not mh.selected and lf.load_links(lf.Paths(tmp)) == links0
+
+        # первый кандидат не отвечает -> следующий; старая нода слота помечается плохой
+        answers = iter([(False, "timeout"), (True, "ip=1.2.3.4 reddit=200")])
+        tried: set[str] = set()
+        with _Stubs(tmp):
+            res = ri.swap_identity(slot, root=tmp, tried=tried, mihomo=mh, precheck=lambda port: next(answers),
+                                   mark_bad=lambda *a: bad.append(a), out=logs.append, sleep=lambda s: None)
+        assert res, logs
+        assert len(mh.selected) == 2 and all(g == f"pg-{slot}" for g, _ in mh.selected)
+        assert mh.selected[-1][1] == res["node"] and len(tried) == 2
+
+        links1 = lf.load_links(lf.Paths(tmp))
+        assert links1[slot] != links0[slot] and {k: v for k, v in links1.items() if k != slot} == \
+            {k: v for k, v in links0.items() if k != slot}
+        accounts, _g, login, _c = _load(tmp)
+        by1 = {a["name"]: a for a in accounts}
+        assert by1[slot]["impersonate"] != by0[slot]["impersonate"]
+        assert by1[slot]["user_agent"] != by0[slot]["user_agent"]
+        assert by1[slot]["proxy_port"] == by0[slot]["proxy_port"] and by1[slot]["locale"] == res["locale"]
+        assert {n: a for n, a in by1.items() if n != slot} == {n: a for n, a in by0.items() if n != slot}
+        assert not lf.validate_fleet(accounts, links1, None, login)
+        keys = [b[0] for b in bad]
+        assert ri.rot.node_key(links0[slot]) in keys and len(bad) == 2      # мёртвый кандидат + старая нода
+        assert list(tmp.glob("vless_accounts.env.bak-reident-*")) and list(tmp.glob("accounts.yaml.bak-reident-*"))
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
+def test_reidentify_without_live_node_changes_nothing():
+    import reidentify as ri
+    tmp = _project(trim=True)
+    try:
+        assert _run(tmp, "convert_to_login.py", "--all", "--apply").returncode == 0
+        _write_ok_file(tmp, 36)
+        before = {p: (tmp / p).read_text(encoding="utf-8") for p in ("vless_accounts.env", "accounts.yaml")}
+        with _Stubs(tmp):
+            res = ri.swap_identity("account_20", root=tmp, mihomo=_FakeMihomo(), precheck=lambda port: (False, "x"),
+                                   mark_bad=lambda *a: None, out=lambda m: None, sleep=lambda s: None)
+        assert res is None
+        assert {p: (tmp / p).read_text(encoding="utf-8") for p in before} == before
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)

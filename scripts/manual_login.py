@@ -235,7 +235,7 @@ def verify_cookies(rows: list[dict], impersonate: str, proxy_url: str, base_url:
 #  main
 # ---------------------------------------------------------------- #
 
-def main() -> int:
+def _main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("account", nargs="?", help="например account_1")
     ap.add_argument("--list", action="store_true", help="показать аккаунты и выйти")
@@ -409,6 +409,8 @@ def main() -> int:
                         return 1
                     if hook:
                         hook.tick(page)
+                        if hook.ctx.state.get("replace_identity"):
+                            raise ReIdentify(name, hook.ctx.state["replace_identity"])
                     ok, info = is_logged_in(page, base_url)
                     if ok:
                         logged_user = info
@@ -501,6 +503,38 @@ def main() -> int:
         print("Воркер подхватит cookies сам (hot-reload, до ~30с). Если он уже остановился из-за "
               "401/403 — нужен `docker compose restart scraper`.")
     return 0
+
+
+class ReIdentify(Exception):
+    """Хук регистрации просит сменить ноду и профиль (Reddit не отправляет код подтверждения)."""
+
+    def __init__(self, account: str, reason: str):
+        super().__init__(reason)
+        self.account, self.reason = account, reason
+
+
+MAX_IDENTITY_SWAPS = 3
+
+
+def main() -> int:
+    """_main + автозамена ноды и профиля: окно закрывается, reidentify.py подбирает живую ноду и новый профиль,
+    сессия стартует заново (ник/пароль берутся прежние из credentials/, почта — новая)."""
+    import reidentify
+    swaps, tried = 0, set()
+    while True:
+        try:
+            return _main()
+        except ReIdentify as e:
+            swaps += 1
+            if swaps > MAX_IDENTITY_SWAPS:
+                print(f"[{e.account}] {e.reason}: {MAX_IDENTITY_SWAPS} замен ноды/профиля не помогли — стоп")
+                return 1
+            print(f"[{e.account}] {e.reason} — меняю ноду и профиль ({swaps}/{MAX_IDENTITY_SWAPS})")
+            if not reidentify.swap_identity(e.account, tried=tried, reason=e.reason):
+                print(f"[{e.account}] не нашлось живой свободной ноды — регистрация остановлена")
+                return 1
+            if "--new-creds" in sys.argv:       # только первый запуск генерирует заново
+                sys.argv.remove("--new-creds")
 
 
 if __name__ == "__main__":

@@ -105,6 +105,13 @@ CODE_INPUT = 'faceplate-text-input[name="code"] input'
 USERNAME_INPUT = "#register-username input"
 PASSWORD_INPUT = "#register-password input"
 USERNAME_SUBMIT = 'auth-flow-modal[slot="register_username_and_password"] button[type="submit"]'
+# Ошибка «Beim Senden des Verifizierungscodes ist etwas schiefgelaufen» после «Продолжить»: баннер внутри
+# модалки шага почты (язык-независимо) либо текст по словам (de/en/ru).
+EMAIL_ERROR_BANNER = 'auth-flow-modal[slot="register_email"] rpl-info-banner'
+SEND_ERROR_RE = re.compile(r"Verifizierungscode|verification code|код подтверждения|schiefgelaufen|went wrong|"
+                           r"что-то пошло не так", re.I)
+EMAIL_MAX_TRIES = 3               # попыток отправить код (первая + повторы), потом смена ноды и профиля
+ERROR_WAIT_S = 6.0                # через сколько секунд после «Продолжить» ошибку считаем ответом на ЭТУ попытку
 AGE_INPUTS = {k: f'faceplate-text-input[name="{k}"] input' for k in ("day", "month", "year")}
 AGE_SUBMIT = "#age-collect-submit-btn"
 AGE_CONFIRM = 'auth-flow-modal[slot="onboarding_age_confirmation"] button[type="submit"]'
@@ -208,6 +215,38 @@ def _click_once(page, ctx: RegCtx, key: str, sel: str) -> bool:
     return True
 
 
+def send_error_visible(page) -> bool:
+    """Reddit не смог отправить код на почту (ошибка под формой e-mail)."""
+    banner = _shown(page, EMAIL_ERROR_BANNER)
+    if banner is not None:
+        return True
+    try:
+        return _visible(page.get_by_text(SEND_ERROR_RE).first)
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def email_step(page, ctx: RegCtx, email_input) -> str:
+    """Почта -> «Продолжить». Если Reddit ответил ошибкой отправки кода — повтор через пару секунд; после
+    EMAIL_MAX_TRIES неудач ставит ctx.state["replace_identity"] (хаб меняет ноду и профиль и начинает заново)."""
+    _fill_empty(email_input, ctx.state["email"])
+    t = _now()
+    last = ctx.state.get("email_click_at")
+    if last is not None and t - last >= ERROR_WAIT_S and send_error_visible(page):
+        ctx.state["email_fails"] = ctx.state.get("email_fails", 0) + 1
+        n = ctx.state["email_fails"]
+        if n >= EMAIL_MAX_TRIES:
+            ctx.state["replace_identity"] = "reddit не отправляет код (ошибка после %d попыток)" % n
+            ctx.log(f"[{ctx.account}] ошибка отправки кода {n} раз подряд — меняю ноду и профиль")
+            return "email_failed"
+        ctx.log(f"[{ctx.account}] ошибка отправки кода (попытка {n} из {EMAIL_MAX_TRIES}) — пробую ещё раз")
+        ctx.state.setdefault("clicked", {}).pop("email", None)       # разрешить немедленный повтор
+        ctx.state["email_click_at"] = None
+    if _click_once(page, ctx, "email", EMAIL_SUBMIT):
+        ctx.state["email_click_at"] = _now()
+    return "email"
+
+
 def make_birthdate(rng=None) -> dict:
     """Случайная взрослая дата рождения (возраст 22–38, день ≤ 28 — подходит любому месяцу)."""
     import secrets
@@ -253,6 +292,8 @@ def signup_step(page, ctx: RegCtx) -> str | None:
     """Определяет текущий шаг формы Reddit и делает безопасное автозаполнение. Селекторы взяты из снимков
     реальной регистрации (shadow DOM пробивается селекторами Playwright, привязка к slot/id, не к тексту).
     Код из письма хук только ПЕЧАТАЕТ в консоль и фокусирует поле — вводишь ты; капчу тоже ты. -> имя шага или None."""
+    if ctx.state.get("replace_identity"):
+        return "email_failed"
     code_input = _shown(page, CODE_INPUT)
     if code_input is not None:
         if not ctx.state.get("code_hint"):
@@ -285,9 +326,7 @@ def signup_step(page, ctx: RegCtx) -> str | None:
     if email is not None:
         if not ctx.state.get("email"):
             return "email_wait"
-        _fill_empty(email, ctx.state["email"])
-        _click_once(page, ctx, "email", EMAIL_SUBMIT)
-        return "email"
+        return email_step(page, ctx, email)
     return None
 
 

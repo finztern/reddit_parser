@@ -51,6 +51,7 @@ scripts/
   filter_nodes.py           Проверка пула и отчёт годных нод
   add_*_slots.py            Планирование/добавление guest или login слотов
   convert_to_login.py       План и миграция guest -> login
+  reidentify.py             Замена ноды и профиля слота (регистрация не идёт)
   rotation_daemon.py        Обработка node/identity заявок worker-ов
   profile.py                Создание, проверка и миграция fingerprint профилей
   dashboard.py              TUI для метрик и runtime pause/login actions

@@ -573,6 +573,13 @@ class Cancelled(Exception):
     pass
 
 
+class _ReIdentify(Exception):
+    """Хук регистрации просит сменить ноду и профиль (Reddit не отправляет код подтверждения)."""
+
+
+MAX_IDENTITY_SWAPS = 3
+
+
 class _Finished(Exception):
     """Выход из _browse при таймауте (статус TIMEOUT уже выставлен)."""
 
@@ -649,7 +656,9 @@ class LoginSession:
             self.desktop.stop()
 
     # --- основной сценарий ---
-    def _run(self) -> None:
+    def _prepare(self) -> tuple[dict, str, str]:
+        """Профиль слота, impersonate, proxy_url (+ хук регистрации). Вызывается заново после замены
+        ноды и профиля (reidentify): accounts.yaml/refresh_cookies.yaml перечитываются."""
         ctx, opt, name = self.ctx, self.ctx.options, self.account
         acc = ctx.accounts[name]
         port, impersonate, user_agent = acc.get("proxy_port"), acc.get("impersonate"), acc.get("user_agent")
@@ -659,12 +668,38 @@ class LoginSession:
         impersonate = prof.get("impersonate") or impersonate
         proxy_url = f"http://{PROXY_HOST}:{port}"
         if opt.register:
-            self.creds, reused = ac.prepare(name, proxy_url, impersonate, new=opt.new_creds)
+            self.creds, reused = ac.prepare(name, proxy_url, impersonate, new=opt.new_creds and not self._swaps)
             self._hook = rh.HookRunner(rh.RegCtx(name, self.creds["username"], self.creds["password"],
                                                  ctx.login_cfg.get("reddit_base_url") or "https://www.reddit.com",
                                                  proxy_url, impersonate, log=say))
             say(f"[{name}] регистрация: ник {self.creds['username']}   пароль {self.creds['password']}   "
                 f"({'прежние данные' if reused else 'сгенерировано'}; credentials/{name}.json, 0600)")
+        return prof, impersonate, proxy_url
+
+    def _swap_identity(self, reason: str) -> None:
+        """Reddit не отправляет код с этой ноды: новая нода + новый профиль (scripts/reidentify.py)."""
+        import reidentify
+        ctx, name = self.ctx, self.account
+        self._swaps += 1
+        if self._swaps > MAX_IDENTITY_SWAPS:
+            raise RuntimeError(f"{reason}: {MAX_IDENTITY_SWAPS} замен ноды/профиля не помогли")
+        self.set(WAITING_LOGIN, f"{reason} — меняю ноду и профиль ({self._swaps}/{MAX_IDENTITY_SWAPS})")
+        say(f"[{name}] {reason} — меняю ноду и профиль ({self._swaps}/{MAX_IDENTITY_SWAPS})")
+        res = reidentify.swap_identity(name, tried=self._tried_nodes, out=say, reason=reason)
+        if not res:
+            raise RuntimeError("не нашлось живой свободной ноды для замены — регистрация остановлена")
+        accounts_list = load_accounts()
+        ctx.accounts[name] = next(a for a in accounts_list if a["name"] == name)
+        ctx.login_cfg.clear()
+        ctx.login_cfg.update(ml.load_yaml(ml.LOGIN_CFG_PATH))
+        say(f"[{name}] новая нода {res['node']} ({res['country']}), профиль {res['impersonate']}, locale {res['locale']}")
+
+    # --- основной сценарий ---
+    def _run(self) -> None:
+        ctx, opt, name = self.ctx, self.ctx.options, self.account
+        self._swaps, self._tried_nodes = 0, set()
+        prof, impersonate, proxy_url = self._prepare()
+        acc = ctx.accounts[name]
         base_url = ctx.login_cfg.get("reddit_base_url") or ctx.guest_cfg.get("reddit_base_url") or "https://www.reddit.com"
         cookie_file = BASE_DIR / acc.get("cookie_file", f"cookies/{name}.json")
         state_path = BASE_DIR / "storage_state" / f"{name}.json"
@@ -689,7 +724,14 @@ class LoginSession:
         self._check_cancel()
         threading.Thread(target=self._resolve_exit_ip, args=(proxy_url,), daemon=True).start()
 
-        new_state = self._browse(prof, proxy_url, base_url, storage_state, deadline)
+        while True:
+            try:
+                new_state = self._browse(prof, proxy_url, base_url, storage_state, deadline)
+                break
+            except _ReIdentify as e:
+                self._swap_identity(str(e))
+                prof, impersonate, proxy_url = self._prepare()
+                storage_state = {"cookies": [], "origins": []}
         self._check_cancel()
         self.set(VERIFYING)
         self._save(name, acc, new_state, impersonate, proxy_url, base_url, cookie_file, state_path)
@@ -772,6 +814,8 @@ class LoginSession:
                         continue
                     if self._hook:
                         self._hook.tick(page)
+                        if self._hook.ctx.state.get("replace_identity"):
+                            raise _ReIdentify(self._hook.ctx.state["replace_identity"])
                     ok, info = ml.is_logged_in(page, base_url)
                     if ok:
                         self.user = info
