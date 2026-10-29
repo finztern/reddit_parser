@@ -6,5 +6,5 @@ from datetime import datetime, timezone
 # ---------------------------------------------------------------- #
 
 def iso_utc(ts: float) -> str:
-    dt = datetime.fromtimestamp(ts, tz=timezone.utc)
-    return dt.strftime("%Y-%m-%dT%H:%M:%S.") + f"{dt.microsecond:06d}Z"
+    """ISO 8601, UTC, секунды без долей: 2026-06-28T01:35:08Z (дробная часть ts отбрасывается)."""
+    return datetime.fromtimestamp(ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

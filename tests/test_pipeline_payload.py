@@ -37,7 +37,7 @@ def test_build_payload_maps_comment_metadata(parent_id, expected):
 
     assert result["content"] == "hello"
     assert result["external_id"] == "t1_fullname"
-    assert result["created_at"] == "2023-11-14T22:13:20.000000Z"
+    assert result["created_at"] == "2023-11-14T22:13:20Z"
     assert result["url"] == "https://www.reddit.com/r/python/comments/post/comment"
     assert result["author"] == result["username"] == "writer"
     assert result["external_parent_id"] == expected
@@ -153,3 +153,10 @@ def test_send_batch_with_empty_input_does_not_make_request():
     session = Session()
     assert run(send_batch_to_store(session, "endpoint", [], "acct", 10)) == []
     assert session.calls == []
+
+
+def test_iso_utc_is_iso8601_seconds_utc():
+    from scraper.utils import iso_utc
+    assert iso_utc(1_700_000_000) == "2023-11-14T22:13:20Z"
+    assert iso_utc(1_700_000_000.987654) == "2023-11-14T22:13:20Z"      # доли секунды отбрасываются
+    assert iso_utc(0) == "1970-01-01T00:00:00Z"
