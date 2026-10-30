@@ -92,3 +92,18 @@ def test_summary_is_compact_like_the_schema_sample():
                        "subreddit": "photography", "score": 1, "body": "x", "parent_id": "t3_1uhjuvy"})
     assert c["summary"] == ('{"score":"1","upvote_ratio":"","num_comments":"","communityName":"r/photography",'
                             '"data_type":"comment"}')
+
+
+def test_reddit_preview_links_are_appended_without_duplicates():
+    prev = {"images": [{"source": {"url": "https://external-preview.redd.it/a.jpg?auto=webp&amp;s=sig", "width": 1},
+                        "resolutions": [{"url": "https://external-preview.redd.it/a.jpg?width=108&amp;s=small"}],
+                        "variants": {"gif": {"source": {"url": "https://preview.redd.it/a.gif?s=g"}},
+                                     "mp4": {"source": {"url": "https://preview.redd.it/a.mp4?s=m"}}}}],
+            "enabled": True}
+    p = _post(url_overridden_by_dest="https://news.example.com/story", preview=prev)
+    lines = p["content"].split("\n\n", 1)[1].split("\n")
+    assert lines == ["https://news.example.com/story", "https://external-preview.redd.it/a.jpg?auto=webp&s=sig",
+                     "https://preview.redd.it/a.gif?s=g", "https://preview.redd.it/a.mp4?s=m"]
+    # ссылка уже есть в тексте поста — второй раз не добавляется
+    p2 = _post(is_self=True, selftext="see https://preview.redd.it/a.gif?s=g", preview=prev)
+    assert p2["content"].count("https://preview.redd.it/a.gif?s=g") == 1

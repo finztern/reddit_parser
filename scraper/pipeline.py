@@ -55,7 +55,7 @@ def comment_links(data: dict) -> list[str]:
 
 def post_links(data: dict) -> list[str]:
     """Все ссылки поста, не входящие в selftext: целевая ссылка/картинка/видео (у не-self поста), галерея,
-    картинки внутри selftext, кроспост. Требование заказчика: все ссылки обязаны попасть в content."""
+    картинки внутри selftext, кроспост, превью Reddit. Требование заказчика: все ссылки обязаны попасть в content."""
     links: list[str] = []
     if not data.get("is_self"):
         _add_link(links, data.get("url_overridden_by_dest") or data.get("url"))
@@ -69,6 +69,12 @@ def post_links(data: dict) -> list[str]:
         _add_link(links, ((data.get(key) or {}).get("reddit_video") or {}).get("fallback_url"))
     for cp in data.get("crosspost_parent_list") or []:
         _add_link(links, cp.get("url_overridden_by_dest") or cp.get("url"))
+    # превью Reddit (картинка внешней статьи/ссылки, превью видео и гифок): в тексте поста их нет, а заказчик
+    # требует ВСЕ ссылки в content. Исходный размер + gif/mp4-варианты; уменьшенные resolutions не берём.
+    for img in (data.get("preview") or {}).get("images") or []:
+        _add_link(links, (img.get("source") or {}).get("url"))
+        for var in (img.get("variants") or {}).values():
+            _add_link(links, (var.get("source") or {}).get("url"))
     return links
 
 
