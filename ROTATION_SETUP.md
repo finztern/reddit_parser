@@ -305,6 +305,24 @@ python scripts/refresh_cookies.py --workers 8 --stagger 20
 ```
 
 
+## Начать заново: убрать все слоты и завести по одному аккаунту на ноду (`reset_slots.py`)
+
+```bash
+docker compose stop scraper && sudo systemctl stop rotation-daemon
+venv/bin/python3 scripts/reset_slots.py                    # план
+venv/bin/python3 scripts/reset_slots.py --apply            # бэкапы *.bak-reset-*, куки/сессии -> state/reset-<время>/
+venv/bin/python3 scripts/sync_subscription.py --apply      # свежий пул нод (если есть подписка)
+venv/bin/python3 scripts/filter_nodes.py --write           # годные ноды -> all_nodes.reddit_ok.txt
+venv/bin/python3 scripts/add_login_slots.py --spare 0      # план: слотов = годных нод, без запаса
+venv/bin/python3 scripts/add_login_slots.py --spare 0 --apply
+venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo
+```
+
+`reset_slots.py` убирает записи из `accounts.yaml` (в тот же inode), `vless_accounts.env`, `login_accounts`/`account_geo`,
+`guest_accounts`, `rotation.slots`, реестр `state/identities.json` и per-account каталоги `state/`; `cookies/account_*.json`
+и `storage_state/account_*.json` переносятся в архив (новый `account_1` не должен подхватить чужие куки). Пул нод и список
+плохих нод (`rotation_state.json`) не трогаются. Новые слоты создаются с `enabled: false` — входи через `login_hub.py`.
+
 ## Подписка на VLESS-ноды: суточная синхронизация (`sync_subscription.py`)
 
 Подписка — текстовый список `vless://`-ссылок. Узел определяется **меткой** — первым сегментом пути
