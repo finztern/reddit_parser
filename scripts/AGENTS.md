@@ -33,7 +33,7 @@ relevant to the task.
   `refresh_guest_cookies.py`; tests `test_human_session.py`,
   `test_login_hub.py`, `test_login_fleet.py`.
 - Nodes/rotation: `filter_nodes.py`, `rotation_daemon.py`,
-  `generate_mihomo_config.py`; tests `test_filter_nodes.py`,
+  `generate_mihomo_config.py`, `sync_subscription.py`; tests `test_filter_nodes.py`, `test_sync_subscription.py`,
   `test_add_guest_slots.py`, `test_repo_config.py`.
 - Account/profile migration: `convert_to_login.py`, `add_login_slots.py`, `reidentify.py`, `fetch_free_proxies.py`,
   `add_guest_slots.py`, `attach_proxies.py`, `profile.py`, `rotate_fingerprints.py`; tests

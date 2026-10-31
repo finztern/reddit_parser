@@ -1,0 +1,15 @@
+# scripts/systemd/sync-subscription.timer
+#
+# Раз в сутки. OnUnitActiveSec считается от последнего ЗАПУСКА юнита.
+# Идёт раньше filter-nodes.timer (тот перепроверяет уже обновлённый пул).
+
+[Unit]
+Description=Reddit scraper - суточная синхронизация VLESS-подписки
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=24h
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

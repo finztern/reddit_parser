@@ -84,7 +84,7 @@ DEFAULT_OPTS = {
     "no_mobile": False,
 }
 
-# код страны из имени ноды ("us74.trust.zone" -> us) -> (locale, timezone)
+# код страны из имени ноды ("us74.example" -> us) -> (locale, timezone)
 COUNTRY_GEO = {
     "us": ("en-US", "America/New_York"), "ca": ("en-CA", "America/Toronto"),
     "uk": ("en-GB", "Europe/London"), "gb": ("en-GB", "Europe/London"),

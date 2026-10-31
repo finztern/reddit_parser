@@ -18,7 +18,7 @@ def test_country_and_node_normalization():
     for value in (None, "", "U", "USA", "1A", 123):
         assert geoip.normalize_country(value) is None
 
-    assert geoip.country_from_node_name("us74.trust.zone") == "US"
+    assert geoip.country_from_node_name("us74.example") == "US"
     assert geoip.country_from_node_name(" uk3") == "GB"
     assert geoip.country_from_node_name("bad") is None
     assert geoip.country_from_node_name(None) is None

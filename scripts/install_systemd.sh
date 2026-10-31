@@ -56,7 +56,7 @@ for bin in flock xvfb-run; do
   command -v "$bin" >/dev/null 2>&1 || echo "ВНИМАНИЕ: нет '$bin' (apt install util-linux xvfb)" >&2
 done
 
-UNITS=(rotation-daemon.service filter-nodes.service filter-nodes.timer backup-sessions.service backup-sessions.timer)
+UNITS=(rotation-daemon.service filter-nodes.service filter-nodes.timer backup-sessions.service backup-sessions.timer sync-subscription.service sync-subscription.timer)
 if [[ $GUEST -eq 1 ]]; then
   UNITS+=(refresh-guest-cookies.service refresh-guest-cookies.timer)
 fi
@@ -93,12 +93,12 @@ if [[ $GUEST -eq 0 ]]; then
   fi
 fi
 if [[ $ENABLE -eq 1 ]]; then
-  TO_ENABLE=(backup-sessions.timer filter-nodes.timer rotation-daemon.service)
+  TO_ENABLE=(backup-sessions.timer filter-nodes.timer sync-subscription.timer rotation-daemon.service)
   [[ $GUEST -eq 1 ]] && TO_ENABLE+=(refresh-guest-cookies.timer)
   [[ $LOGIN -eq 1 ]] && TO_ENABLE+=(refresh-cookies.timer)
   systemctl enable --now "${TO_ENABLE[@]}"
   echo "Включено: ${TO_ENABLE[*]}"
 else
   echo "Юниты установлены, но не включены. Включить:"
-  echo "  sudo systemctl enable --now backup-sessions.timer filter-nodes.timer rotation-daemon.service$([[ $GUEST -eq 1 ]] && echo ' refresh-guest-cookies.timer')$([[ $LOGIN -eq 1 ]] && echo ' refresh-cookies.timer')"
+  echo "  sudo systemctl enable --now backup-sessions.timer filter-nodes.timer sync-subscription.timer rotation-daemon.service$([[ $GUEST -eq 1 ]] && echo ' refresh-guest-cookies.timer')$([[ $LOGIN -eq 1 ]] && echo ' refresh-cookies.timer')"
 fi

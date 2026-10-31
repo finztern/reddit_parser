@@ -1,0 +1,29 @@
+# Шаблон юнита: суточная синхронизация VLESS-подписки (scripts/sync_subscription.py --apply).
+# Обновляет ссылки аккаунтов и пул all_nodes.txt; при изменениях пересобирает mihomo_config.yaml
+# и перезапускает mihomo (docker compose restart mihomo).
+# Ссылка на подписку — в файле subscription.url (корень проекта, вне git) или в NODE_SUBSCRIPTION_URL;
+# пока файла нет, юнит просто не запускается (ConditionPathExists).
+#
+# НЕ копируй руками: @USER@, @GROUP@ и @ROOT@ подставляет установщик
+#     scripts/install_systemd.sh     (см. README, раздел "systemd")
+#
+# Пользователь должен иметь доступ к docker (docker compose restart mihomo).
+
+[Unit]
+Description=Reddit scraper - синхронизация VLESS-подписки (закреплённые ноды)
+After=network-online.target docker.service
+Wants=network-online.target
+ConditionPathExists=@ROOT@/subscription.url
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@ROOT@
+Environment=PYTHONUNBUFFERED=1
+Nice=10
+ExecStart=@ROOT@/venv/bin/python3 scripts/sync_subscription.py --apply
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

@@ -78,7 +78,7 @@ COUNTRY_GEO: dict[str, tuple[str, str]] = {
     "CO": ("es-CO", "America/Bogota"), "PE": ("es-PE", "America/Lima"),
 }
 
-# Как страну называют в именах нод (us74.trust.zone, uk3, ...) -> ISO alpha-2
+# Как страну называют в именах нод (us74.example, uk3, ...) -> ISO alpha-2
 NODE_CODE_ALIASES = {"UK": "GB"}
 
 
@@ -92,7 +92,7 @@ def normalize_country(code: str | None) -> str | None:
 
 
 def country_from_node_name(node_name: str | None) -> str | None:
-    """'us74.trust.zone' -> 'US'; 'rs1' -> 'RS'. Используется как запасной вариант,
+    """'us74.example' -> 'US'; 'rs1' -> 'RS'. Используется как запасной вариант,
     основным источником всегда остаётся реальный выходной IP."""
     import re
     m = re.match(r"([a-zA-Z]{2})\d", (node_name or "").strip())

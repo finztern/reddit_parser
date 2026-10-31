@@ -50,6 +50,7 @@ scripts/
   human_session.py          Read-only browser maintenance
   filter_nodes.py           Проверка пула и отчёт годных нод
   fetch_free_proxies.py     Бесплатные прокси (ProxyScrape): скачать, проверить, добавить в пул
+  sync_subscription.py      Суточная синхронизация VLESS-подписки: закреплённые за аккаунтами ноды
   add_*_slots.py            Планирование/добавление guest или login слотов
   convert_to_login.py       План и миграция guest -> login
   reidentify.py             Замена ноды и профиля слота (регистрация не идёт)
