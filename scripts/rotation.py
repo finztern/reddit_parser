@@ -209,10 +209,19 @@ def proxies_path(nodes_file: Path, proxies_file: str | None = None) -> Path:
     return pf if pf.is_absolute() else nodes_file.with_name(pf.name)
 
 
+FREE_PROXIES_FILE = "all_proxys.free.txt"   # бесплатные прокси: пишет scripts/fetch_free_proxies.py --apply
+
+
+def free_proxies_path(nodes_file: Path) -> Path:
+    """Файл бесплатных прокси рядом с пулом VLESS (его целиком перезаписывает fetch_free_proxies.py)."""
+    return nodes_file.with_name(FREE_PROXIES_FILE)
+
+
 def load_pools(nodes_file: Path, proxies_file: str | None = None) -> list[Node]:
-    """Узлы ВСЕХ источников: пул VLESS (nodes_file) + пул прокси; дубли по ключу отбрасываются."""
+    """Узлы ВСЕХ источников: пул VLESS (nodes_file) + пул прокси + бесплатные прокси (если файл есть);
+    дубли по ключу отбрасываются."""
     out, seen = [], set()
-    for path in (nodes_file, proxies_path(nodes_file, proxies_file)):
+    for path in (nodes_file, proxies_path(nodes_file, proxies_file), free_proxies_path(nodes_file)):
         for n in load_pool(path):
             if n.key not in seen:
                 seen.add(n.key)
@@ -221,7 +230,8 @@ def load_pools(nodes_file: Path, proxies_file: str | None = None) -> list[Node]:
 
 
 def pools_exist(nodes_file: Path, proxies_file: str | None = None) -> bool:
-    return nodes_file.exists() or proxies_path(nodes_file, proxies_file).exists()
+    return (nodes_file.exists() or proxies_path(nodes_file, proxies_file).exists()
+            or free_proxies_path(nodes_file).exists())
 
 
 def active_sources(root: Path | None = None) -> list[str]:

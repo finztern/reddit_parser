@@ -303,3 +303,28 @@ python scripts/manual_login.py account_60 --register --new-creds
 ```bash
 python scripts/refresh_cookies.py --workers 8 --stagger 20
 ```
+
+
+## Бесплатные прокси (ProxyScrape)
+
+`scripts/fetch_free_proxies.py` скачивает список `protocol://ip:port` (по умолчанию ProxyScrape v4,
+`proxy_format=protocolipport`), проверяет доступность и пишет лучшие в `all_proxys.free.txt` рядом с
+`all_nodes.txt`. Файл входит в общий пул (`rotation.load_pools`): его видят `generate_mihomo_config.py`,
+`filter_nodes.py`, `add_login_slots.py` и демон ротации как источник «proxy» (имена `free-<ip>-<порт>`).
+
+- Протоколы: `http`, `https` (как HTTP-прокси) и `socks5`; `socks4` пропускается (mihomo не умеет исходящий socks4).
+- Проверка (напрямую, 200 потоков, таймаут 8 с, сертификаты проверяются): туннель до
+  `cloudflare.com/cdn-cgi/trace`, затем `https://www.reddit.com/` — ждём 200, как в `filter_nodes.py`
+  (`--lenient` — любой ответ < 500). Остаются `--max` (300) самых быстрых: каждый узел попадает во ВСЕ группы mihomo.
+- Без `--apply` — только отчёт; пустой результат существующий файл не затирает.
+
+```bash
+venv/bin/python3 scripts/fetch_free_proxies.py                 # отчёт
+venv/bin/python3 scripts/fetch_free_proxies.py --apply         # запись all_proxys.free.txt
+venv/bin/python3 scripts/generate_mihomo_config.py && docker compose restart mihomo
+venv/bin/python3 scripts/filter_nodes.py --write               # финальная проверка через mihomo
+```
+
+Убрать бесплатные прокси из пула: удалить `all_proxys.free.txt` и перегенерировать конфиг mihomo.
+Бесплатные прокси живут часы — обновляй список чаще. Не ставь на них логин-аккаунты с ценными сессиями:
+`add_login_slots.py` выдаёт слотам любые годные узлы источника «proxy», включая эти.

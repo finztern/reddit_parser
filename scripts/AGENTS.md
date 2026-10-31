@@ -35,9 +35,10 @@ relevant to the task.
 - Nodes/rotation: `filter_nodes.py`, `rotation_daemon.py`,
   `generate_mihomo_config.py`; tests `test_filter_nodes.py`,
   `test_add_guest_slots.py`, `test_repo_config.py`.
-- Account/profile migration: `convert_to_login.py`, `add_login_slots.py`, `reidentify.py`,
+- Account/profile migration: `convert_to_login.py`, `add_login_slots.py`, `reidentify.py`, `fetch_free_proxies.py`,
   `add_guest_slots.py`, `attach_proxies.py`, `profile.py`, `rotate_fingerprints.py`; tests
-  `test_add_guest_slots.py`, `test_attach_proxies.py`, `test_profile_gen.py`, `test_repo_config.py`.
+  `test_add_guest_slots.py`, `test_attach_proxies.py`, `test_free_proxies.py`, `test_profile_gen.py`,
+  `test_repo_config.py`.
 - Metrics/operator UI: `dashboard.py`; tests `test_dashboard.py`,
   `test_metrics.py`.
 - Backups/recovery: `backup_sessions.sh`, `restore_sessions.sh`; tests
